@@ -1,3 +1,4 @@
+import AudioToolbox
 import SwiftUI
 import UIKit
 
@@ -33,8 +34,12 @@ final class KeyboardViewController: UIInputViewController {
     private static let languageKey = "sona.keyboard.language"
     private let state = KeyboardState()
     private let typing = TypingModel()
+    private let emoji = EmojiModel()
     private var corrector: TypingCorrector?
     private var session = TypingSession(corrector: nil)
+    /// How many times Reset in the app had run when the learning was read, so a reset made
+    /// while the keyboard was open is not undone by saving what it had before.
+    private var learningResets = 0
     private var minimumHeight: NSLayoutConstraint?
     private var signal: KeyboardSignal?
     private var ticker: Task<Void, Never>?
@@ -46,6 +51,12 @@ final class KeyboardViewController: UIInputViewController {
     private var ownEditInFlight = false
     private var editedField: UUID?
     private let haptic = UIImpactFeedbackGenerator(style: .light)
+    private var feel = KeyboardFeelPreferences(defaults: .standard)
+    /// Suggestions wait for the run loop after a key, so the key's text goes out first.
+    private var suggesting: Task<Void, Never>?
+    /// The strip's spelling guesses, worked out once typing pauses.
+    private var guessing: Task<Void, Never>?
+    private var lastKeyAt = Date.distantPast
     #if DEBUG
     private let frames = FrameMeter()
     private let appearFrames = FrameMeter()
@@ -53,11 +64,10 @@ final class KeyboardViewController: UIInputViewController {
     private var visible = false
     private var requestedAt: Date?
     private var requestedID: UUID?
-    private var wantedHeight: CGFloat { traitCollection.verticalSizeClass == .compact ? 200 : 280 }
-
-    /// The system plays its key click only for an input view that asks for it.
-    override func loadView() {
-        view = ClickingInputView(frame: .zero, inputViewStyle: .keyboard)
+    /// The top bar, then the letter layout's rows at the system keyboard's row height.
+    private var wantedHeight: CGFloat {
+        let compact = traitCollection.verticalSizeClass == .compact
+        return KeyboardView.barHeight + CGFloat(typing.rowCount) * (compact ? 40 : 54) + 4
     }
 
     override func viewDidLoad() {
@@ -69,6 +79,11 @@ final class KeyboardViewController: UIInputViewController {
         typing.press = { [weak self] key in self?.press(key) }
         typing.choose = { [weak self] word in self?.choose(word) }
         typing.swipe = { [weak self] path, grid in self?.swipe(path, on: grid) }
+        typing.moveCursor = { [weak self] offset in self?.moveCursor(by: offset) ?? 0 }
+        typing.deleteWord = { [weak self] in self?.deleteWord() }
+        typing.restore = { [weak self] text in self?.restore(text) }
+        typing.touched = { [weak self] key in self?.feedback(for: key) }
+        emoji.insert = { [weak self] glyph in self?.insertEmoji(glyph) }
         requestSupplementaryLexicon { [weak self] lexicon in
             let entries = lexicon.entries.map { (shortcut: $0.userInput, text: $0.documentText) }
             Task { @MainActor in
@@ -79,6 +94,7 @@ final class KeyboardViewController: UIInputViewController {
             state: state,
             typing: typing,
             prepare: { [weak self] in self?.prepareMicrophone() },
+            emoji: emoji,
             microphone: { [weak self] in self?.start() },
             stop: { [weak self] in self?.finish() },
             insert: { [weak self] in self?.insertDraft() },
@@ -111,8 +127,27 @@ final class KeyboardViewController: UIInputViewController {
         let languages = KeyboardLanguages.shared().enabled
         typing.showsLanguageKey = languages.count > 1
         if !languages.contains(typing.language) { setLanguage(languages[0]) }
-        if hasFullAccess { loadVocabulary() }
+        feel = hasFullAccess ? KeyboardFeelPreferences.shared() : KeyboardFeelPreferences(defaults: .standard)
+        typing.numberRow = feel.numberRow
+        haptic.prepare()
+        if hasFullAccess {
+            loadVocabulary()
+            loadLearning()
+        }
+        session.hostChanged(field: documentID, text: fieldText)
         refreshTyping(startingField: true)
+        view.setNeedsLayout()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        typing.emojiQuery = nil
+        guard hasFullAccess else { return }
+        do {
+            if try !KeyboardLearningStore.shared().save(session.learning, readAt: learningResets) {
+                session.replaceLearning(KeyboardLearning())
+            }
+        } catch { state.notice = error.localizedDescription }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -160,6 +195,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
+        echo.hostNoticed()
         hostChanged()
         reload()
         refreshTyping(startingField: false)
@@ -172,13 +208,19 @@ final class KeyboardViewController: UIInputViewController {
 
     override func selectionDidChange(_ textInput: (any UITextInput)?) {
         super.selectionDidChange(textInput)
+        echo.hostNoticed()
         hostChanged()
     }
 
     /// A report that arrives while the keyboard's own edit is still going through is that
-    /// edit; any other change, or another field, was not the keyboard's doing.
+    /// edit. Text the keyboard did not write, or another field, empties the strip until it
+    /// is worked out again for the field as it is now; a cursor move alone does not.
     private func hostChanged() {
-        echo.hostReported(before: textBefore, after: textAfter, ownEdit: ownEditInFlight && documentID == editedField)
+        let own = ownEditInFlight && documentID == editedField
+        echo.hostReported(before: textBefore, after: textAfter, ownEdit: own)
+        guard !own, session.hostChanged(field: documentID, text: fieldText) else { return }
+        typing.suggestions = nil
+        scheduleSuggestions()
     }
 
     private var textBefore: String { textDocumentProxy.documentContextBeforeInput ?? "" }
@@ -186,6 +228,8 @@ final class KeyboardViewController: UIInputViewController {
     /// The text a word dropped in whole is joined to.
     private var joiningBefore: String { echo.joining(before: textBefore, after: textAfter) }
     private var hostBehind: Bool { echo.behind(before: textBefore, after: textAfter) }
+    /// The text around the cursor as the keyboard's last edit left it.
+    private var fieldText: String { joiningBefore + textAfter }
     /// UIKit declares this nonnull, yet some fields hand over nil, and Swift's bridge to a
     /// non-optional UUID traps on it. The same getter, declared optional, keeps nil as nil.
     private var documentID: UUID? {
@@ -208,19 +252,53 @@ final class KeyboardViewController: UIInputViewController {
         return stored.flatMap { enabled.contains($0) ? $0 : nil } ?? enabled[0]
     }
 
-    /// Letters, spelling and the language dictation listens in all follow the typing language.
+    /// Letters, spelling, next words and the language dictation listens in all follow the
+    /// typing language. Emoji found by word need English words. The next-word table and the
+    /// common words come in a moment later, read off the main thread the first time.
     private func setLanguage(_ language: TypingLanguage) {
         typing.language = language
-        corrector = TypingCorrector(language: language.rawValue)
-        session = TypingSession(corrector: corrector, lexicon: session.lexicon)
+        let corrector = TypingCorrector(language: language.rawValue)
+        self.corrector = corrector
+        let catalog = language == .english ? EmojiCatalog.shared : nil
+        session = TypingSession(
+            corrector: corrector, lexicon: session.lexicon, learning: session.learning,
+            emoji: { catalog?.emoji(for: $0) }
+        )
+        session.hostChanged(field: documentID, text: fieldText)
+        Task { [weak self] in
+            async let table = NextWords.table(for: language)
+            async let common = CommonWords.list(for: language)
+            let (loadedTable, loadedCommon) = await (table, common)
+            corrector?.common = loadedCommon
+            guard let self, typing.language == language else { return }
+            session.predictor = loadedTable
+            refreshSuggestions()
+            /* Apple's checker loads its dictionary on its first call, which would otherwise
+             * be the first space: 4 to 23 ms in a fresh keyboard on the simulator. So it is
+             * asked once no key has come for a second, when no finger is on a key (touch
+             * tracking runs the loop outside the default mode). */
+            repeat {
+                try? await Task.sleep(for: .milliseconds(250))
+            } while Date().timeIntervalSince(lastKeyAt) < 1
+            RunLoop.main.perform(inModes: [.default]) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let corrector, self?.corrector === corrector else { return }
+                    corrector.warmUp()
+                }
+            }
+        }
         primaryLanguage = language.rawValue
         state.startURL = DictationLink.keyboardURL(documentID: documentID, language: language)
         UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey)
+        refreshShift()
+        view.setNeedsLayout()
     }
 
     private func press(_ key: Key) {
+        typing.hasTyped = true
         state.notice = nil
         state.seenMessage = state.session.message
+        if typing.emojiQuery != nil, search(key) { return }
         switch key {
         case let .character(text):
             let character = typing.face(of: text)
@@ -232,6 +310,8 @@ final class KeyboardViewController: UIInputViewController {
                 apply(session.type(character))
             }
             if character == "'" { typing.layer = .letters }
+        case .domain:
+            apply(session.type(TypingModel.domains[0]))
         case .space, .newLine:
             let separator = key == .space ? " " : "\n"
             apply(session.end(
@@ -252,14 +332,42 @@ final class KeyboardViewController: UIInputViewController {
             advanceToNextInputMode()
             return
         }
+        afterKey()
+    }
+
+    private func afterKey() {
+        lastKeyAt = Date()
         refreshShift()
-        refreshSuggestions()
+        scheduleSuggestions()
+    }
+
+    /// Keys while the emoji search is open type into the search; return or ABC closes it.
+    private func search(_ key: Key) -> Bool {
+        guard let query = typing.emojiQuery else { return false }
+        switch key {
+        case let .character(text): typing.emojiQuery = query + text.lowercased()
+        case .space: typing.emojiQuery = query + " "
+        case .delete: typing.emojiQuery = String(query.dropLast())
+        case .newLine: typing.emojiQuery = nil; typing.layer = .emoji
+        case let .layer(layer): typing.emojiQuery = nil; typing.layer = layer
+        case .shift: toggleShift()
+        default: return false
+        }
+        return true
     }
 
     private func choose(_ word: String) {
+        typing.hasTyped = true
+        if EmojiCatalog.shared?.entry(for: word) != nil { emoji.memory.used(word) }
         apply(session.choose(word, before: textBefore, hostBehind: hostBehind))
-        refreshShift()
-        refreshSuggestions()
+        afterKey()
+    }
+
+    private func insertEmoji(_ glyph: String) {
+        typing.hasTyped = true
+        apply(TypingSession.Edit(insert: glyph))
+        feedback(for: .character(glyph))
+        afterKey()
     }
 
     /// A swipe types the word its path most likely spelled, cased for where it lands; the
@@ -269,8 +377,11 @@ final class KeyboardViewController: UIInputViewController {
         let decoder = SwipeDecoder(
             language: typing.language, unit: grid.unit, rowHeight: grid.rowHeight, origin: grid.origin
         )
-        let words = decoder.words(for: path, dictionary: corrector.completions(of:), names: session.lexicon.names)
+        let words = decoder.words(
+            for: path, dictionary: corrector.completions(of:), names: session.lexicon.names + session.lexicon.learned
+        )
         guard !words.isEmpty else { return }
+        typing.hasTyped = true
         state.notice = nil
         state.seenMessage = state.session.message
         let before = joiningBefore
@@ -281,17 +392,64 @@ final class KeyboardViewController: UIInputViewController {
             return capital ? word.prefix(1).uppercased() + word.dropFirst() : word
         }
         apply(session.swipe(cased, before: before))
-        refreshShift()
-        refreshSuggestions()
+        afterKey()
     }
 
     private func apply(_ edit: TypingSession.Edit) {
-        echo.edited(before: textBefore, after: textAfter, deleting: edit.deleteCount, inserting: edit.insert)
+        markOwnEdit()
+        textDocumentProxy.apply(edit, echo: &echo)
+        session.edited(field: documentID, text: fieldText)
+    }
+
+    /// Host reports from now until the main loop next turns are this edit going through.
+    private func markOwnEdit() {
         editedField = documentID
         ownEditInFlight = true
         DispatchQueue.main.async { [weak self] in self?.ownEditInFlight = false }
-        for _ in 0..<edit.deleteCount { textDocumentProxy.deleteBackward() }
-        if !edit.insert.isEmpty { textDocumentProxy.insertText(edit.insert) }
+    }
+
+    /// Moves the cursor by up to `offset` characters, as far as the text the field shares
+    /// goes; returns how far it went.
+    private func moveCursor(by offset: Int) -> Int {
+        let room = offset < 0 ? -textBefore.count : textDocumentProxy.documentContextAfterInput?.count ?? 0
+        let moved = offset < 0 ? max(offset, room) : min(offset, room)
+        guard moved != 0 else { return 0 }
+        textDocumentProxy.adjustTextPosition(byCharacterOffset: moved)
+        typing.hasTyped = true
+        afterKey()
+        return moved
+    }
+
+    private func deleteWord() -> String? {
+        markOwnEdit()
+        guard let taken = textDocumentProxy.takeWord(echo: &echo) else { return nil }
+        session.edited(field: documentID, text: fieldText)
+        afterKey()
+        return taken
+    }
+
+    /// Puts back what a slide on delete took; a long selection it took leaves nothing to put back.
+    private func restore(_ text: String) {
+        guard !text.isEmpty else { return }
+        apply(TypingSession.Edit(insert: text))
+        afterKey()
+    }
+
+    /// The system keyboard's click and tap as a finger lands: a click for letters, another
+    /// sound for delete and for keys that change the keyboard. iOS lets a keyboard make
+    /// them only with Full Access.
+    private func feedback(for key: Key) {
+        guard hasFullAccess else { return }
+        if feel.haptics {
+            haptic.impactOccurred(intensity: 0.6)
+            haptic.prepare()
+        }
+        guard feel.sounds else { return }
+        switch key {
+        case .character, .domain: AudioServicesPlaySystemSound(1104)
+        case .delete: AudioServicesPlaySystemSound(1155)
+        default: AudioServicesPlaySystemSound(1156)
+        }
     }
 
     /// A word with letters right after the cursor is being edited in the middle, so ending
@@ -315,10 +473,13 @@ final class KeyboardViewController: UIInputViewController {
         typing.showsNextKeyboard = needsInputModeSwitchKey
         switch proxy.keyboardType ?? .default {
         case .emailAddress: typing.extraKeys = ["@", "."]
-        case .URL, .webSearch: typing.extraKeys = ["/", "."]
+        case .URL: typing.extraKeys = ["/", "."]
+        case .webSearch: typing.extraKeys = ["."]
         default: typing.extraKeys = []
         }
+        typing.showsDomainKey = [.emailAddress, .URL].contains(proxy.keyboardType ?? .default)
         if startingField {
+            typing.emojiQuery = nil
             switch proxy.keyboardType ?? .default {
             case .numberPad, .phonePad, .decimalPad, .asciiCapableNumberPad, .numbersAndPunctuation:
                 typing.layer = .numbers
@@ -340,7 +501,7 @@ final class KeyboardViewController: UIInputViewController {
 
     /// Whether the field's capitalization asks for a capital after `before`.
     private func capitalizes(before: String) -> Bool {
-        switch textDocumentProxy.autocapitalizationType ?? .sentences {
+        return switch textDocumentProxy.autocapitalizationType ?? .sentences {
         case .allCharacters: true
         case .words: before.last.map(\.isWhitespace) ?? true
         case .sentences: TypingText.startsSentence(before: before[...])
@@ -349,8 +510,52 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private func scheduleSuggestions() {
+        guard suggesting == nil else { return }
+        suggesting = Task { [weak self] in
+            await Task.yield()
+            self?.suggesting = nil
+            self?.refreshSuggestions()
+        }
+    }
+
+    /// Completions show at once; spelling guesses, which cost milliseconds in Apple's checker
+    /// on the main thread, follow when no key has come for 80 ms. Space still corrects at
+    /// once, from the same guesses. Next words after a space start with a capital where the
+    /// field wants one.
     private func refreshSuggestions() {
-        typing.suggestions = corrects && cursorEndsWord && !hostBehind ? session.suggestions(before: textBefore) : nil
+        showSuggestions(guessing: false)
+        guessing?.cancel()
+        guessing = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            self?.showSuggestions(guessing: true)
+        }
+    }
+
+    private func showSuggestions(guessing: Bool) {
+        let before = textBefore
+        let ready = corrects && cursorEndsWord && !hostBehind
+        let offer = ready ? session.suggestions(before: before, guessing: guessing) : nil
+        /* A correction on show stays while the same word goes on, with the word as now typed
+         * in its quoted slot, until the guesses for the new letter replace it, so the strip
+         * does not blink on every key. A change the keyboard did not make, which includes
+         * another field, has emptied the strip, so nothing is kept across one. */
+        if !guessing, ready, offer?.correction == nil, let shown = typing.suggestions, shown.correction != nil,
+           let word = TypingText.word(before: before), word.hasPrefix(shown.typed) {
+            typing.suggestions = Suggestions(typed: String(word), correction: shown.correction, others: shown.others)
+            return
+        }
+        guard let found = offer else {
+            typing.suggestions = nil
+            return
+        }
+        guard found.typed.isEmpty, typing.shift != .off else {
+            typing.suggestions = found
+            return
+        }
+        let cased = found.others.map { typing.shift == .locked ? $0.uppercased() : $0.prefix(1).uppercased() + $0.dropFirst() }
+        typing.suggestions = Suggestions(typed: "", correction: nil, others: cased)
     }
 
     private func loadVocabulary() {
@@ -359,6 +564,15 @@ final class KeyboardViewController: UIInputViewController {
             profile = try store.profile()
             try store.load().forEach { session.lexicon.addName($0) }
         } catch { show(error) }
+    }
+
+    /// The learning is decoded off the main thread; Reset in the app may have emptied it.
+    private func loadLearning() {
+        Task { [weak self] in
+            let stored = await Task.detached(priority: .userInitiated) { KeyboardLearningStore.shared().load() }.value
+            self?.session.replaceLearning(stored.learning)
+            self?.learningResets = stored.resets
+        }
     }
 
     private func reload() {
@@ -555,9 +769,12 @@ final class KeyboardViewController: UIInputViewController {
 }
 
 private struct KeyboardView: View {
+    static let barHeight: CGFloat = 46
+
     @ObservedObject var state: KeyboardState
     let typing: TypingModel
     let prepare: () -> Void
+    let emoji: EmojiModel
     let microphone: () -> Void
     let stop: () -> Void
     let insert: () -> Void
@@ -565,6 +782,51 @@ private struct KeyboardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            bar
+                .frame(maxWidth: KeyGrid.maxWidth)
+                .frame(height: Self.barHeight)
+                .padding(.horizontal, 8)
+                .zIndex(0)
+            GeometryReader { proxy in
+                let rowHeight = proxy.size.height / CGFloat(typing.rowCount)
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    if state.hasFullAccess, let draft = state.draft {
+                        DraftPanel(text: draft.text, insert: insert, discard: discard)
+                            .frame(maxWidth: KeyGrid.maxWidth)
+                            .frame(height: rowHeight * CGFloat(typing.rowCount - 1))
+                        keys([typing.bottomRow(withDelete: true)]).frame(height: rowHeight)
+                    } else if typing.layer == .emoji, let catalog = EmojiCatalog.shared {
+                        EmojiPanel(catalog: catalog, model: emoji, typing: typing) {
+                            typing.emojiQuery = ""
+                            typing.layer = .letters
+                        }
+                        .frame(maxWidth: KeyGrid.maxWidth)
+                        .frame(height: proxy.size.height)
+                    } else {
+                        let rows = typing.rows + [typing.bottomRow(withDelete: false)]
+                        keys(rows).frame(height: rowHeight * CGFloat(rows.count))
+                    }
+                }
+            }
+            .padding(.horizontal, 3)
+            .zIndex(1)
+        }
+        .padding(.bottom, 4)
+        .foregroundStyle(Theme.textPrimary).tint(Theme.accent)
+    }
+
+    /// The top bar: the emoji search while it is open, otherwise the strip or what the
+    /// keyboard has to say, beside Dictate.
+    @ViewBuilder
+    private var bar: some View {
+        if let query = typing.emojiQuery, let catalog = EmojiCatalog.shared {
+            EmojiSearchBar(
+                query: query, results: catalog.search(query), memory: emoji.memory,
+                pick: { glyph, base in emoji.pick(glyph, base: base) },
+                close: { typing.emojiQuery = nil; typing.layer = .emoji }
+            )
+        } else {
             HStack(spacing: 8) {
                 status.frame(maxWidth: .infinity, alignment: .leading)
                 if state.hasFullAccess {
@@ -575,42 +837,25 @@ private struct KeyboardView: View {
                         .frame(minHeight: 44)
                 }
             }
-            .frame(maxWidth: KeyGrid.maxWidth)
-            .frame(height: 48)
-            .padding(.horizontal, 8)
-            GeometryReader { proxy in
-                let rowHeight = proxy.size.height / 4
-                VStack(spacing: 0) {
-                    if state.hasFullAccess, let draft = state.draft {
-                        DraftPanel(text: draft.text, insert: insert, discard: discard)
-                            .frame(maxWidth: KeyGrid.maxWidth)
-                            .frame(height: rowHeight * 3)
-                    } else {
-                        keys.frame(height: rowHeight * 3)
-                    }
-                    KeyRows(model: typing, rows: [typing.bottomRow(withDelete: state.hasFullAccess && state.draft != nil)])
-                        .frame(height: rowHeight)
-                }
-            }
-            .padding(.horizontal, 2)
         }
-        .padding(.bottom, 2)
-        .foregroundStyle(Theme.textPrimary).tint(Theme.accent)
     }
 
-    private var keys: some View {
-        let rows = typing.rows
-        return KeyRows(model: typing, rows: rows, taps: false)
+    private func keys(_ rows: [[KeyCap]]) -> some View {
+        KeyRows(model: typing, rows: rows)
             .overlay { SwipeTrail(points: typing.trail) }
-            .overlay { KeySurface(model: typing, rows: rows, swipes: typing.layer == .letters) }
+            .overlay {
+                KeySurface(
+                    model: typing, rows: rows,
+                    swipes: typing.layer == .letters && typing.emojiQuery == nil
+                )
+            }
             .overlay(alignment: .topLeading) {
-                if let choice = typing.accentChoice {
-                    AccentPopup(choice: choice)
-                } else if let callout = typing.callout {
-                    KeyBubble(anchor: callout.anchor, width: callout.anchor.width + 12) {
-                        Text(verbatim: callout.text).font(.system(size: KeyFace.calloutSize))
-                    }
+                GeometryReader { proxy in
+                    if let preview = typing.preview { KeyPreviewBalloon(preview: preview, bounds: proxy.size) }
                 }
+            }
+            .overlay(alignment: .topLeading) {
+                if let choice = typing.accentChoice { AccentPopup(choice: choice) }
             }
     }
 
@@ -645,35 +890,82 @@ private struct KeyboardView: View {
 
     /// Before the app has the microphone allowed, Dictate opens it once to ask. After the
     /// keyboard could not listen, Dictate uses the app's warm session, or opens the app.
+    /// Once typing starts, a ready Dictate shrinks to its mark so the strip gets the room.
     @ViewBuilder
     private var control: some View {
-        if state.needsSetup {
-            open(DictationLink.keyboardSetupURL)
-        } else {
-            switch state.route {
-            case .keyboard:
-                MicControl(
-                    phase: state.dictation == .idle ? .ready : state.dictation == .finishing ? .busy : .listening,
-                    prepare: prepare, start: microphone, stop: stop
-                )
-            case .appSession:
-                MicControl(
-                    phase: state.session.phase == .listening ? .listening
-                        : state.session.phase == .finishing || state.waiting ? .busy : .ready,
-                    prepare: {}, start: microphone, stop: stop
-                )
-            case .openApp:
-                open(state.startURL)
+        Group {
+            if state.needsSetup {
+                open(DictationLink.keyboardSetupURL)
+            } else {
+                switch state.route {
+                case .keyboard:
+                    MicControl(
+                        phase: state.dictation == .idle ? .ready : state.dictation == .finishing ? .busy : .listening,
+                        prepare: prepare, compact: typing.hasTyped, start: microphone, stop: stop
+                    )
+                case .appSession:
+                    MicControl(
+                        phase: state.session.phase == .listening ? .listening
+                            : state.session.phase == .finishing || state.waiting ? .busy : .ready,
+                        prepare: {}, compact: typing.hasTyped, start: microphone, stop: stop
+                    )
+                case .openApp:
+                    open(state.startURL)
+                }
             }
         }
+        .animation(.snappy(duration: 0.22), value: typing.hasTyped)
     }
 
     private func open(_ url: URL) -> some View {
         Link(destination: url) {
-            RecordPill(glyph: .record, title: "dictation.start", height: 40)
+            DictateFace(phase: .ready, title: typing.hasTyped ? nil : "dictation.start")
         }
-        .glassEffect(.regular.interactive(), in: Capsule())
+        .accessibilityLabel(Text("dictation.start"))
         .accessibilityIdentifier("keyboard-open-sona")
+    }
+}
+
+/// Dictate's face: one solid capsule with no ring and no glass, so nothing tints the keys
+/// beside it. Ready, it is a key-coloured capsule with the microphone; red is kept for
+/// listening, so the bar never looks as if it were recording when it is not.
+private struct DictateFace: View {
+    let phase: MicControl.Phase
+    let title: LocalizedStringKey?
+    var pressed = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            glyph
+            if let title {
+                Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
+            }
+        }
+        .foregroundStyle(phase == .ready ? Theme.textPrimary : Color.white)
+        .padding(.horizontal, title == nil ? 0 : 14)
+        .frame(minWidth: 44, minHeight: 38, maxHeight: 38)
+        .background(fill, in: Capsule())
+        .contentShape(Capsule())
+    }
+
+    @ViewBuilder private var glyph: some View {
+        switch phase {
+        case .ready:
+            Image(systemName: "mic.fill").font(.system(size: 16, weight: .medium))
+        case .listening:
+            RoundedRectangle(cornerRadius: 2.5, style: .continuous).frame(width: 12, height: 12)
+        case .busy:
+            ProgressView().controlSize(.small).tint(.white)
+        }
+    }
+
+    /// White on the light red is 5.2:1 and on the dark red well above 4.5:1.
+    private var fill: Color {
+        switch phase {
+        case .ready: pressed ? KeyFace.pressedFill : KeyFace.fill
+        case .busy, .listening: colorScheme == .dark ? Theme.recordingFill : Theme.recording
+        }
     }
 }
 
@@ -684,6 +976,7 @@ private struct MicControl: View {
 
     let phase: Phase
     let prepare: () -> Void
+    let compact: Bool
     let start: () -> Void
     let stop: () -> Void
     @State private var down = false
@@ -691,8 +984,7 @@ private struct MicControl: View {
     @State private var hold: Task<Void, Never>?
 
     var body: some View {
-        RecordPill(glyph: glyph, title: title, height: 40)
-            .glassEffect(.regular.interactive(), in: Capsule())
+        DictateFace(phase: phase, title: compact && phase == .ready ? nil : title, pressed: down)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in press() }
@@ -703,14 +995,6 @@ private struct MicControl: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { tap() }
             .accessibilityIdentifier(phase == .listening ? "keyboard-stop" : "keyboard-mic")
-    }
-
-    private var glyph: RecordPill.Glyph {
-        switch phase {
-        case .ready: .record
-        case .busy: .busy
-        case .listening: .stop
-        }
     }
 
     private var title: LocalizedStringKey {
@@ -775,57 +1059,6 @@ private struct SwipeTrail: View {
     }
 }
 
-/// A held letter's accents above it; the finger slides to one and lets go.
-private struct AccentPopup: View {
-    let choice: AccentChoice
-
-    var body: some View {
-        KeyBubble(anchor: choice.anchor, width: CGFloat(choice.options.count) * choice.anchor.width + 8, x: choice.originX - 4) {
-            HStack(spacing: 0) {
-                ForEach(Array(choice.options.enumerated()), id: \.offset) { index, option in
-                    Text(verbatim: option)
-                        .font(.system(size: KeyFace.letterSize))
-                        .frame(width: choice.anchor.width, height: choice.anchor.height - 10)
-                        .foregroundStyle(index == choice.selected ? Color.white : Theme.textPrimary)
-                        .background(
-                            index == choice.selected ? Theme.accent : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        )
-                }
-            }
-        }
-    }
-}
-
-/// A key's fill grown up out of the key itself, as the system keyboard draws its letter
-/// callouts and accent choices: a bubble one key high above the key, joined to it.
-private struct KeyBubble<Content: View>: View {
-    let anchor: CGRect
-    let width: CGFloat
-    var x: CGFloat?
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        let key = anchor.insetBy(dx: 3, dy: 5)
-        let left = x ?? key.midX - width / 2
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(KeyFace.fill)
-                .frame(width: key.width, height: key.height + 8)
-                .offset(x: key.minX - left, y: key.height - 4)
-            content
-                .frame(width: width, height: key.height)
-                .foregroundStyle(Theme.textPrimary)
-                .background(KeyFace.fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
-        .offset(x: left, y: key.minY - key.height - 4)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
 /// Dictated text that started in another field, shown in place of the letter keys until
 /// it is inserted here or discarded.
 private struct DraftPanel: View {
@@ -861,8 +1094,4 @@ private struct DraftPanel: View {
 /// UITextDocumentProxy's own `documentIdentifier` getter with the nullability it has in practice.
 @objc private protocol OptionalDocumentIdentifier {
     var documentIdentifier: UUID? { get }
-}
-
-private final class ClickingInputView: UIInputView, UIInputViewAudioFeedback {
-    var enableInputClicksWhenVisible: Bool { true }
 }

@@ -1,8 +1,8 @@
-import Foundation
+import UIKit
 
 /// The keyboard's memory between keys: what the last key did, so backspace can undo a
 /// correction, a second space can end a sentence and a second shift can lock caps, and
-/// which words the user kept.
+/// which words the user kept and learned.
 @MainActor
 struct TypingSession {
     /// A change to the text before the cursor: delete this many characters, then insert.
@@ -28,25 +28,74 @@ struct TypingSession {
         }
     }
 
+    /// A correction the strip can take back, kept for the one place it was made: its field,
+    /// and the text before the cursor right after the corrected word.
+    private struct Corrected: Equatable {
+        let correction: Correction
+        let field: UUID?
+        let place: String
+    }
+
+    /// Corrections kept for the cursor coming back to them; older ones are forgotten.
+    private static let correctionMemory = 30
+
     var lexicon: TypingLexicon
+    private(set) var learning: KeyboardLearning
+    var predictor: NextWords?
     private let corrector: TypingCorrector?
+    private let emoji: (String) -> String?
     private var last = Last.other
     /// The text before the cursor as the last key left it. When the cursor moves, the field
     /// changes or dictated text lands, the text no longer matches and the last key is forgotten.
     private var textAfterLast = ""
+    private var corrections: [Corrected] = []
+    /// The field being typed in, and its text around the cursor as the keyboard last saw it.
+    private var field: UUID?
+    private var fieldText: String?
 
-    init(corrector: TypingCorrector?, lexicon: TypingLexicon = TypingLexicon()) {
+    init(
+        corrector: TypingCorrector?, lexicon: TypingLexicon = TypingLexicon(),
+        learning: KeyboardLearning = KeyboardLearning(), predictor: NextWords? = nil,
+        emoji: @escaping (String) -> String? = { _ in nil }
+    ) {
         self.corrector = corrector
         self.lexicon = lexicon
+        self.learning = learning
+        self.predictor = predictor
+        self.emoji = emoji
+        self.lexicon.setLearned(learning.known)
     }
 
-    /// What the strip offers for the word before the cursor: right after a swipe, the other
-    /// words the path could have meant.
-    func suggestions(before text: String) -> Suggestions? {
+    /// What the strip offers at the cursor: right after a swipe, the other words the path
+    /// could have meant; at the end of a word corrected earlier, the word as it was typed;
+    /// while a word is typed, its corrections, completions and emoji; after a space, the
+    /// words likely to come next. Without `guessing`, a word being typed gets completions and
+    /// emoji but no spelling guesses.
+    func suggestions(before text: String, guessing: Bool = true) -> Suggestions? {
         if case let .swiped(word, _, others) = lastKey(before: text), !others.isEmpty {
             return Suggestions(typed: word, correction: nil, others: others)
         }
-        return corrector?.suggestions(before: text, lexicon: lexicon)
+        guard let word = TypingText.word(before: text) else { return predictions(before: text) }
+        if let corrected = corrections.last(where: { $0.field == field && $0.place == text }) {
+            return Suggestions(typed: String(word), correction: nil, others: [], restore: corrected.correction.typed)
+        }
+        let found = emoji(String(word))
+        guard var offer = corrector?.suggestions(before: text, lexicon: lexicon, guessing: guessing) else {
+            return found.map { Suggestions(typed: String(word), correction: nil, others: [], emoji: $0) }
+        }
+        offer.emoji = found
+        return offer
+    }
+
+    private func predictions(before text: String) -> Suggestions? {
+        guard text.isEmpty || text.last?.isWhitespace == true else { return nil }
+        let context = TypingText.sentenceWords(before: text[...], limit: 2)
+        let own = context.last.map { learning.next(after: $0, limit: 3) } ?? []
+        var seen: Set<String> = []
+        let words = (own + (predictor?.next(after: context, limit: 3) ?? []))
+            .filter { seen.insert($0.lowercased()).inserted }
+        guard !words.isEmpty else { return nil }
+        return Suggestions(typed: "", correction: nil, others: Array(words.prefix(3)))
     }
 
     /// The space a word dropped in whole, swiped or dictated, needs in front of it: none at
@@ -74,9 +123,10 @@ struct TypingSession {
     }
 
     /// Space, return or punctuation, which ends the word before the cursor and corrects it
-    /// when the field allows. A second space after a word ends the sentence.
-    /// A host still behind the keyboard's last edit gets only plain edits: nothing is
-    /// corrected, replaced or deleted beyond one character on text it may not hold.
+    /// when the field allows. A second space after a word ends the sentence. Where the field
+    /// allows correction, the word is also learned. A host still behind the keyboard's last
+    /// edit gets only plain edits: nothing is corrected, replaced or deleted beyond one
+    /// character on text it may not hold.
     mutating func end(with separator: String, before text: String, corrects: Bool, hostBehind: Bool = false) -> Edit {
         if hostBehind { return remember(.other, Edit(insert: separator), on: text) }
         let previous = lastKey(before: text)
@@ -87,23 +137,30 @@ struct TypingSession {
             return remember(.other, Edit(deleteCount: 1, insert: separator + " "), on: text)
         }
         if case .swiped = previous {
+            if corrects { learn(before: text) }
             return remember(separator == " " ? .space : .other, Edit(insert: separator), on: text)
         }
         if corrects, let correction = corrector?.correction(before: text, lexicon: lexicon) {
+            learn(before: text, as: correction.replacement)
+            let place = String(text.dropLast(correction.typed.count)) + correction.replacement
+            corrections = Array((corrections + [Corrected(correction: correction, field: field, place: place)])
+                .suffix(Self.correctionMemory))
             let edit = Edit(deleteCount: correction.typed.count, insert: correction.replacement + separator)
             return remember(.corrected(correction, separator: separator), edit, on: text)
         }
+        if corrects { learn(before: text) }
         return remember(separator == " " ? .space : .other, Edit(insert: separator), on: text)
     }
 
-    /// Right after a correction, backspace puts the typed word back and keeps it for the
-    /// rest of the session; right after a swipe it deletes the whole word and its space;
-    /// otherwise it deletes one character.
+    /// Right after a correction, backspace puts the typed word back and keeps it from then
+    /// on; right after a swipe it deletes the whole word and its space; otherwise it deletes
+    /// one character.
     mutating func backspace(before text: String, hostBehind: Bool = false) -> Edit {
         if hostBehind { return remember(.other, Edit(deleteCount: 1), on: text) }
         switch lastKey(before: text) {
         case let .corrected(correction, separator):
-            lexicon.insert(correction.typed)
+            keep(correction.typed)
+            corrections.removeAll { $0.correction == correction }
             let edit = Edit(deleteCount: (correction.replacement + separator).count, insert: correction.typed)
             return remember(.other, edit, on: text)
         case let .swiped(word, spaced, _):
@@ -113,9 +170,22 @@ struct TypingSession {
         }
     }
 
+    /// The whole word before the cursor and the spaces after it, as a slide left on delete
+    /// takes them; one character when no word is there.
+    static func wordDeletion(before text: String) -> Int {
+        let trailing = text.reversed().prefix { $0.isWhitespace }.count
+        let rest = text.dropLast(trailing)
+        guard let last = rest.last else { return trailing }
+        let word = TypingText.isWordCharacter(last) || last.isNumber
+            ? rest.reversed().prefix { TypingText.isWordCharacter($0) || $0.isNumber }.count
+            : 1
+        return trailing + word
+    }
+
     /// A strip candidate replaces the word before the cursor and adds a space. Choosing the
-    /// word as typed keeps it uncorrected for the rest of the session. After a swipe, the
-    /// candidate swaps in for the swiped word and still goes in one backspace.
+    /// word as typed, or the typed form of a word corrected earlier, keeps it from then on.
+    /// After a swipe, the candidate swaps in for the swiped word and still goes in one
+    /// backspace. With no word at the cursor the candidate is the next word.
     mutating func choose(_ candidate: String, before text: String, hostBehind: Bool = false) -> Edit {
         if hostBehind { return Edit() }
         if case let .swiped(word, spaced, others) = lastKey(before: text) {
@@ -126,7 +196,11 @@ struct TypingSession {
             )
         }
         let word = TypingText.word(before: text) ?? ""
-        if candidate == String(word) { lexicon.insert(candidate) }
+        let here = corrections.filter { $0.field == field && $0.place == text }
+        if candidate == String(word) || here.contains(where: { $0.correction.typed == candidate }) {
+            keep(candidate)
+            corrections.removeAll { here.contains($0) }
+        }
         return remember(.chosen, Edit(deleteCount: word.count, insert: candidate + " "), on: text)
     }
 
@@ -139,6 +213,48 @@ struct TypingSession {
         }
         last = .shift(time)
         return false
+    }
+
+    /// Takes the learning as the shared container has it, emptied when Reset in the app ran.
+    mutating func replaceLearning(_ stored: KeyboardLearning) {
+        learning = stored
+        lexicon.setLearned(stored.known)
+    }
+
+    /// The keyboard's own edit landed: `field` now reads `text` around the cursor.
+    mutating func edited(field: UUID?, text: String) {
+        self.field = field
+        fieldText = text
+    }
+
+    /// The host reports `field` reading `text` around the cursor. Another field, or text the
+    /// keyboard did not write, such as a sent message clearing the field, forgets every
+    /// correction the strip could take back, and returns true; a cursor move alone keeps them.
+    @discardableResult
+    mutating func hostChanged(field: UUID?, text: String) -> Bool {
+        let changed = field != self.field || text != fieldText
+        if changed { corrections = [] }
+        self.field = field
+        fieldText = text
+        return changed
+    }
+
+    private mutating func keep(_ word: String) {
+        learning.keep(word)
+        lexicon.setLearned(learning.known)
+    }
+
+    /// Counts the word the cursor ends, or what it is being corrected to, as one more use,
+    /// and the word before it as its context. A word that opens a sentence is counted with
+    /// its first letter lowered.
+    private mutating func learn(before text: String, as replacement: String? = nil) {
+        guard let word = TypingText.word(before: text) else { return }
+        let ended = replacement.map { Substring($0) } ?? word
+        let opening = TypingText.startsSentence(before: text[..<word.startIndex])
+        let spelled = opening && ended.dropFirst().allSatisfy(\.isLowercase) ? ended.lowercased() : String(ended)
+        let previous = TypingText.sentenceWords(before: text[..<word.startIndex], limit: 1).last
+        learning.typed(spelled, after: previous)
+        if learning.knows(spelled), !lexicon.contains(spelled) { lexicon.setLearned(learning.known) }
     }
 
     private func lastKey(before text: String) -> Last {
@@ -183,6 +299,18 @@ struct FieldEcho {
     /// A host that never updates keeps showing the oldest, so a long burst drops the second.
     private var versions: [Report] = []
     private static let versionLimit = 64
+    /// A slide on delete took a selection and waits for the host to report the field before
+    /// it takes the next word, so a selection the host still shows is not taken twice.
+    private(set) var awaitingHost = false
+
+    mutating func awaitHost() {
+        awaitingHost = true
+    }
+
+    /// The host said its text or selection did change.
+    mutating func hostNoticed() {
+        awaitingHost = false
+    }
 
     /// The keyboard changed the field, which the host showed as `before` and `after` the
     /// cursor: it deleted `deleting` characters before the cursor and inserted `inserting`.
@@ -209,6 +337,7 @@ struct FieldEcho {
     /// The field the keyboard types into is a different one.
     mutating func forget() {
         versions = []
+        awaitingHost = false
     }
 
     /// Whether the host shows a version of the field older than the keyboard's latest, and
@@ -226,5 +355,54 @@ struct FieldEcho {
 
     private mutating func advance(to shown: Report) {
         if let index = versions.firstIndex(of: shown) { versions.removeFirst(index) }
+    }
+}
+
+/// The host's field as the keyboard edits it, with `FieldEcho` kept in step.
+@MainActor
+extension UITextDocumentProxy {
+    func apply(_ edit: TypingSession.Edit, echo: inout FieldEcho) {
+        echo.edited(
+            before: documentContextBeforeInput ?? "", after: documentContextAfterInput ?? "",
+            deleting: edit.deleteCount, inserting: edit.insert
+        )
+        for _ in 0..<edit.deleteCount { deleteBackward() }
+        if !edit.insert.isEmpty { insertText(edit.insert) }
+    }
+
+    /// What one stretch of a slide on delete takes, returned so sliding back can put it back;
+    /// "" when it took something it cannot put back. Selected text goes first and by itself.
+    /// A selection longer than 40 characters, or holding a picture, goes in one delete with
+    /// nothing to put back: typing it back over itself would be thousands of edits after
+    /// Select All, and a picture would come back as a placeholder character.
+    /// A short one is typed over itself, which leaves the cursor after it, then deleted a
+    /// character at a time: delete on a selection lets a host such as Messages take the space
+    /// beside it too, which sliding back could not restore. That ends the stretch: the next
+    /// word waits for the host's text or selection notice, or, failing one, for a later stretch
+    /// once the host no longer shows the selection. After that, the word before the cursor,
+    /// counted from the text the host shows now; while the host is still behind the keyboard's
+    /// last edit it takes nothing.
+    func takeWord(echo: inout FieldEcho) -> String? {
+        if echo.awaitingHost {
+            if selectedText?.isEmpty ?? true { echo.hostNoticed() }
+            return nil
+        }
+        if let selected = selectedText, !selected.isEmpty {
+            guard selected.count <= 40, !selected.contains("\u{FFFC}") else {
+                deleteBackward()
+                echo.awaitHost()
+                return ""
+            }
+            insertText(selected)
+            apply(TypingSession.Edit(deleteCount: selected.count), echo: &echo)
+            echo.awaitHost()
+            return selected
+        }
+        let before = documentContextBeforeInput ?? ""
+        guard !echo.behind(before: before, after: documentContextAfterInput ?? "") else { return nil }
+        let count = TypingSession.wordDeletion(before: before)
+        guard count > 0 else { return nil }
+        apply(TypingSession.Edit(deleteCount: count), echo: &echo)
+        return String(before.suffix(count))
     }
 }

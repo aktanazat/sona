@@ -40,8 +40,9 @@ struct SwipeTypingTests {
     }
 
     @Test("a swipe through a common word puts that word first at least 17 times in 20, and in the four offered 19 in 20")
-    func commonWords() throws {
+    func commonWords() async throws {
         let corrector = try #require(TypingCorrector(language: "en-US"))
+        corrector.common = await CommonWords.list(for: .english)
         let decoder = Self.decoder(.english)
         var first = 0, offered = 0
         var misses: [String] = []
@@ -69,6 +70,25 @@ struct SwipeTypingTests {
         let g = try #require(decoder.centres["g"])
         let found = decoder.words(for: [g, CGPoint(x: g.x + 10, y: g.y + 4)], dictionary: corrector.completions(of:), names: [])
         #expect(found.isEmpty)
+    }
+
+    /* These words stand in for a Russian spelling lexicon. The decoder has to find "ёлка"
+     * by its held-key prefix, from a path that starts on е. */
+    static let russianWords = [
+        "привет", "приветствие", "при", "спасибо", "спас", "ёлка", "ёж", "есть", "завтра", "завод",
+        "дома", "дом", "домой", "хорошо", "хор", "ход",
+    ]
+
+    @Test(
+        "on the Russian layout a swipe spells Russian words, ё included",
+        arguments: ["привет", "спасибо", "ёлка", "завтра", "дома", "хорошо"]
+    )
+    func russian(word: String) {
+        let decoder = Self.decoder(.russian)
+        let plain = word.replacingOccurrences(of: "ё", with: "е")
+        let dictionary = { (prefix: String) in Self.russianWords.filter { $0.hasPrefix(prefix) } }
+        let found = decoder.words(for: Self.path(for: plain, on: decoder), dictionary: dictionary, names: [])
+        #expect(found.first == word, "\(found)")
     }
 
     @Test("a typed prefix of a Contacts name offers the name, capitalized as in Contacts")

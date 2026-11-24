@@ -95,6 +95,21 @@
 		CD0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000068 /* KeyboardDictationQueue.swift */; };
 		CC0000000000000000000069 /* KeyboardMicrophoneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000069 /* KeyboardMicrophoneTests.swift */; };
 		CC000000000000000000006A /* KeyboardDictationQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000006A /* KeyboardDictationQueueTests.swift */; };
+		CD0000000000000000000090 /* KeyboardFeel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000090 /* KeyboardFeel.swift */; };
+		CC0000000000000000000099 /* KeyboardMoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000099 /* KeyboardMoreTests.swift */; };
+		CD0000000000000000000098 /* emoji-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000098 /* emoji-LICENSE.txt */; };
+		CD0000000000000000000097 /* NextWords in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000097 /* NextWords */; };
+		CC0000000000000000000097 /* NextWords in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000097 /* NextWords */; };
+		CD0000000000000000000096 /* emoji.tsv in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000096 /* emoji.tsv */; };
+		CC0000000000000000000096 /* emoji.tsv in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000096 /* emoji.tsv */; };
+		CD0000000000000000000094 /* EmojiKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000094 /* EmojiKeyboard.swift */; };
+		CD0000000000000000000093 /* EmojiCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000093 /* EmojiCatalog.swift */; };
+		CC0000000000000000000093 /* EmojiCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000093 /* EmojiCatalog.swift */; };
+		CD0000000000000000000092 /* NextWords.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000092 /* NextWords.swift */; };
+		CC0000000000000000000092 /* NextWords.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000092 /* NextWords.swift */; };
+		CD0000000000000000000091 /* KeyboardLearning.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000091 /* KeyboardLearning.swift */; };
+		CC0000000000000000000091 /* KeyboardLearning.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000091 /* KeyboardLearning.swift */; };
+		CA0000000000000000000091 /* KeyboardLearning.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000091 /* KeyboardLearning.swift */; };
 		CC0000000000000000000063 /* SwipeTypingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000063 /* SwipeTypingTests.swift */; };
 		CC0000000000000000000064 /* KeyboardSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000064 /* KeyboardSessionTests.swift */; };
 		CC0000000000000000000067 /* KeyboardDictationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000067 /* KeyboardDictationTests.swift */; };
@@ -244,6 +259,15 @@
 		BB0000000000000000000068 /* KeyboardDictationQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDictationQueue.swift; sourceTree = "<group>"; };
 		BB0000000000000000000069 /* KeyboardMicrophoneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardMicrophoneTests.swift; sourceTree = "<group>"; };
 		BB000000000000000000006A /* KeyboardDictationQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDictationQueueTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000090 /* KeyboardFeel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardFeel.swift; sourceTree = "<group>"; };
+		BB0000000000000000000099 /* KeyboardMoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardMoreTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000098 /* emoji-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "emoji-LICENSE.txt"; sourceTree = "<group>"; };
+		BB0000000000000000000097 /* NextWords */ = {isa = PBXFileReference; lastKnownFileType = folder; path = NextWords; sourceTree = "<group>"; };
+		BB0000000000000000000096 /* emoji.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = emoji.tsv; sourceTree = "<group>"; };
+		BB0000000000000000000094 /* EmojiKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiKeyboard.swift; sourceTree = "<group>"; };
+		BB0000000000000000000093 /* EmojiCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiCatalog.swift; sourceTree = "<group>"; };
+		BB0000000000000000000092 /* NextWords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NextWords.swift; sourceTree = "<group>"; };
+		BB0000000000000000000091 /* KeyboardLearning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardLearning.swift; sourceTree = "<group>"; };
 		BB0000000000000000000063 /* SwipeTypingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwipeTypingTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000064 /* KeyboardSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSessionTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000067 /* KeyboardDictationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDictationTests.swift; sourceTree = "<group>"; };
@@ -373,6 +397,7 @@
 				BB0000000000000000000028 /* DictationLink.swift */,
 				BB0000000000000000000038 /* KeyboardSession.swift */,
 				BB0000000000000000000060 /* KeyboardLanguages.swift */,
+				BB0000000000000000000091 /* KeyboardLearning.swift */,
 				BB0000000000000000000039 /* DictationProfile.swift */,
 				BB0000000000000000000053 /* KeyboardVocabulary.swift */,
 				BB0000000000000000000068 /* KeyboardDictationQueue.swift */,
@@ -439,6 +464,7 @@
 				BB0000000000000000000054 /* TypingSamples.swift */,
 				BB0000000000000000000055 /* TypingCorrectorTests.swift */,
 				BB0000000000000000000063 /* SwipeTypingTests.swift */,
+				BB0000000000000000000099 /* KeyboardMoreTests.swift */,
 				BB0000000000000000000064 /* KeyboardSessionTests.swift */,
 				BB0000000000000000000067 /* KeyboardDictationTests.swift */,
 				BB0000000000000000000069 /* KeyboardMicrophoneTests.swift */,
@@ -469,6 +495,13 @@
 				BB0000000000000000000062 /* KeySurface.swift */,
 				BB0000000000000000000065 /* KeyboardDictation.swift */,
 				BB0000000000000000000066 /* KeyboardMicrophone.swift */,
+				BB0000000000000000000090 /* KeyboardFeel.swift */,
+				BB0000000000000000000098 /* emoji-LICENSE.txt */,
+				BB0000000000000000000097 /* NextWords */,
+				BB0000000000000000000096 /* emoji.tsv */,
+				BB0000000000000000000094 /* EmojiKeyboard.swift */,
+				BB0000000000000000000093 /* EmojiCatalog.swift */,
+				BB0000000000000000000092 /* NextWords.swift */,
 				BB0000000000000000000025 /* Info.plist */,
 				BB0000000000000000000029 /* SonaKeyboard.entitlements */,
 			);
@@ -647,13 +680,15 @@
 			buildActionMask = 2147483647;
 			files = (
 				CC0000000000000000000012 /* crypto-v1.json in Resources */,
+				CC0000000000000000000097 /* NextWords in Resources */,
+				CC0000000000000000000096 /* emoji.tsv in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		D40000000000000000000003 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = (CD0000000000000000000017 /* Localizable.strings in Resources */, );
+			files = (CD0000000000000000000017 /* Localizable.strings in Resources */, CD0000000000000000000096 /* emoji.tsv in Resources */, CD0000000000000000000097 /* NextWords in Resources */, CD0000000000000000000098 /* emoji-LICENSE.txt in Resources */, );
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		D50000000000000000000003 /* Resources */ = {
@@ -691,6 +726,7 @@
 				CA0000000000000000000022 /* DictationScreen.swift in Sources */,
 				CA0000000000000000000028 /* DictationLink.swift in Sources */,
 				CA0000000000000000000060 /* KeyboardLanguages.swift in Sources */,
+				CA0000000000000000000091 /* KeyboardLearning.swift in Sources */,
 				CA0000000000000000000030 /* ThoughtObject.swift in Sources */,
 				CA0000000000000000000031 /* CardObject.swift in Sources */,
 				CA0000000000000000000032 /* VaultReader.swift in Sources */,
@@ -758,6 +794,9 @@
 				CC0000000000000000000054 /* TypingSamples.swift in Sources */,
 				CC0000000000000000000055 /* TypingCorrectorTests.swift in Sources */,
 				CC0000000000000000000060 /* KeyboardLanguages.swift in Sources */,
+				CC0000000000000000000093 /* EmojiCatalog.swift in Sources */,
+				CC0000000000000000000092 /* NextWords.swift in Sources */,
+				CC0000000000000000000091 /* KeyboardLearning.swift in Sources */,
 				CC0000000000000000000061 /* SwipeTyping.swift in Sources */,
 				CC0000000000000000000065 /* KeyboardDictation.swift in Sources */,
 				CC0000000000000000000066 /* KeyboardMicrophone.swift in Sources */,
@@ -765,6 +804,7 @@
 				CC0000000000000000000069 /* KeyboardMicrophoneTests.swift in Sources */,
 				CC000000000000000000006A /* KeyboardDictationQueueTests.swift in Sources */,
 				CC0000000000000000000063 /* SwipeTypingTests.swift in Sources */,
+				CC0000000000000000000099 /* KeyboardMoreTests.swift in Sources */,
 				CC0000000000000000000064 /* KeyboardSessionTests.swift in Sources */,
 				CC0000000000000000000067 /* KeyboardDictationTests.swift in Sources */,
 				CC000000000000000000003A /* PhoneMeeting.swift in Sources */,
@@ -796,6 +836,11 @@
 				CD0000000000000000000065 /* KeyboardDictation.swift in Sources */,
 				CD0000000000000000000066 /* KeyboardMicrophone.swift in Sources */,
 				CD0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */,
+				CD0000000000000000000090 /* KeyboardFeel.swift in Sources */,
+				CD0000000000000000000094 /* EmojiKeyboard.swift in Sources */,
+				CD0000000000000000000093 /* EmojiCatalog.swift in Sources */,
+				CD0000000000000000000092 /* NextWords.swift in Sources */,
+				CD0000000000000000000091 /* KeyboardLearning.swift in Sources */,
 				CD0000000000000000000053 /* KeyboardVocabulary.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
