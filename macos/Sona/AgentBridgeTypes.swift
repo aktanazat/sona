@@ -299,3 +299,21 @@ enum AgentBridgeFormat {
         id.count <= 14 ? id : "\(id.prefix(12))…"
     }
 }
+
+/// One outside MCP server listed in Settings > Agents. Tokens stay in Keychain.
+struct AgentMcpServerSummary: Decodable, Identifiable, Equatable, Sendable {
+    let id: String
+    let name: String
+    let url: String
+    let hasToken: Bool
+}
+
+/// One tool an outside MCP server marks read-only. Talk to Sona may ask to
+/// call it only once it is switched on here.
+struct AgentMcpToolSummary: Decodable, Identifiable, Equatable, Sendable {
+    let name: String
+    let description: String
+    var enabled: Bool
+
+    var id: String { name }
+}

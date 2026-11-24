@@ -2974,6 +2974,64 @@ pub(super) async fn call(
             let limit = args.take("limit")?;
             reply(crate::commands::meeting::meeting_said_search(app.state(), query, limit).await)
         }
+        "help_search" => {
+            let mut args = Args::parse(params)?;
+            let words = args.take("words")?;
+            let limit = args.take("limit")?;
+            on_main_thread(app, move || {
+                encode_plain(crate::help::help_search(words, limit))
+            })
+            .await?
+        }
+        "agent_mcp_servers_list" => {
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                encode_plain(crate::agent_panel::mcp_servers::agent_mcp_servers_list(
+                    handle.clone(),
+                ))
+            })
+            .await?
+        }
+        "agent_mcp_server_add" => {
+            let mut args = Args::parse(params)?;
+            let name = args.take("name")?;
+            let url = args.take("url")?;
+            let token = args.take("token")?;
+            reply(
+                crate::agent_panel::mcp_servers::agent_mcp_server_add(
+                    app.clone(),
+                    name,
+                    url,
+                    token,
+                )
+                .await,
+            )
+        }
+        "agent_mcp_server_remove" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            reply(crate::agent_panel::mcp_servers::agent_mcp_server_remove(app.clone(), id).await)
+        }
+        "agent_mcp_server_tools" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            reply(crate::agent_panel::mcp_servers::agent_mcp_server_tools(app.clone(), id).await)
+        }
+        "agent_mcp_server_tool_set" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let tool = args.take("tool")?;
+            let enabled = args.take("enabled")?;
+            reply(
+                crate::agent_panel::mcp_servers::agent_mcp_server_tool_set(
+                    app.clone(),
+                    id,
+                    tool,
+                    enabled,
+                )
+                .await,
+            )
+        }
         "meeting_title_set" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

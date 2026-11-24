@@ -42,7 +42,7 @@ struct ChatActionReview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(card.action.line(naming: store.people)).headlineText()
+            Text(card.line(naming: store.people)).headlineText()
             Text(card.action.reason).bodyText(14, Theme.inkSecondary)
             content
             if let error = store.error { Text(error).bodyText(13, Theme.inkSecondary) }

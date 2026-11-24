@@ -4,11 +4,14 @@
 //! "what are my most used words" or "what did Nolan and I leave open". So the
 //! chat brain may reply with a `tool_calls` request instead of an answer, the
 //! panel runs each call through [`run`], and the results ride back inside the
-//! next round's pack. Ten tools, catalogued as [`TOOL_CATALOGUE_VERSION`], each
-//! with exactly the argument names [`TOOL_ARGS`] lists. The relay carries the
-//! same table (`SONA_TOOL_ARGS` in `omp_bridge/sona_chat.py`) and checks names
-//! and value shapes on the way out; every bound on a value is enforced here,
-//! and only here.
+//! next round's pack. Twenty-one tools, catalogued as
+//! [`TOOL_CATALOGUE_VERSION`], each with exactly the argument names
+//! [`TOOL_ARGS`] lists. The relay carries the same table (`SONA_TOOL_ARGS` in
+//! `omp_bridge/sona_chat.py`) and checks names and value shapes on the way
+//! out; every bound on a value is enforced here, and only here. No tool calls
+//! an outside MCP server: that is a card the owner presses
+//! (`call_outside_tool`), since what an outside tool does is the server's
+//! word, not Sona's.
 //!
 //! # What a tool may see
 //!
@@ -22,13 +25,14 @@
 //!
 //! # A chat limited to one folder
 //!
-//! A chat opened on a folder ("Ask about these meetings") may run five of
-//! the ten: `search`, `recent` (meetings), `meeting`, `transcript` and
-//! `loops`, each cut to the folder's meetings by one [`FolderScope`] read at
-//! the start of every call, so a folder deleted mid-chat refuses the next
-//! call rather than widening it. A meeting outside the folder gets the same
-//! sentence an absent one gets, for the reason above. The other five read
-//! the calendar, the dictation history or a person's page, which no folder
+//! A chat opened on a folder ("Ask about these meetings") may run seven of
+//! them: `search`, `recent` (meetings), `meeting`, `transcript` and `loops`,
+//! each cut to the folder's meetings by one [`FolderScope`] read at the
+//! start of every call, so a folder deleted mid-chat refuses the next call
+//! rather than widening it, plus `skill` and `help`, which read no meetings.
+//! A meeting outside the folder gets the same sentence an absent one gets,
+//! for the reason above. The rest read the calendar, the dictation history,
+//! a person's page, the tracker, notes or outside servers, which no folder
 //! bounds, and are refused with one line saying so.
 //!
 //! # Bounds
@@ -79,14 +83,14 @@ pub const TOOL_RESULT_MAX_BYTES: usize = 8 * 1024;
 
 /// Bumped when a tool's arguments or result shape change meaning. The relay
 /// names the same version in its prompt.
-pub const TOOL_CATALOGUE_VERSION: &str = "sona-tools/1";
+pub const TOOL_CATALOGUE_VERSION: &str = "sona-tools/2";
 
 /// The catalogue: every tool, in the order the relay lists them, with exactly
 /// the argument names it accepts. Mirrored by `SONA_TOOL_ARGS` in
 /// `omp_bridge/sona_chat.py`; a call naming an argument outside this list is
 /// refused, so a catalogue that drifts fails loudly in the model's next round
 /// rather than silently ignoring what it asked for.
-pub const TOOL_ARGS: [(&str, &[&str]); 10] = [
+pub const TOOL_ARGS: [(&str, &[&str]); 21] = [
     ("search", &["query", "scope", "limit"]),
     ("recent", &["scope", "limit", "days"]),
     ("meeting", &["session_id"]),
@@ -97,6 +101,17 @@ pub const TOOL_ARGS: [(&str, &[&str]); 10] = [
     ("dictation", &["entry_id"]),
     ("word_stats", &["days", "limit"]),
     ("activity", &["days"]),
+    ("tasks", &["search", "status", "project_id", "limit"]),
+    ("task", &["task"]),
+    ("projects", &["limit"]),
+    ("cycles", &[]),
+    ("initiatives", &[]),
+    ("notes", &["search", "limit"]),
+    ("note", &["note_id"]),
+    ("skill", &["name"]),
+    ("help", &["query", "limit"]),
+    ("mcp_servers", &[]),
+    ("mcp_tools", &["server"]),
 ];
 
 /// The longest search query a call may carry, in characters.
@@ -162,6 +177,45 @@ pub struct ToolResult {
     pub sources: Vec<QueryRow>,
 }
 
+/// Whether `tool` calls an outside MCP server and therefore needs the app
+/// handle (settings and Keychain) rather than the meeting store.
+pub(crate) fn is_mcp_tool(tool: &str) -> bool {
+    matches!(tool, "mcp_servers" | "mcp_tools")
+}
+
+/// Run one outside-MCP lookup through [`crate::agent_panel::mcp_servers`].
+pub(crate) async fn run_mcp<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    call: &ToolCall,
+) -> ToolResult {
+    match answer_mcp(app, call).await {
+        Ok(outcome) => finish(call, outcome),
+        Err(error) => failure(call, &error),
+    }
+}
+
+async fn answer_mcp<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    call: &ToolCall,
+) -> Result<Outcome, String> {
+    match parse(call)? {
+        Request::McpServers => {
+            let servers = crate::agent_panel::mcp_servers::list(app);
+            let mut map = Map::new();
+            map.insert("servers".to_string(), json!(servers));
+            Ok(Outcome::new(map, &["/servers"]))
+        }
+        Request::McpTools { server } => {
+            let tools = crate::agent_panel::mcp_servers::enabled_tools(app, &server).await?;
+            let mut map = Map::new();
+            map.insert("server".to_string(), json!(server));
+            map.insert("tools".to_string(), json!(tools));
+            Ok(Outcome::new(map, &["/tools"]))
+        }
+        _ => Err(format!("{} is not an outside MCP tool", short(&call.tool))),
+    }
+}
+
 /// Run one call against the corpus this Mac holds, or against one folder of
 /// it when the chat is limited to one (see the module header).
 ///
@@ -189,6 +243,14 @@ async fn answer(
 ) -> Result<Outcome, String> {
     let request = parse(call)?;
     let now = Local::now();
+    if folder_id.is_none() {
+        if let Request::Help { query, limit } = &request {
+            let sections = crate::help::search(query, *limit);
+            let mut map = Map::new();
+            map.insert("sections".to_string(), json!(sections));
+            return Ok(Outcome::new(map, &["/sections"]));
+        }
+    }
     let store = meetings
         .store()
         .await
@@ -327,6 +389,131 @@ async fn answer(
             };
             Ok(activity_result(&dictations.points, &meetings, days))
         }
+        Request::Tasks {
+            search,
+            status,
+            project_id,
+            limit,
+        } => {
+            let kept_local = KeptLocal::read(&store).map_err(store_refusal)?;
+            let value = crate::planning::history(history, |conn| {
+                let hidden = crate::planning::work::drawing_on(conn, |kind, source_id| {
+                    super::external::evidence_kept_local(kind, source_id, &kept_local)
+                })?;
+                crate::planning::work::chat::tasks(
+                    conn,
+                    &hidden,
+                    search.as_deref(),
+                    status,
+                    project_id.as_deref(),
+                    limit,
+                )
+            })?;
+            Ok(value_outcome(value, &["/rows"]))
+        }
+        Request::Task { reference } => {
+            let kept_local = KeptLocal::read(&store).map_err(store_refusal)?;
+            let value = crate::planning::history(history, |conn| {
+                let hidden = crate::planning::work::drawing_on(conn, |kind, source_id| {
+                    super::external::evidence_kept_local(kind, source_id, &kept_local)
+                })?;
+                crate::planning::work::chat::task(conn, &hidden, &reference)
+            })?
+            .ok_or_else(|| format!("no task {} in Sona", short(&reference)))?;
+            Ok(value_outcome(value, &["/activity", "/details"]))
+        }
+        Request::Projects { limit } => {
+            let value = crate::planning::history(history, |conn| {
+                crate::planning::work::chat::projects(conn, limit)
+            })?;
+            Ok(value_outcome(value, &["/rows"]))
+        }
+        Request::Cycles => {
+            let value = crate::planning::history(history, |conn| {
+                crate::planning::work::chat::cycles(conn, now.timestamp_millis())
+            })?;
+            Ok(value_outcome(value, &["/rows"]))
+        }
+        Request::Initiatives => {
+            let value = crate::planning::history(history, |conn| {
+                crate::planning::work::chat::initiatives(conn)
+            })?;
+            Ok(value_outcome(value, &["/rows"]))
+        }
+        Request::Notes { search, limit } => {
+            let value = crate::planning::history(history, |conn| {
+                crate::planning::work::chat::notes(conn, search.as_deref(), limit)
+            })?;
+            Ok(value_outcome(value, &["/rows"]))
+        }
+        Request::Note { note_id } => {
+            let value = crate::planning::history(history, |conn| {
+                crate::planning::work::chat::note(conn, &note_id)
+            })?
+            .ok_or_else(|| format!("no note {} in Sona", short(&note_id)))?;
+            Ok(value_outcome(value, &["/body"]))
+        }
+        Request::Skill { name } => {
+            let list = store.saved_prompts().map_err(store_refusal)?;
+            match name {
+                None => {
+                    let rows: Vec<Value> = list
+                        .skills()
+                        .map(|skill| {
+                            json!({
+                                "name": skill.name,
+                                "about": skill.target.as_str(),
+                                "output": skill.output,
+                            })
+                        })
+                        .collect();
+                    let mut map = Map::new();
+                    map.insert("skills".to_string(), json!(rows));
+                    Ok(Outcome::new(map, &["/skills"]))
+                }
+                Some(name) => {
+                    let Some(skill) = list.skill(&name) else {
+                        let available: Vec<&str> =
+                            list.skills().map(|item| item.name.as_str()).collect();
+                        return if available.is_empty() {
+                            Err("no skills are saved yet".to_string())
+                        } else {
+                            Err(format!(
+                                "no skill named \"{}\" (available: {})",
+                                short(&name),
+                                available.join(", ")
+                            ))
+                        };
+                    };
+                    let mut map = Map::new();
+                    map.insert("name".to_string(), json!(skill.name));
+                    map.insert("body".to_string(), json!(skill.body));
+                    map.insert("about".to_string(), json!(skill.target.as_str()));
+                    map.insert("output".to_string(), json!(skill.output));
+                    Ok(Outcome::new(map, &["/body"]))
+                }
+            }
+        }
+        Request::Help { query, limit } => {
+            let sections = crate::help::search(&query, limit);
+            let mut map = Map::new();
+            map.insert("sections".to_string(), json!(sections));
+            Ok(Outcome::new(map, &["/sections"]))
+        }
+        Request::McpServers | Request::McpTools { .. } => {
+            Err("outside MCP servers are not available in this process".to_string())
+        }
+    }
+}
+
+fn value_outcome(value: Value, cuts: &'static [&'static str]) -> Outcome {
+    match value {
+        Value::Object(map) => Outcome::new(map, cuts),
+        other => {
+            let mut map = Map::new();
+            map.insert("value".to_string(), other);
+            Outcome::new(map, cuts)
+        }
     }
 }
 
@@ -361,9 +548,7 @@ fn folder_search_scope(scope: QueryScope, folder: &FolderScope) -> Result<(), St
         | QueryScope::People
         | QueryScope::Loops
         | QueryScope::Notes
-        | QueryScope::Tasks => {
-            Err(folder_only(folder))
-        }
+        | QueryScope::Tasks => Err(folder_only(folder)),
     }
 }
 
@@ -422,6 +607,38 @@ enum Request {
     Activity {
         days: u32,
     },
+    Tasks {
+        search: Option<String>,
+        status: crate::planning::work::chat::StatusFilter,
+        project_id: Option<String>,
+        limit: usize,
+    },
+    Task {
+        reference: String,
+    },
+    Projects {
+        limit: usize,
+    },
+    Cycles,
+    Initiatives,
+    Notes {
+        search: Option<String>,
+        limit: usize,
+    },
+    Note {
+        note_id: String,
+    },
+    Skill {
+        name: Option<String>,
+    },
+    Help {
+        query: String,
+        limit: usize,
+    },
+    McpServers,
+    McpTools {
+        server: String,
+    },
 }
 
 impl Request {
@@ -440,6 +657,8 @@ impl Request {
                 | Self::Meeting { .. }
                 | Self::Transcript { .. }
                 | Self::Loops { .. }
+                | Self::Skill { .. }
+                | Self::Help { .. }
         )
     }
 }
@@ -525,9 +744,61 @@ fn parse(call: &ToolCall) -> Result<Request, String> {
             days: days(args, 3650, 90)?,
             limit: count(args, "limit", 1, 50, 25)?,
         },
-        _ => Request::Activity {
+        "activity" => Request::Activity {
             days: days(args, 90, 14)?,
         },
+        "tasks" => Request::Tasks {
+            search: text(args, "search", MAX_QUERY_CHARS)?,
+            status: match choice(
+                args,
+                "status",
+                &[
+                    "open",
+                    "closed",
+                    "all",
+                    "triage",
+                    "backlog",
+                    "todo",
+                    "in_progress",
+                    "done",
+                    "canceled",
+                    "duplicate",
+                ],
+            )? {
+                None => crate::planning::work::chat::StatusFilter::Open,
+                Some(name) => crate::planning::work::chat::StatusFilter::named(name)
+                    .unwrap_or(crate::planning::work::chat::StatusFilter::Open),
+            },
+            project_id: uuid(args, "project_id")?.map(|id| id.to_string()),
+            limit: count(args, "limit", 1, 50, 20)?,
+        },
+        "task" => Request::Task {
+            reference: required(text(args, "task", 64)?, "task")?,
+        },
+        "projects" => Request::Projects {
+            limit: count(args, "limit", 1, 50, 25)?,
+        },
+        "cycles" => Request::Cycles,
+        "initiatives" => Request::Initiatives,
+        "notes" => Request::Notes {
+            search: text(args, "search", MAX_QUERY_CHARS)?,
+            limit: count(args, "limit", 1, 50, 20)?,
+        },
+        "note" => Request::Note {
+            note_id: required(uuid(args, "note_id")?, "note_id")?.to_string(),
+        },
+        "skill" => Request::Skill {
+            name: text(args, "name", 120)?,
+        },
+        "help" => Request::Help {
+            query: required(text(args, "query", MAX_QUERY_CHARS)?, "query")?,
+            limit: count(args, "limit", 1, 20, 5)?,
+        },
+        "mcp_servers" => Request::McpServers,
+        "mcp_tools" => Request::McpTools {
+            server: required(text(args, "server", 64)?, "server")?,
+        },
+        _ => return Err(format!("unknown tool {}", short(&call.tool))),
     };
     Ok(request)
 }

@@ -25,6 +25,7 @@ mod context;
 mod deeplink;
 mod delivery;
 mod fs_util;
+mod help;
 mod helpers;
 mod identity_adoption;
 mod input;
@@ -1561,6 +1562,10 @@ pub fn run(cli_args: CliArgs) {
     // Detect portable mode before anything else
     portable::init();
 
+    if !cli_args.help_search.is_empty() {
+        std::process::exit(help::run_cli(&cli_args));
+    }
+
     if cli_args.agent_panel_public_identity {
         match tauri::async_runtime::block_on(agent_panel::cli_public_identity()) {
             Ok(identity) => match serde_json::to_string(&identity) {
@@ -1931,6 +1936,12 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_get,
             commands::meeting::meeting_search,
             commands::meeting::meeting_said_search,
+            help::help_search,
+            agent_panel::mcp_servers::agent_mcp_servers_list,
+            agent_panel::mcp_servers::agent_mcp_server_add,
+            agent_panel::mcp_servers::agent_mcp_server_remove,
+            agent_panel::mcp_servers::agent_mcp_server_tools,
+            agent_panel::mcp_servers::agent_mcp_server_tool_set,
             commands::meeting::meeting_title_set,
             commands::meeting::meeting_speaker_rename,
             commands::call_names::meeting_call_name_targets,

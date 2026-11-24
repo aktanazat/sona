@@ -89,6 +89,7 @@ final class PromptsStore {
             body: draft.body,
             output: draft.schema.map(PromptOutput.schema) ?? .text,
             target: draft.target,
+            skill: draft.skill,
             expectedRevision: revision
         )
         do {
@@ -347,6 +348,7 @@ final class PromptsStore {
         let body: String
         let output: PromptOutput
         let target: PromptTarget
+        let skill: Bool
         let expectedRevision: UInt64
 
         enum CodingKeys: String, CodingKey {
@@ -356,6 +358,7 @@ final class PromptsStore {
             case body
             case output
             case target
+            case skill
             case expectedRevision = "expected_revision"
         }
     }

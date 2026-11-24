@@ -346,6 +346,7 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::work::changes::PERSONAL_NOTES_MIGRATION),
     M::up(crate::planning::work::views::VIEWS_MIGRATION),
     M::up(crate::planning::work::changes::VIEW_CHANGES_MIGRATION),
+    M::up(crate::planning::work::agents::CHAT_VIA_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

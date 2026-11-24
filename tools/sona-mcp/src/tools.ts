@@ -2249,6 +2249,34 @@ export const TOOLS: readonly ToolDefinition[] = [
     ],
   },
   {
+    name: "sona_help",
+    title: "Search Sona's help",
+    description:
+      "Answer 'how do I…' questions about Sona from the guide and the keyboard shortcuts it ships with. Returns sections, best match first, each with source ('guide' or 'shortcuts'), title and text; shortcut lines read 'New task: c'. Reads no recordings or settings, so it needs no External access.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The question or words, such as 'new task' or 'export meetings'.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 20,
+          description: "How many sections to return. Sona defaults to 5.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      `--help-search=${text(input, "query", true)}`,
+      "--json",
+      ...optional("--limit", count(input, "limit")),
+    ],
+  },
+  {
     name: "sona_meetings",
     title: "List Sona meetings",
     description:
@@ -2879,7 +2907,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_work_get",
     title: "Read a Sona task",
     description:
-      "Read one task: every field and a sona://task link (link) that opens it in Sona, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to (a blocker that is done or canceled reads as related, as Sona shows it), the task it sits under (parent) and its sub-tasks with how many are done (sub_tasks), its reminder, the agent sessions working on it (sessions), its comment threads with replies, its attachments (files with the path of Sona's copy, and links), its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent, an agent's with how it came (via: mcp or cli), and the created entry of a task heard in a meeting naming that meeting. Writing S-12 in a description or comment links that task as related.",
+      "Read one task: every field and a sona://task link (link) that opens it in Sona, how often it repeats, the meeting quote it came from with its speaker and a sona://loop link, the tasks it blocks, is blocked by or relates to (a blocker that is done or canceled reads as related, as Sona shows it), the task it sits under (parent) and its sub-tasks with how many are done (sub_tasks), its reminder, the agent sessions working on it (sessions), its comment threads with replies, its attachments (files with the path of Sona's copy, and links), its evidence (meetings, notes, dictation quotes and links), what Sona suggests for it while it waits in triage (owner, due day, project, duplicate) with the reason and quote, and its history, each entry marked as made by the user (me), Sona or an agent, an agent's with how it came (via: mcp, cli, or chat for a change the user approved in Talk to Sona), and the created entry of a task heard in a meeting naming that meeting. Writing S-12 in a description or comment links that task as related.",
     inputSchema: {
       type: "object",
       properties: { task: TASK },
@@ -7944,7 +7972,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_saved_prompts",
     title: "Read Sona's saved prompts",
-    description: "The saved prompts: each one's id, name, question, answer shape, and whether it is asked about a meeting, a person or a series.",
+    description: "The saved prompts: each one's id, name, question, answer shape, whether it is asked about a meeting, a person or a series, and whether it is a skill (skill: true), which Talk to Sona and automations may call by its name.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "saved-prompts", "--json"],
   },
@@ -7984,6 +8012,7 @@ export const TOOLS: readonly ToolDefinition[] = [
         about: { type: "string", enum: ["meeting", "person", "series"], description: "What the prompt is asked about." },
         schema: { type: "string", description: "Answer as one JSON object checked against this JSON schema, instead of prose." },
         id: { type: "string", description: "The saved prompt to change, from sona_saved_prompts. Left out: a new prompt." },
+        skill: { type: "boolean", description: "true makes it a skill Talk to Sona and automations may call by its name (skill names are unique); false stops that. Left out: it stays as it is." },
         dry_run: DRY_RUN,
         operation_id: SETTINGS_OPERATION_ID,
       },
@@ -7996,6 +8025,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       `--about=${text(input, "about", true)}`,
       ...assigned("--schema", text(input, "schema")),
       ...assigned("--id", text(input, "id")),
+      ...(input.skill === true ? ["--skill"] : input.skill === false ? ["--no-skill"] : []),
       "--",
       text(input, "name", true),
     ],
@@ -8132,6 +8162,14 @@ export const TOOLS: readonly ToolDefinition[] = [
       "The connections (Slack, Notion, CRMs, webhooks) with their automatic-send rules and recent sends. Never a token. Sends of a meeting kept on this Mac are left out, and so are rules for a series kept on this Mac; rules_left_out says when one was.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     argv: () => ["work", "connections", "--json"],
+  },
+  {
+    name: "sona_mcp_servers",
+    title: "Read outside MCP servers",
+    description:
+      "The outside MCP servers listed in Settings > Agents, whose read-only tools Talk to Sona may ask to call once the owner switches each one on: each server's id, name, address (url: scheme and host only, since a path can carry a key) and whether a token is saved in Keychain (has_token). Never returns a token. Adding or removing a server and switching its tools on stay in Settings > Agents.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "mcp-servers", "--json"],
   },
   {
     name: "sona_sync",

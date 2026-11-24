@@ -985,6 +985,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         crate::planning::catalog::DEPENDENCY_INITIATIVE_HISTORY_MIGRATION,
         crate::planning::work::views::VIEWS_MIGRATION,
         crate::planning::work::changes::VIEW_CHANGES_MIGRATION,
+        crate::planning::work::agents::CHAT_VIA_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

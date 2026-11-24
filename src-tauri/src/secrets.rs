@@ -78,6 +78,14 @@ impl SecretAccount {
         })
     }
 
+    pub(crate) fn agent_mcp_server(id: &str) -> Result<Self, SecretStoreError> {
+        let id = uuid::Uuid::parse_str(id)
+            .map_err(|_| SecretStoreError::new(SecretErrorKind::Invalid))?;
+        Ok(Self {
+            account: format!("agent_mcp_servers/{id}"),
+        })
+    }
+
     pub(crate) fn history_storage() -> Self {
         Self {
             account: "history_storage/database-key-v1".to_string(),

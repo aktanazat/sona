@@ -97,6 +97,17 @@ pub struct CliArgs {
     #[arg(long)]
     pub agent_panel_public_identity: bool,
 
+    /// Search Sona's bundled help, the guide and the keyboard shortcuts, and
+    /// exit. It reads no recordings or settings, so it needs no External
+    /// access. Reads --limit (1 to 20, default 5) and --json.
+    #[arg(
+        long,
+        value_name = "WORDS",
+        num_args = 1..,
+        conflicts_with_all = ["read", "transcribe_file", "list_devices", "list_models", "agent_panel_public_identity"]
+    )]
+    pub help_search: Vec<String>,
+
     /// Repeat the transcription N times (best_ms reports the fastest run).
     #[arg(long, value_name = "N")]
     pub repeat: Option<usize>,

@@ -2057,7 +2057,10 @@ impl MeetingSessionManager {
         for source_kind in &plan.requested_sources {
             let probe = source_provider.probe(*source_kind);
             if probe.availability != SourceAvailability::Available {
-                log::warn!("Meeting source {source_kind:?} skipped: {:?}", probe.availability);
+                log::warn!(
+                    "Meeting source {source_kind:?} skipped: {:?}",
+                    probe.availability
+                );
                 continue;
             }
             let source = match source_provider.acquire(*source_kind) {
@@ -2110,7 +2113,9 @@ impl MeetingSessionManager {
                         let (report, source) = handle.join().ok()?;
                         let report = report
                             .inspect_err(|error| {
-                                log::warn!("Meeting source {source_kind:?} did not start: {error:?}");
+                                log::warn!(
+                                    "Meeting source {source_kind:?} did not start: {error:?}"
+                                );
                             })
                             .ok()?;
                         (report.track_id == track_id && report.source_kind == source_kind)
@@ -4469,7 +4474,13 @@ impl MeetingSessionManager {
         let live = self.live_transcript(session_id);
         let processing = Arc::clone(&self.processing);
         tauri::async_runtime::spawn_blocking(move || {
-            processing.live_help(&store, session_id, live.as_deref(), kind, question.as_deref())
+            processing.live_help(
+                &store,
+                session_id,
+                live.as_deref(),
+                kind,
+                question.as_deref(),
+            )
         })
         .await
         .map_err(|_| MeetingCommandError::EngineFailure)?
@@ -5109,7 +5120,15 @@ impl TrackWorker {
         let worker_stop = Arc::clone(&stop);
         let worker_save_held = Arc::clone(&save_held);
         let handle = thread::spawn(move || {
-            run_track_worker(store, writer, reader, report, meter, worker_stop, worker_save_held)
+            run_track_worker(
+                store,
+                writer,
+                reader,
+                report,
+                meter,
+                worker_stop,
+                worker_save_held,
+            )
         });
         Self {
             stop,
@@ -8044,6 +8063,7 @@ pub(crate) mod tests {
                         body: "List the decisions.".to_string(),
                         output: PromptOutput::Text,
                         target: PromptTarget::Meeting,
+                        skill: false,
                         expected_revision: store.saved_prompts().unwrap().revision,
                     },
                     1,
@@ -9152,7 +9172,8 @@ pub(crate) mod tests {
             let mut guard = lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let lane = guard.as_mut().expect("the source was handed a lane");
             for sequence in first..first + PACKETS {
-                let offset_ns = heard_at_ns + i64::try_from(sequence - first).unwrap() * 100_000_000;
+                let offset_ns =
+                    heard_at_ns + i64::try_from(sequence - first).unwrap() * 100_000_000;
                 assert_eq!(
                     lane.try_push_interleaved(
                         CapturedPacket {
@@ -9258,7 +9279,8 @@ pub(crate) mod tests {
         );
         assert!(live.snapshot(session_id).segments.is_empty());
 
-        let saved = || store.session_snapshot(session_id).unwrap().sources[0].last_durable_offset_ns;
+        let saved =
+            || store.session_snapshot(session_id).unwrap().sources[0].last_durable_offset_ns;
         let before_the_pause = saved();
         tauri::async_runtime::block_on(manager.pause(MeetingMutationRequest {
             operation_id: MeetingOperationId::new(),
