@@ -27,7 +27,8 @@
     "check:theme": "bash scripts/check-theme.sh",
     "check:meeting-live": "bash scripts/check-meeting-live.sh",
     "check:work-views": "bash scripts/check-work-views.sh",
-    "check:identity": "bun scripts/ci/check-identity.ts"
+    "check:identity": "bun scripts/ci/check-identity.ts",
+    "eval:dictation": "bun scripts/dictation-eval.ts"
   },
   "dependencies": {
     "zod": "^3.25.76"
