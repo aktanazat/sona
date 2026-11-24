@@ -2583,6 +2583,7 @@ mod tests {
                 trigger: LoopTrigger::LabelAdded { label_id: None },
                 conditions: LoopConditions::default(),
                 tools: Vec::new(),
+                reasoning: None,
             },
             "you",
             1,

@@ -56,7 +56,7 @@ use self::sync::{MeetingReader, People};
 pub use self::types::WorkChanged;
 use self::types::{
     WorkActivityKind, WorkActor, WorkAttachment, WorkAttachmentFile, WorkComment, WorkCommentPage,
-    WorkCommentSubject, WorkCounts, WorkDay, WorkDisplay, WorkDoer, WorkItem, WorkItemDetail,
+    WorkCommentSubject, WorkCounts, WorkDay, WorkDoer, WorkItem, WorkItemDetail,
     WorkItemInput, WorkItemRow, WorkLabel, WorkList, WorkOwner, WorkPatch, WorkPlace, WorkProgress,
     WorkProjectChoice, WorkQuery, WorkReactionSubject, WorkRelation, WorkRelationKind, WorkRepeat,
     WorkSource, WorkStatus, WorkTimeBlock, WorkView, WorkViewInput,
