@@ -70,6 +70,9 @@ final class KeyboardMicrophone {
     private var deadline: Task<Void, Never>?
     private var samples = 0
     private var measuredAt: ContinuousClock.Instant?
+    /// The squared samples heard since the last level, so a level covers all of that audio
+    /// rather than its last chunk.
+    private var unmeasured: (squares: Float, frames: Int) = (0, 0)
     private var audio: KeyboardAudioFile?
     #if DEBUG
     private var script: [String]?
@@ -109,6 +112,7 @@ final class KeyboardMicrophone {
         request.contextualStrings = Array(hints.prefix(100))
         samples = 0
         measuredAt = nil
+        unmeasured = (0, 0)
         let report: @Sendable (String?, Bool, String?) -> Void = { [weak self] text, final, failure in
             Task { @MainActor in self?.recognized(text: text, final: final, failure: failure, run: run) }
         }
@@ -294,12 +298,14 @@ final class KeyboardMicrophone {
         request.append(buffer)
         try? audio?.append(data)
         if !draining, let onLevel {
+            var squares: Float = 0
+            vDSP_svesq(channel, 1, &squares, vDSP_Length(frames))
+            unmeasured = (unmeasured.squares + squares, unmeasured.frames + frames)
             let now = ContinuousClock.now
             if measuredAt.map({ now - $0 >= KeyboardLevel.interval }) ?? true {
                 measuredAt = now
-                var rms: Float = 0
-                vDSP_rmsqv(channel, 1, &rms, vDSP_Length(frames))
-                onLevel(KeyboardLevel.normalized(rms: rms))
+                onLevel(KeyboardLevel.normalized(rms: (unmeasured.squares / Float(unmeasured.frames)).squareRoot()))
+                unmeasured = (0, 0)
             }
         }
         #if DEBUG

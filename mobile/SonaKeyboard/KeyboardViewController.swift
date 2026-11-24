@@ -993,12 +993,14 @@ private struct KeyboardView: View {
     }
 }
 
-/// The last levels heard, newest last, and when the newest came, so the bars can glide left
-/// between samples instead of stepping.
+/// The last levels heard, newest last, when the newest came, and how far apart they have
+/// been coming, so the bars glide left at the pace the levels arrive instead of stepping
+/// or stalling between them.
 private struct LevelHistory: Equatable {
     static let count = 32
     private(set) var levels = [Float](repeating: 0, count: count)
     private(set) var at: TimeInterval = 0
+    private(set) var pace = Double(KeyboardLevel.interval.components.attoseconds) / 1e18
 
     /// A loud sound shows at once; a falling one eases off over a few samples.
     func appending(_ level: Float, at time: TimeInterval) -> Self {
@@ -1006,6 +1008,9 @@ private struct LevelHistory: Equatable {
         let eased = max(level, (levels.last ?? 0) * 0.6)
         next.levels.removeFirst()
         next.levels.append(min(max(eased, 0), 1))
+        if at > 0 {
+            next.pace = pace * 0.8 + min(max(time - at, 0.03), 0.25) * 0.2
+        }
         next.at = time
         return next
     }
@@ -1031,7 +1036,6 @@ private final class KeyboardWaveformLevels {
 private struct KeyboardWaveform: View {
     private static let pitch: CGFloat = 3.5
     private static let bar: CGFloat = 2.25
-    private static let interval = Double(KeyboardLevel.interval.components.attoseconds) / 1e18
 
     var levels: KeyboardWaveformLevels?
     var request: UUID?
@@ -1047,7 +1051,7 @@ private struct KeyboardWaveform: View {
                 if connecting {
                     drawConnecting(at: now, in: &context, size: size)
                 } else {
-                    draw(recent, at: reduceMotion ? recent.at + Self.interval : now, in: &context, size: size)
+                    draw(recent, at: reduceMotion ? recent.at + recent.pace : now, in: &context, size: size)
                 }
             }
         }
@@ -1063,7 +1067,7 @@ private struct KeyboardWaveform: View {
     }
 
     private func draw(_ history: LevelHistory, at now: TimeInterval, in context: inout GraphicsContext, size: CGSize) {
-        let glide = CGFloat(min(max((now - history.at) / Self.interval, 0), 1))
+        let glide = CGFloat(min(max((now - history.at) / history.pace, 0), 1))
         let count = history.levels.count
         var path = Path()
         for (index, level) in history.levels.enumerated() {
