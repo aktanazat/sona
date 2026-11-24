@@ -216,8 +216,9 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | UI action | core/bridge method | CLI command | MCP tool | status |
 |---|---|---|---|---|
 | Cycle list: every cycle under way, ahead and ended, each opening its own page (Cycle tab › All cycles; J/K move, Space peeks, Return opens, Esc on a page goes back) | `work_cycles` | `work cycles` | `sona_cycle_list` *(opt-in)* | both |
-| Capacity: what a cycle usually finishes, the mean done of the last three ended; a dial on upcoming cycles against their scope | `work_cycles` (`capacity`) | `work cycles` (`capacity`) | `sona_cycle_list` (`capacity`) *(opt-in)* | both |
+| Capacity: compare planned tasks in active and upcoming cycles with the average completed in the last three ended cycles | `work_cycles` (`capacity`) | `work cycles` (`capacity`) | `sona_cycle_list` (`capacity`) *(opt-in)* | both |
 | Cycle page graph: scope, started, done, daily finished bars and a target line flat on weekends | `work_cycle` (`days`, `target`) | `work cycle current\|next\|N` (`days`, `target`) | `sona_cycle_list` (`cycle`) *(opt-in)* | both |
+| Active cycle time remaining: the Mac page, list and Space preview count weekdays; the CLI and MCP return the cycle dates | — | — | — | Mac display |
 | Cycle settings: length, start day, cooldown, how many ahead, auto-add started and finished work with no cycle | `work_cycle_settings_save` | `work cycle-settings --weeks --start-weekday --cooldown --upcoming --auto-add-started BOOL --auto-add-completed BOOL` | `sona_cycle_save` (`auto_add_started`, `auto_add_completed`) *(opt-in)* | both |
 | Rename a cycle | `work_cycle_save` | `work cycle-save CYCLE --name` | `sona_cycle_save` (`name`) *(opt-in)* | both |
 | Move a cycle's days (cycle page › Dates: last day of the one under way, first and last day of one ahead) | `work_cycle_save` (`startDay`, `endDay`) | `work cycle-save CYCLE --start --end` | `sona_cycle_save` (`start`, `end`) *(opt-in)* | both |
