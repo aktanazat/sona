@@ -629,7 +629,7 @@ mod macos {
         UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
         UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
         UNNotificationCategoryOptions, UNNotificationRequest, UNNotificationResponse,
-        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+        UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
@@ -639,6 +639,7 @@ mod macos {
     const ACCESS_NOT_DETERMINED: u8 = 0;
     const ACCESS_AUTHORIZED: u8 = 1;
     const ACCESS_DENIED: u8 = 2;
+    const ACCESS_UNAVAILABLE: u8 = 3;
 
     fn access_code(status: UNAuthorizationStatus) -> u8 {
         match status {
@@ -652,6 +653,7 @@ mod macos {
         match code {
             ACCESS_AUTHORIZED => NotificationAccess::Authorized,
             ACCESS_DENIED => NotificationAccess::Denied,
+            ACCESS_UNAVAILABLE => NotificationAccess::Unavailable,
             _ => NotificationAccess::NotDetermined,
         }
     }
@@ -863,7 +865,7 @@ mod macos {
                         Some(settings) => access_code(settings.authorizationStatus()),
                         None => {
                             log::warn!("Notification settings are unavailable.");
-                            ACCESS_NOT_DETERMINED
+                            ACCESS_UNAVAILABLE
                         }
                     };
                     cached_access.store(access, Ordering::Release);
