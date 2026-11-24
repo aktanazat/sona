@@ -482,7 +482,7 @@ and line.
 | Lazy stream close toggle (chat-settings-rest:139) | change_lazy_stream_close_setting | recording stream lifecycle | UI-only by design: recording, transcription or meeting processing, outside this work |
 | Clamshell mic Reset (chat-settings-rest:140) | set_clamshell_microphone | microphone choice from live devices (README 341 precedent); also recording input under the stop line | window-bound |
 | Clamshell microphone picker (chat-settings-rest:141) | set_clamshell_microphone | same as 140 | window-bound |
-| Sound theme picker (chat-settings-rest:142) | change_sound_theme_setting (+check_custom_sounds) | `work setting sound-theme marimba\|pop\|custom`, `sona_setting` (the custom-files check is row 102) | both |
+| Sound theme picker (chat-settings-rest:142) | change_sound_theme_setting (+check_custom_sounds) | `work setting sound-theme marimba\|pop\|mechanical\|custom`, `sona_setting` (the custom-files check is row 102) | both |
 | initial load (chat-settings-rest:166) | get_modes, get_app_settings, get_available_models | `work settings` modes (modes, active_mode_id, revision, rules) + `sona --list-models`; `sona_settings` | both |
 | Retry load (chat-settings-rest:168) | get_modes, get_app_settings, get_available_models | same as 166 | both |
 | LLM catalog auto-load (chat-settings-rest:196) | discover_post_process_model_catalog | credential: discover_post_process_model_catalog resolves the provider API key from the keychain (SecretManager) and is provider-consent gated; manual model id stays possible via `work setting cleanup-model ID` | UI-only by design |

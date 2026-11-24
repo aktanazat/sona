@@ -145,6 +145,11 @@ enum Command {
     Finish {
         source: String,
     },
+    /// End whatever is recording and press the submit key once its words
+    /// are delivered; see [`CoordinatorState::on_submit`].
+    Submit {
+        source: String,
+    },
     Cancel,
     /// The pipeline of this run delivered its result or gave up.
     ProcessingFinished {
@@ -567,6 +572,17 @@ impl CoordinatorState {
         self.hand_over_recording(source)
     }
 
+    /// The Send shortcut: a Stop button whose dictation also presses the
+    /// submit key after it is delivered. Only this run's plan changes, so the
+    /// auto-submit setting and every later dictation stay as they were.
+    fn on_submit(&mut self, source: String) -> Option<Effect> {
+        let Stage::Recording { run_plan, .. } = &mut self.stage else {
+            return None;
+        };
+        run_plan.submit_after_delivery();
+        self.on_finish(source)
+    }
+
     /// Hand the active recording's plan to the executor. Returns None when
     /// `intent` is not the intent currently recording.
     fn stop_recording(
@@ -641,6 +657,7 @@ impl TranscriptionCoordinator {
                     let effect = match cmd {
                         Command::Input(input) => state.on_input(input, Instant::now()),
                         Command::Finish { source } => state.on_finish(source),
+                        Command::Submit { source } => state.on_submit(source),
                         Command::Cancel => {
                             state.on_cancel();
                             let _ = DictationDurationWarningEvent {
@@ -721,6 +738,19 @@ impl TranscriptionCoordinator {
         }
     }
 
+    /// The Send shortcut. Like a Stop button it never starts a recording.
+    pub fn send_submit(&self, source: &str) {
+        if self
+            .tx
+            .send(Command::Submit {
+                source: source.to_string(),
+            })
+            .is_err()
+        {
+            warn!("Transcription coordinator channel closed");
+        }
+    }
+
     pub fn notify_cancel(&self) {
         if self.tx.send(Command::Cancel).is_err() {
             warn!("Transcription coordinator channel closed");
@@ -767,7 +797,7 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
             }
             .emit(app);
         }
-        Effect::Latched => crate::shortcut::release_bare_cancel_key(app),
+        Effect::Latched => crate::shortcut::release_bare_recording_keys(app),
         Effect::MeetingSuggestion { elapsed_seconds } => {
             if let Err(error) = app.emit(
                 DICTATION_MEETING_SUGGESTION_EVENT,
@@ -796,7 +826,7 @@ fn begin(app: &AppHandle, state: &mut CoordinatorState, request: StartRequest) {
         run_plan,
     );
     if hands_free {
-        crate::shortcut::release_bare_cancel_key(app);
+        crate::shortcut::release_bare_recording_keys(app);
     }
 }
 
@@ -1009,6 +1039,8 @@ mod tests {
         microphone_opens: bool,
         /// The run the last stop handed to the pipeline.
         handed_over: Option<u64>,
+        /// Whether that run presses the submit key after delivery.
+        handed_over_submits: Option<bool>,
     }
 
     impl Harness {
@@ -1023,6 +1055,7 @@ mod tests {
                 latches: 0,
                 microphone_opens: true,
                 handed_over: None,
+                handed_over_submits: None,
             }
         }
 
@@ -1040,6 +1073,7 @@ mod tests {
                 Some(Effect::Stop { run_plan, .. }) => {
                     self.stops += 1;
                     self.handed_over = Some(run_plan.run_id);
+                    self.handed_over_submits = Some(run_plan.delivery().auto_submit);
                 }
                 Some(Effect::Settled(next)) => {
                     self.settles += 1;
@@ -1121,6 +1155,11 @@ mod tests {
             self.apply(effect);
         }
 
+        fn submit(&mut self) {
+            let effect = self.state.on_submit("send".to_string());
+            self.apply(effect);
+        }
+
         fn advance(&mut self, by: Duration) {
             self.clock += by;
         }
@@ -1149,6 +1188,39 @@ mod tests {
             harness.input(active_mode(), false, true);
             harness.input(active_mode(), true, true);
         }
+    }
+
+    /// Send ends a held dictation with the submit key pressed for that run
+    /// alone: the next dictation goes back to its mode's own choice, the key
+    /// still held when Send ended it stops nothing, and Send while nothing
+    /// records starts nothing.
+    #[test]
+    fn send_submits_only_the_dictation_it_ends() {
+        let mut harness = Harness::new();
+        harness.submit();
+        assert!(harness.is_idle(), "Send never starts a recording");
+
+        press_and_hold(&mut harness);
+        harness.advance(Duration::from_millis(900));
+        harness.submit();
+        assert_eq!(harness.stops, 1);
+        assert_eq!(harness.handed_over_submits, Some(true));
+
+        harness.input(active_mode(), false, true);
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert_eq!(harness.stops, 1, "the released chord found nothing to stop");
+
+        harness.processing_finished();
+        harness.input(active_mode(), true, false);
+        harness.advance(Duration::from_millis(500));
+        harness.input(active_mode(), true, false);
+        assert_eq!(harness.stops, 2);
+        assert_eq!(
+            harness.handed_over_submits,
+            Some(false),
+            "the next dictation follows its mode again"
+        );
     }
 
     #[test]

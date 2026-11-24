@@ -18,6 +18,8 @@ struct SettingsScreen: View {
             EssentialsView(store: model.settings) {
                 MeetingDetectionEssentials(store: model.meetingSettings)
             }
+        case .shortcuts:
+            ShortcutsSettingsView(store: model.settings)
         case .dictation:
             DictationSettingsView(store: model.settings, onOpenModes: { model.showSettings(.modes) }) {
                 SettingsCaptureRows(store: model.settings)

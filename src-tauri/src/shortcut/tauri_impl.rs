@@ -30,6 +30,9 @@ pub fn validate_shortcut(raw: &str) -> Result<(), String> {
     if raw.trim().is_empty() {
         return Err("Shortcut cannot be empty".into());
     }
+    if raw.trim().starts_with(super::handy_keys::DOUBLE_TAP_PREFIX) {
+        return Err("Tauri global shortcuts cannot be double-tapped".into());
+    }
 
     let modifiers = [
         "ctrl", "control", "shift", "alt", "option", "meta", "command", "cmd", "super", "win",

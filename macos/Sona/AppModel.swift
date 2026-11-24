@@ -70,7 +70,7 @@ enum Place: Int, CaseIterable, Identifiable {
 
 /// Settings' pages, in the order its list shows them.
 enum SettingsPlace: Int, CaseIterable, Identifiable {
-    case profile, essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
+    case profile, essentials, shortcuts, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug
     case connections, tasks
 
@@ -80,6 +80,7 @@ enum SettingsPlace: Int, CaseIterable, Identifiable {
         switch self {
         case .profile: "Profile"
         case .essentials: "Essentials"
+        case .shortcuts: "Shortcuts"
         case .dictation: "Dictation"
         case .models: "Models"
         case .modes: "Modes"
@@ -511,7 +512,7 @@ final class AppModel {
         actions.append(PaletteAction(id: "go-settings", group: .navigation, title: "Settings") { [weak self] in
             self?.showSettings(.essentials)
         })
-        for page in [SettingsPlace.modes, .vocabulary, .models] {
+        for page in [SettingsPlace.shortcuts, .modes, .vocabulary, .models] {
             actions.append(PaletteAction(id: "go-settings-\(page.rawValue)", group: .navigation, title: page.title) { [weak self] in
                 self?.showSettings(page)
             })

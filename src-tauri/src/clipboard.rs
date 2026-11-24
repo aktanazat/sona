@@ -1158,6 +1158,35 @@ fn clipboard_still_ours(current_text: Option<&str>, temporary_text: &str) -> boo
     current_text == Some(temporary_text)
 }
 
+/// What a paste leaves on the clipboard once it is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClipboardAfterPaste {
+    /// Someone copied something newer, and their copy wins.
+    Untouched,
+    /// The user's own clipboard goes back.
+    Restore,
+    /// The dictation stays: the user asked for it, or the paste chord could
+    /// not be sent and pasting by hand is how the words still get there.
+    KeepDictation,
+}
+
+/// `still_ours`: the clipboard still holds what Sona put there. `pasted`:
+/// the paste chord was sent. `keep_dictation`: the mode leaves the words on
+/// the clipboard.
+pub(crate) fn clipboard_after_paste(
+    still_ours: bool,
+    pasted: bool,
+    keep_dictation: bool,
+) -> ClipboardAfterPaste {
+    if !still_ours {
+        ClipboardAfterPaste::Untouched
+    } else if keep_dictation || !pasted {
+        ClipboardAfterPaste::KeepDictation
+    } else {
+        ClipboardAfterPaste::Restore
+    }
+}
+
 fn paste_via_clipboard_frozen(
     text: &str,
     app_handle: &AppHandle,
@@ -1203,7 +1232,8 @@ fn paste_via_clipboard_frozen(
 
     // Once the input backend is called, errors are not evidence that no event
     // reached the target. Restore the temporary clipboard only if it is still
-    // exactly the text Sona wrote; a user copy wins every race.
+    // exactly the text Sona wrote, so a user copy wins every race, and only
+    // if the chord went out, so a failed paste leaves the words to paste.
     let injection = {
         #[cfg(target_os = "linux")]
         let native = try_send_key_combo_linux(&settings.paste_method);
@@ -1226,7 +1256,10 @@ fn paste_via_clipboard_frozen(
     // A text read is the portable ownership proof for the legacy path. If it
     // cannot prove the temporary value remains ours (including a new image), it
     // deliberately leaves the user’s newer clipboard untouched.
-    if clipboard_still_ours(clipboard.read_text().ok().as_deref(), text) {
+    // Finishing copies the final text afterwards when the mode asks for it,
+    // so this restore does not keep the dictation for that reason.
+    let still_ours = clipboard_still_ours(clipboard.read_text().ok().as_deref(), text);
+    if clipboard_after_paste(still_ours, injection.is_ok(), false) == ClipboardAfterPaste::Restore {
         #[cfg(target_os = "macos")]
         saved.restore(&NSPasteboard::generalPasteboard());
         #[cfg(not(target_os = "macos"))]
@@ -1344,6 +1377,29 @@ e.g. 28:1 28:0 means pressing on the Enter button on a standard US keyboard.
         assert_eq!(
             ydotool_key_args(&PasteMethod::ShiftInsert, YdotoolKeySyntax::RawKeycodes).unwrap(),
             ["key", "42:1", "110:1", "110:0", "42:0"]
+        );
+    }
+
+    /// A paste borrows the clipboard and gives it back, but only once the
+    /// paste went out: when the chord could not be sent, the words stay on
+    /// the clipboard to paste by hand. A newer copy is never touched.
+    #[test]
+    fn a_sent_paste_restores_the_clipboard_and_a_failed_one_keeps_the_dictation() {
+        assert_eq!(
+            clipboard_after_paste(true, true, false),
+            ClipboardAfterPaste::Restore
+        );
+        assert_eq!(
+            clipboard_after_paste(true, false, false),
+            ClipboardAfterPaste::KeepDictation
+        );
+        assert_eq!(
+            clipboard_after_paste(false, false, false),
+            ClipboardAfterPaste::Untouched
+        );
+        assert_eq!(
+            clipboard_after_paste(true, true, true),
+            ClipboardAfterPaste::KeepDictation
         );
     }
 
