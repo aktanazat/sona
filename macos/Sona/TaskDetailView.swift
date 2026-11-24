@@ -2182,6 +2182,7 @@ private struct RepeatMenu: View {
 /// editor's.
 struct RepeatChoices: View {
     let rule: String?
+    var allowsClearing = true
     let set: (String?) -> Void
     let done: () -> Void
     private static let rules = ["every day", "every weekday", "every monday", "every month"]
@@ -2190,7 +2191,7 @@ struct RepeatChoices: View {
         VStack(alignment: .leading, spacing: 0) {
             PropertyChoices(choices: Self.rules.map { every in
                 PropertyChoice(id: every, title: Recurrence.display(every), on: every == rule) { set(every) }
-            } + (rule == nil ? [] : [PropertyChoice(id: "none", title: "Don't repeat", on: false) { set(nil) }]),
+            } + (allowsClearing && rule != nil ? [PropertyChoice(id: "none", title: "Don't repeat", on: false) { set(nil) }] : []),
             done: done)
             Hairline().padding(.bottom, 8)
             RepeatRuleField { every in

@@ -30,8 +30,8 @@ struct WorkSheets: ViewModifier {
     func body(content: Content) -> some View {
         let focus = model.workFocus
         content
-            .sheet(isPresented: Binding(get: { focus.composing != nil }, set: { if !$0 { focus.composing = nil } })) {
-                TaskComposer(start: focus.composing ?? WorkPatch())
+            .sheet(item: Bindable(focus).composing) { composition in
+                TaskComposer(composition: composition)
                     .environment(model)
             }
             .sheet(isPresented: Binding(get: { focus.shortcutsShown }, set: { focus.shortcutsShown = $0 })) {
@@ -86,7 +86,7 @@ extension AppModel {
         if let labels = patch.labelIds { start.labelIds = labels }
         if let milestone = patch.milestoneId { start.milestoneId = milestone }
         if let cycle = patch.cycle { start.cycle = cycle }
-        workFocus.composing = start
+        workFocus.composing = TaskComposition(start: start, mode: taskListCreationMode)
     }
 
     /// Every milestone of the projects read so far, for milestone groups.
@@ -230,6 +230,8 @@ private struct TasksList: View {
     @ViewBuilder
     private func trailing(_ draft: WorkViewDraft?) -> some View {
         let focus = model.workFocus
+        let creationMode = model.taskListCreationMode
+        let creationTitle = creationMode == .repeating ? "New repeating task" : "New task"
         if focus.tab == .owe, model.work.currentCycle != nil {
             WorkBarToggle(
                 title: "This cycle", icon: "arrow.triangle.2.circlepath",
@@ -246,15 +248,15 @@ private struct TasksList: View {
             model.go(.archive)
         }
         Button {
-            model.newTask()
+            model.newTask(mode: creationMode)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "plus").font(.system(size: 11, weight: .bold))
-                Text("New task")
+                Text(creationTitle)
             }
         }
         .buttonStyle(.primary)
-        .help("New task  C")
+        .help("\(creationTitle)  C")
     }
 }
 

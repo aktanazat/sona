@@ -756,7 +756,7 @@ final class AppModel {
             reveal()
             go(.tasks)
             workFocus.open(nil, in: .tasks)
-            workFocus.composing = draft
+            workFocus.composing = TaskComposition(start: draft)
             return
         }
         if openView(link) { return }

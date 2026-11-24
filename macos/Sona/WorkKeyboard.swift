@@ -440,10 +440,7 @@ final class WorkFocus {
     private(set) var recent: [String] = []
     var picker: WorkPicker?
     var renaming: String?
-    /// The new-task sheet, holding what the task starts with.
-    var composing: WorkPatch?
-    /// ⌥C: the new-task sheet opens on its template list.
-    var composingFromTemplate = false
+    var composing: TaskComposition?
     /// The milestones of the project the milestone picker's tasks share.
     var milestones: [PlanningMilestone] = []
     var shortcutsShown = false
@@ -915,8 +912,7 @@ final class WorkKeys {
             case "f":
                 return model.toggleFavorite(targets)
             case "c" where place != .people && place != .projects:
-                focus.composing = model.workDraftDefaults
-                focus.composingFromTemplate = true
+                focus.composing = TaskComposition(start: model.workDraftDefaults, mode: .template)
                 return true
             default:
                 return false
@@ -967,7 +963,8 @@ final class WorkKeys {
             focus.peeking.toggle()
             return true
         case "c" where place != .people && place != .projects:
-            focus.composing = place == .triage ? WorkPatch() : model.workDraftDefaults
+            let start = place == .triage ? WorkPatch() : model.workDraftDefaults
+            focus.composing = TaskComposition(start: start, mode: model.taskListCreationMode)
             return true
         case "m":
             guard !targets.isEmpty else { return false }
@@ -1423,9 +1420,15 @@ extension AppModel {
         return rows.count == 1 ? "#\(first.number) \(first.title)" : "\(rows.count) tasks"
     }
 
-    func newTask() {
+    var taskListCreationMode: TaskComposition.Mode {
+        guard place == .tasks, workFocus.opened(in: .tasks) == nil, workFocus.tab == .all,
+              workFocus.allQuery.filters == [TaskFilters.repeating] else { return .standard }
+        return .repeating
+    }
+
+    func newTask(mode: TaskComposition.Mode = .standard) {
         go(.tasks)
         workFocus.open(nil, in: .tasks)
-        workFocus.composing = workDraftDefaults
+        workFocus.composing = TaskComposition(start: workDraftDefaults, mode: mode)
     }
 }
