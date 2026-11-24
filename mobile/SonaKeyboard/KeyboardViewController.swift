@@ -991,48 +991,112 @@ private struct KeyboardView: View {
     }
 }
 
-@MainActor
-@Observable
-private final class KeyboardWaveformLevels {
-    private(set) var recent = SIMD16<Float>.zero
+/// The last levels heard, newest last, and when the newest came, so the bars can glide left
+/// between samples instead of stepping.
+private struct LevelHistory: Equatable {
+    static let count = 32
+    private(set) var levels = [Float](repeating: 0, count: count)
+    private(set) var at: TimeInterval = 0
 
-    func reset() {
-        if recent != .zero { recent = .zero }
-    }
-
-    func push(_ level: Float) {
-        let next = KeyboardLevel.append(level, to: recent)
-        if next != recent { recent = next }
+    /// A loud sound shows at once; a falling one eases off over a few samples.
+    func appending(_ level: Float, at time: TimeInterval) -> Self {
+        var next = self
+        let eased = max(level, (levels.last ?? 0) * 0.6)
+        next.levels.removeFirst()
+        next.levels.append(min(max(eased, 0), 1))
+        next.at = time
+        return next
     }
 }
 
+@MainActor
+@Observable
+private final class KeyboardWaveformLevels {
+    private(set) var recent = LevelHistory()
+
+    func reset() {
+        if recent != LevelHistory() { recent = LevelHistory() }
+    }
+
+    func push(_ level: Float) {
+        recent = recent.appending(level, at: Date.timeIntervalSinceReferenceDate)
+    }
+}
+
+/// Mirrored bars that scroll in from the right as Sona hears, fading out to the left and
+/// warming toward the newest sound. Before any sound arrives, a soft wave runs along them
+/// to show the microphone is opening.
 private struct KeyboardWaveform: View {
+    private static let pitch: CGFloat = 3.5
+    private static let bar: CGFloat = 2.25
+    private static let interval = Double(KeyboardLevel.interval.components.attoseconds) / 1e18
+
     var levels: KeyboardWaveformLevels?
     var request: UUID?
-    @State private var appLevels = SIMD16<Float>.zero
+    @State private var appLevels = LevelHistory()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let recent = levels?.recent ?? appLevels
-        HStack(spacing: 2) {
-            ForEach(0..<recent.scalarCount, id: \.self) { index in
-                Capsule()
-                    .fill(Theme.recording)
-                    .frame(width: 2, height: 20)
-                    .scaleEffect(x: 1, y: max(0.1, CGFloat(recent[index])))
+        let connecting = recent.at == 0
+        TimelineView(.animation(paused: reduceMotion)) { timeline in
+            let now = timeline.date.timeIntervalSinceReferenceDate
+            Canvas { context, size in
+                if connecting {
+                    drawConnecting(at: now, in: &context, size: size)
+                } else {
+                    draw(recent, at: reduceMotion ? recent.at + Self.interval : now, in: &context, size: size)
+                }
             }
         }
-        .fixedSize()
-        .animation(reduceMotion ? nil : .linear(duration: 0.066), value: recent)
+        .frame(width: 76, height: 30)
         .accessibilityHidden(true)
         .allowsHitTesting(false)
         .task(id: request) {
             guard let request else { return }
             for await sample in KeyboardSessionStore.levelUpdates(for: request) {
-                let next = KeyboardLevel.append(sample.level, to: appLevels)
-                if next != appLevels { appLevels = next }
+                appLevels = appLevels.appending(sample.level, at: Date.timeIntervalSinceReferenceDate)
             }
         }
+    }
+
+    private func draw(_ history: LevelHistory, at now: TimeInterval, in context: inout GraphicsContext, size: CGSize) {
+        let glide = CGFloat(min(max((now - history.at) / Self.interval, 0), 1))
+        let count = history.levels.count
+        var path = Path()
+        for (index, level) in history.levels.enumerated() {
+            let x = size.width - Self.bar / 2 - (CGFloat(count - 1 - index) + glide) * Self.pitch
+            guard x > -Self.bar else { continue }
+            addBar(at: x, height: Self.bar + CGFloat(pow(level, 0.7)) * (size.height - Self.bar), to: &path, size: size)
+        }
+        fill(path, in: &context, size: size)
+    }
+
+    private func drawConnecting(at now: TimeInterval, in context: inout GraphicsContext, size: CGSize) {
+        let count = Int(size.width / Self.pitch)
+        var path = Path()
+        for index in 0..<count {
+            let x = size.width - Self.bar / 2 - CGFloat(count - 1 - index) * Self.pitch
+            let wave = 0.5 + 0.5 * sin(now * 7 - Double(index) * 0.45)
+            addBar(at: x, height: Self.bar + CGFloat(wave * wave) * size.height * 0.3, to: &path, size: size)
+        }
+        fill(path, in: &context, size: size)
+    }
+
+    private func addBar(at x: CGFloat, height: CGFloat, to path: inout Path, size: CGSize) {
+        let rect = CGRect(x: x - Self.bar / 2, y: (size.height - height) / 2, width: Self.bar, height: height)
+        path.addRoundedRect(in: rect, cornerSize: CGSize(width: Self.bar / 2, height: Self.bar / 2))
+    }
+
+    /// Older bars fade out over the left third; the newest take the warmer red.
+    private func fill(_ path: Path, in context: inout GraphicsContext, size: CGSize) {
+        let gradient = Gradient(stops: [
+            .init(color: Theme.recording.opacity(0), location: 0),
+            .init(color: Theme.recording.opacity(0.85), location: 0.33),
+            .init(color: Theme.recording, location: 0.7),
+            .init(color: Theme.recordingWarm, location: 1),
+        ])
+        context.fill(path, with: .linearGradient(gradient, startPoint: .zero, endPoint: CGPoint(x: size.width, y: 0)))
     }
 }
 
