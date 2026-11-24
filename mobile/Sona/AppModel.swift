@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import Network
 import PhotosUI
+import Speech
 import SwiftUI
 import UIKit
 import WatchConnectivity
@@ -24,6 +25,12 @@ enum BoardState: Equatable {
 }
 
 enum AppPage { case board, capture, recording, dictation, library }
+
+/// Where Sona is in allowing the keyboard its microphone.
+enum KeyboardSetup: Equatable {
+    case asking, ready
+    case refused(String)
+}
 
 /// A photo or screenshot on its way into a thought, already on disk.
 struct CapturedImage {
@@ -62,6 +69,9 @@ final class AppModel: NSObject, ObservableObject {
         didSet { UserDefaults.standard.set(meetingNotes, forKey: "sona.meeting.notes") }
     }
     @Published private(set) var keyboardReturn = false
+    /// Set while the keyboard has Sona open only to allow the microphone.
+    @Published private(set) var keyboardSetup: KeyboardSetup?
+    private var importingKeyboardDictations = false
 
     let library = PhoneLibrary()
     let calendar = PhoneCalendar()
@@ -72,6 +82,7 @@ final class AppModel: NSObject, ObservableObject {
     private var keyboardRequestDocumentID: UUID?
     private var lastKeyboardRequestID: UUID?
     private var keyboardDocumentID: UUID?
+    private var keyboardLanguage: TypingLanguage?
     private var pendingURL: URL?
 
     let recorder = PhoneRecorder()
@@ -108,6 +119,7 @@ final class AppModel: NSObject, ObservableObject {
         recorder.onInterrupted = { [weak self] in
             self?.stopRecording()
         }
+        DictationPreferences.moveKeyboardSwitchToSharedContainer()
         dictation.onEnded = { [weak self] capture in self?.collectDictation(capture) }
         dictation.onStateChanged = { [weak self] in self?.publishKeyboardState() }
         keyboardSignal = KeyboardSignal(.command) { [weak self] in
@@ -124,6 +136,7 @@ final class AppModel: NSObject, ObservableObject {
         activateWatchSession()
         /* A launch is the operator asking again: anything the vault refused earlier gets
          * one more attempt before it is reported as still here. */
+        importKeyboardDictations()
         Task {
             await queue.retryParked()
             await drain()
@@ -159,9 +172,10 @@ final class AppModel: NSObject, ObservableObject {
 
     func startDictation() {
         guard canStartDictation else { return }
+        keyboardSetup = nil
         if keyboardReturn {
-            guard UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey) else { return }
-            startKeyboardDictation(requestID: UUID(), documentID: keyboardDocumentID)
+            guard DictationPreferences.keyboardEnabled else { return }
+            startKeyboardDictation(requestID: UUID(), documentID: keyboardDocumentID, language: keyboardLanguage)
         } else {
             dictation.start()
         }
@@ -175,12 +189,36 @@ final class AppModel: NSObject, ObservableObject {
         if url == DictationLink.meetingURL {
             pendingURL = nil
             startRecording()
+        } else if DictationLink.keyboardSetup(url) {
+            keyboardReturn = false
+            keyboardSetup = .asking
+            guard DictationPreferences.keyboardEnabled else { return }
+            pendingURL = nil
+            allowKeyboardMicrophone()
         } else if DictationLink.opens(url) {
             keyboardDocumentID = DictationLink.keyboardDocument(url)
+            keyboardLanguage = DictationLink.keyboardLanguage(url)
             keyboardReturn = DictationLink.fromKeyboard(url)
-            guard !keyboardReturn || UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey) else { return }
+            guard !keyboardReturn || DictationPreferences.keyboardEnabled else { return }
             pendingURL = nil
             startDictation()
+        }
+    }
+
+    /// A keyboard cannot ask for the microphone or speech recognition; Sona asks, and the
+    /// keyboard then uses what was allowed.
+    private func allowKeyboardMicrophone() {
+        Task {
+            defer { publishKeyboardState() }
+            let microphone = PhoneRecorder.hasPermission ? true : await PhoneRecorder.requestPermission()
+            guard microphone else {
+                keyboardSetup = .refused(NSLocalizedString("status.microphoneOff", comment: ""))
+                return
+            }
+            let speech = await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
+            }
+            keyboardSetup = speech ? .ready : .refused(NSLocalizedString("dictation.speechOff", comment: ""))
         }
     }
 
@@ -196,24 +234,28 @@ final class AppModel: NSObject, ObservableObject {
         publishKeyboardState()
     }
 
-    private func startKeyboardDictation(requestID: UUID, documentID: UUID?) {
+    private func startKeyboardDictation(requestID: UUID, documentID: UUID?, language: TypingLanguage?) {
         guard canStartDictation, !dictation.isBusy else { return }
         keyboardRequestID = requestID
         keyboardRequestDocumentID = documentID
         lastKeyboardRequestID = requestID
         keyboardDocumentID = documentID
-        dictation.start(keyboard: true)
+        keyboardLanguage = language
+        dictation.start(keyboard: true, language: language?.rawValue)
     }
 
     private func receiveKeyboardCommand() {
         do {
             guard let command = try KeyboardSessionStore.shared().takeCommand(),
-                  UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey)
+                  DictationPreferences.keyboardEnabled
             else { return }
             switch command.action {
             case .start:
                 guard dictation.isWarm else { publishKeyboardState(); return }
-                startKeyboardDictation(requestID: command.requestID, documentID: command.documentID)
+                startKeyboardDictation(
+                    requestID: command.requestID, documentID: command.documentID,
+                    language: command.language.flatMap(TypingLanguage.init(rawValue:))
+                )
             case .stop:
                 guard command.requestID == keyboardRequestID else { return }
                 if dictation.phase == .authorizing { dictation.cancel() } else { dictation.finish() }
@@ -225,6 +267,8 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     private func publishKeyboardState() {
+        DictationPreferences.keyboardMicrophoneAllowed =
+            PhoneRecorder.hasPermission && SFSpeechRecognizer.authorizationStatus() == .authorized
         let phase: KeyboardSessionState.Phase
         switch dictation.phase {
         case .listening: phase = .listening
@@ -237,7 +281,8 @@ final class AppModel: NSObject, ObservableObject {
         do {
             try KeyboardSessionStore.shared().publish(KeyboardSessionState(
                 phase: phase, expiresAt: dictation.warmUntil ?? .distantPast,
-                heartbeat: Date(), requestID: keyboardRequestID ?? lastKeyboardRequestID, message: dictation.notice
+                heartbeat: Date(), requestID: keyboardRequestID ?? lastKeyboardRequestID, message: dictation.notice,
+                heard: keyboardRequestID == nil ? nil : KeyboardSessionState.heard(dictation.text)
             ))
         } catch { library.error = error.localizedDescription }
         if dictation.isWarm, keyboardTicker == nil {
@@ -555,6 +600,17 @@ final class AppModel: NSObject, ObservableObject {
     func startVoiceThought() {
         guard canStartDictation else { return }
         dictation.start(keepingAudio: true)
+    }
+
+    /// Dictations the keyboard heard itself wait in the shared container until Sona keeps
+    /// them in Notes, with their audio, as it keeps its own.
+    func importKeyboardDictations() {
+        guard !importingKeyboardDictations, let queue = try? KeyboardDictationQueue.shared() else { return }
+        importingKeyboardDictations = true
+        Task {
+            defer { importingKeyboardDictations = false }
+            await library.importKeyboardDictations(from: queue)
+        }
     }
 
     private func collectDictation(_ capture: DictationCapture) {

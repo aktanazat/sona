@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct SonaApp: App {
     @StateObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let model = AppModel()
@@ -38,6 +39,7 @@ struct SonaApp: App {
                     .interactiveDismissDisabled()
             }
             .onOpenURL { model.handle($0) }
+            .onChange(of: scenePhase) { _, phase in if phase == .active { model.importKeyboardDictations() } }
         }
     }
 }

@@ -1,9 +1,10 @@
 import Foundation
 
-/// The written forms of the Mac vocabulary, which the keyboard must never correct away.
-/// Only those words reach the shared container: no spoken forms, replacements or snippets.
+/// The Mac's dictation profile as the keyboard needs it: the written forms of the
+/// vocabulary it must never correct away, and the replacements, vocabulary and snippets
+/// it applies to what it hears, as dictation in the app does.
 struct KeyboardVocabularyStore {
-    static let fileName = "keyboard-vocabulary.json"
+    static let fileName = "keyboard-profile.json"
 
     let directory: URL
 
@@ -12,19 +13,22 @@ struct KeyboardVocabularyStore {
     }
 
     func save(_ profile: DictationProfile) throws {
-        let words = Set(profile.vocabulary.map(\.written)).filter { !$0.isEmpty }.sorted()
-        try JSONEncoder().encode(words).write(
+        try JSONEncoder().encode(profile).write(
             to: directory.appendingPathComponent(Self.fileName),
             options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
         )
     }
 
-    func load() throws -> [String] {
+    func profile() throws -> DictationProfile {
         do {
             let bytes = try Data(contentsOf: directory.appendingPathComponent(Self.fileName))
-            return try JSONDecoder().decode([String].self, from: bytes)
+            return try JSONDecoder().decode(DictationProfile.self, from: bytes)
         } catch CocoaError.fileReadNoSuchFile {
-            return []
+            return .empty
         }
+    }
+
+    func load() throws -> [String] {
+        Set(try profile().vocabulary.map(\.written)).filter { !$0.isEmpty }.sorted()
     }
 }
