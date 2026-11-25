@@ -195,6 +195,7 @@ final class KeyboardSignal {
         case command = "com.aktanazat.sona.keyboard.command"
         case state = "com.aktanazat.sona.keyboard.state"
         case level = "com.aktanazat.sona.keyboard.level"
+        case draftConsumed = "com.aktanazat.sona.keyboard.draft-consumed"
     }
     private let channel: Channel
     private let receive: () -> Void

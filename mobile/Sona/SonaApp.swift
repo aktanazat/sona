@@ -51,7 +51,9 @@ struct SonaApp: App {
             }
             .onChange(of: scenePhase, initial: true) { _, phase in
                 model.setUploadRetryActive(phase == .active)
-                if phase == .active { model.importKeyboardDictations() }
+                guard phase == .active else { return }
+                model.importKeyboardDictations()
+                model.refreshKeyboardDraft()
             }
         }
     }
