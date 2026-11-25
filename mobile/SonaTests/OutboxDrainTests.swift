@@ -133,6 +133,35 @@ final class OutboxDrainTests: XCTestCase {
         XCTAssertEqual(worker.committedObjects, [item.objectId])
     }
 
+    /// A thought with several photos sends its chunks side by side, a few at a time, so
+    /// it does not wait one round trip per chunk.
+    func testChunksGoSeveralAtATime() async throws {
+        let worker = try await FakeWorker.start()
+        defer { worker.stop() }
+        let queue = try makeQueue(worker)
+        var files: [URL] = []
+        var attachments: [ThoughtAttachment] = []
+        for index in 0..<6 {
+            let bytes = Data(repeating: UInt8(index), count: 1024)
+            let file = FileManager.default.temporaryDirectory.appending(path: "photo-\(UUID().uuidString).jpg")
+            try bytes.write(to: file)
+            files.append(file)
+            attachments.append(ThoughtAttachment(
+                kind: .image(mime: "image/jpeg", width: 32, height: 32), file: "image-\(index).jpg",
+                byteLength: bytes.count, sha256: sha256Base64URL(bytes)
+            ))
+        }
+        let photos = QueuedThought(origin: .typed, text: "Photos", link: nil, attachments: attachments)
+        let item = try await queue.enqueue(thought: photos, capturedAtUtcMs: 1, files: files)
+
+        await queue.drain()
+
+        XCTAssertEqual(worker.refusals, [])
+        XCTAssertEqual(worker.committedObjects, [item.objectId])
+        XCTAssertGreaterThan(worker.mostChunksInFlight, 1)
+        XCTAssertLessThanOrEqual(worker.mostChunksInFlight, 3)
+    }
+
     private func makeQueue(
         _ worker: FakeWorker,
         root: URL = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")
@@ -175,6 +204,8 @@ private final class FakeWorker: @unchecked Sendable {
         set { lock.withLock { holdsFirstChunk = newValue } }
     }
     var isHolding: Bool { lock.withLock { held != nil } }
+    /// The most chunk uploads the stand-in held unanswered at once.
+    var mostChunksInFlight: Int { lock.withLock { mostChunks } }
     /// The first chunk upload is cut off before an answer, as a dropped connection does.
     var dropFirstChunk: Bool {
         get { lock.withLock { dropsFirstChunk } }
@@ -194,6 +225,8 @@ private final class FakeWorker: @unchecked Sendable {
     private var holdsFirstChunk = false
     private var dropsFirstChunk = false
     private var held: (() -> Void)?
+    private var chunksInFlight = 0
+    private var mostChunks = 0
 
     private init(listener: NWListener, port: UInt16) {
         self.listener = listener
@@ -263,7 +296,15 @@ private final class FakeWorker: @unchecked Sendable {
                     return
                 }
                 let (status, body) = answer(request)
+                let chunk = request.method == "PUT"
+                if chunk {
+                    lock.withLock {
+                        chunksInFlight += 1
+                        mostChunks = max(mostChunks, chunksInFlight)
+                    }
+                }
                 let respond = {
+                    if chunk { self.lock.withLock { self.chunksInFlight -= 1 } }
                     connection.send(content: Self.response(status, body), completion: .contentProcessed { _ in
                         connection.cancel()
                     })
