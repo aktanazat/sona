@@ -38,7 +38,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | UI action | core/bridge method | CLI command | MCP tool | status |
 |---|---|---|---|---|
 | Open Tasks; tabs I owe, Waiting on, All; sidebar counts | `work_list`, `work_counts` | `work list [--mine\|--waiting\|--unowned]`, `work mine`, `work counts` | `sona_work_list`, `sona_work_counts` | both |
-| What to pick up next (todo, unblocked, not snoozed) | — | `work ready` | `sona_work_list` (`ready`) | CLI only |
+| What to pick up next (todo, unblocked, not snoozed) | none (the Ready tab on Tasks lists the rows the app already holds) | `work ready` | `sona_work_list` (`ready`) | both |
 | Include archived tasks in a list | — | `work list --archived` | `sona_work_list` (`archived`) | CLI only |
 | New task: composer, group header +, quick entry | `work_create` | `work create TITLE --details --status --priority --owner --due --repeat --project --milestone --labels` | `sona_work_create` | both |
 | Typed words read as fields (owner, due, "every monday") with chips | `work_parse` | `work parse WORDS [--spoken] [--plain WORD]` | `sona_work_parse` *(opt-in)* | both |

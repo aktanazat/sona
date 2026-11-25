@@ -46,6 +46,8 @@ extension AppModel {
             return TaskListing.myWork(items, direction: .mine, now: now, focus: rituals.focus)
         case .waiting:
             return TaskListing.myWork(items, direction: .waitingOn, now: now)
+        case .ready:
+            return TaskListing.ready(items, now: now)
         case .cycle:
             return TaskListing.groups(cycleRows, display: WorkDisplay(groupBy: .status, orderBy: .priority), now: now,
                                       projects: work.projects, people: work.people)
@@ -200,6 +202,8 @@ private struct TasksList: View {
             }
         case .waiting:
             TaskEmpty(line: "Nobody owes you anything.")
+        case .ready:
+            TaskEmpty(line: "Nothing ready. Every Todo task is blocked or snoozed.")
         case .cycle:
             TaskEmpty(line: "No cycles yet.")
         case .all, .view:
@@ -312,7 +316,7 @@ struct TaskListingRow: View {
     }
 }
 
-/// I owe, Waiting on, the cycle, All, then one menu holding the saved views.
+/// I owe, Waiting on, Ready, the cycle, All, then one menu holding the saved views.
 private struct TaskTabs: View {
     @Environment(AppModel.self) private var model
 
@@ -322,6 +326,7 @@ private struct TaskTabs: View {
             HStack(spacing: 2) {
                 tab(.owe, title: "I owe", count: counts?.mineOpen)
                 tab(.waiting, title: "Waiting on", count: counts?.waitingOn)
+                tab(.ready, title: "Ready", count: nil)
                 if !model.work.cycles.isEmpty {
                     tab(.cycle, title: model.work.currentCycle.map { "Cycle \($0.number)" } ?? "Cycles", count: nil)
                 }

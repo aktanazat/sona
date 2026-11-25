@@ -851,7 +851,7 @@ struct TaskFilterBar: View {
     private static func listsTasks(_ tab: TasksTab) -> Bool {
         switch tab {
         case .all, .view: true
-        case .owe, .waiting, .cycle: false
+        case .owe, .waiting, .ready, .cycle: false
         }
     }
 

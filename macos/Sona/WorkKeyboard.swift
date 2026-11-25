@@ -388,7 +388,7 @@ enum TaskCopy: String, CaseIterable, Identifiable {
 }
 
 enum TasksTab: Hashable {
-    case owe, waiting, all, cycle
+    case owe, waiting, ready, all, cycle
     case view(String)
 }
 
@@ -661,7 +661,7 @@ final class WorkFocus {
 
     func listing(_ views: [WorkView]) -> WorkViewDraft? {
         switch tab {
-        case .owe, .waiting, .cycle:
+        case .owe, .waiting, .ready, .cycle:
             return nil
         case .all:
             return WorkViewDraft(query: allQuery, display: allDisplay)
@@ -673,7 +673,7 @@ final class WorkFocus {
 
     func setListing(_ draft: WorkViewDraft, views: [WorkView]) {
         switch tab {
-        case .owe, .waiting, .cycle:
+        case .owe, .waiting, .ready, .cycle:
             break
         case .all:
             allQuery = draft.query

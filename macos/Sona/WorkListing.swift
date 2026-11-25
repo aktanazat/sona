@@ -681,6 +681,14 @@ enum TaskListing {
         guard !focused.isEmpty else { return buckets }
         return [TaskGroup(id: "focus", title: "Focus", mark: .focus, rows: focused)] + buckets
     }
+
+    /// What to pick up next: Todo tasks that nothing open blocks, out of
+    /// snooze, most urgent first, as `sona work ready` lists them.
+    static func ready(_ rows: [WorkItemRow], now: Int64) -> [TaskGroup] {
+        let shown = Filter(WorkQuery(statuses: [.notStarted]), now: now)
+        let ready = rows.filter { shown.matches($0) && $0.blockedByOpenCount == 0 }
+        return [TaskGroup(id: "ready", title: "Ready", mark: .none, rows: ordered(ready, by: .priority))]
+    }
 }
 
 /// Dates a person can pick or type for a due date or a snooze.
