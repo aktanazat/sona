@@ -1085,17 +1085,20 @@ pub(crate) fn guidance_save_as(
 }
 
 /// The guidance as a section of a prompt, or none while nothing is saved.
-pub(crate) fn guidance_block(app: &AppHandle) -> Result<Option<String>, String> {
+/// A failed read leaves it out: missing guidance must not stop an answer.
+pub(crate) fn guidance_block(app: &AppHandle) -> Option<String> {
     let current = crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
         guidance(conn)
-    })?;
-    Ok((!current.text.is_empty()).then(|| {
+    })
+    .inspect_err(|error| log::warn!("Standing guidance could not be read: {error}"))
+    .ok()?;
+    (!current.text.is_empty()).then(|| {
         format!(
             "\nStanding guidance from the user, for every answer and change. \
              Follow it unless the request says otherwise:\n{}\n",
             current.text
         )
-    }))
+    })
 }
 
 /// The words that hand an item to an agent: what to do, what was said, and
@@ -1174,7 +1177,7 @@ pub async fn work_delegate(
     id: String,
     agent: Option<String>,
 ) -> Result<WorkDelegation, String> {
-    let guidance = guidance_block(&app)?;
+    let guidance = guidance_block(&app);
     let agent = agent.map(|agent| agent_name(Some(&agent)));
     let at_ms = now_ms();
     let doer = run_history(&app, |history| {

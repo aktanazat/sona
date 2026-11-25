@@ -909,8 +909,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
                 } else {
                     None
                 };
-                let guidance = crate::planning::work::agents::guidance_block(&app)
-                    .map_err(|_| AgentPanelCommandErrorV1::InvalidRequest)?;
+                let guidance = crate::planning::work::agents::guidance_block(&app);
                 let capabilities = format!(
                     "{}{}",
                     guidance.unwrap_or_default(),
@@ -3006,8 +3005,7 @@ async fn loop_turn(
     deadline: Duration,
     refused: &mut Vec<String>,
 ) -> Result<String, ChatTurnError> {
-    let guidance = crate::planning::work::agents::guidance_block(app)
-        .map_err(|_| ChatTurnError::Failed)?;
+    let guidance = crate::planning::work::agents::guidance_block(app);
     context_pack = chat_pack(context_pack, guidance.as_deref(), None).0;
     let _activity = crate::planning::quiet::foreground_activity();
     let nonce_cache = app.try_state::<AgentPanelManager>().map_or_else(
