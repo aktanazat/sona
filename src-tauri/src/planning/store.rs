@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use uuid::Uuid;
 
-const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self, members_include_self, summary, status_name_id, update_every_weeks, update_hour";
-const PROJECT_COLUMN_COUNT: usize = 23;
+const PROJECT_COLUMNS: &str = "id, title, description, status, revision, created_at_ms, updated_at_ms, lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms, start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self, members_include_self, summary, status_name_id, update_every_weeks, update_hour, position";
+const PROJECT_COLUMN_COUNT: usize = 24;
 const MILESTONE_COLUMNS: &str =
     "id, project_id, title, due_at_ms, status, revision, created_at_ms, updated_at_ms, description, position";
 /// Milestones in the order the owner set, then by due day.
@@ -200,6 +200,7 @@ fn read_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         status_name_id: row.get(20)?,
         update_every_weeks: row.get(21)?,
         update_hour: row.get(22)?,
+        position: row.get(23)?,
     })
 }
 
@@ -673,8 +674,8 @@ pub(super) fn insert_project(
     let title = title(title_text)?;
     let id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO planning_projects (id, title, description, status, revision, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, 'active', 1, ?4, ?4)",
+        "INSERT INTO planning_projects (id, title, description, status, revision, created_at_ms, updated_at_ms, position)
+         VALUES (?1, ?2, ?3, 'active', 1, ?4, ?4, (SELECT coalesce(max(position), 0) + 1 FROM planning_projects))",
         params![id, title, description, now_ms],
     )?;
     project(conn, &id)

@@ -2,7 +2,7 @@
 //! page shows a task view, and the saved views of the Projects page.
 
 use super::super::store::{self, Refusal};
-use super::super::types::ProjectStatus;
+use super::super::types::{ProjectHealth, ProjectStatus};
 use anyhow::Result;
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -81,6 +81,9 @@ pub enum ProjectGroupBy {
     Lead,
     Priority,
     Quarter,
+    Health,
+    Initiative,
+    Label,
     None,
 }
 
@@ -91,6 +94,54 @@ pub enum ProjectLinkFilter {
     Blocked,
     Blocking,
     Broken,
+}
+
+/// A project's health as a list reads it: its latest update's health, or
+/// outdated when it has no update or the update is older than the project's
+/// update cadence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectListHealth {
+    OnTrack,
+    AtRisk,
+    OffTrack,
+    Outdated,
+}
+
+/// The order a project list sorts by. Manual is the order the owner set
+/// with drag and drop.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectOrderBy {
+    Manual,
+    Status,
+    Priority,
+    Name,
+    Start,
+    Target,
+    Created,
+    Updated,
+}
+
+/// The health a project list shows: the latest update's health, or outdated
+/// when there is no update or it is older than the project's update cadence.
+pub(crate) fn list_health(
+    latest: Option<(ProjectHealth, i64)>,
+    every_weeks: Option<u8>,
+    now_ms: i64,
+) -> ProjectListHealth {
+    const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+    match latest {
+        None => ProjectListHealth::Outdated,
+        Some((_, at_ms))
+            if every_weeks.is_some_and(|weeks| now_ms - at_ms > i64::from(weeks) * WEEK_MS) =>
+        {
+            ProjectListHealth::Outdated
+        }
+        Some((ProjectHealth::OnTrack, _)) => ProjectListHealth::OnTrack,
+        Some((ProjectHealth::AtRisk, _)) => ProjectListHealth::AtRisk,
+        Some((ProjectHealth::OffTrack, _)) => ProjectListHealth::OffTrack,
+    }
 }
 
 /// How long ago a project's latest update has to be, at least: a week,
@@ -118,6 +169,10 @@ pub struct ProjectViewFilter {
     pub link: Option<ProjectLinkFilter>,
     /// An initiative's id, or `none` for projects in no initiative.
     pub initiative: Option<String>,
+    /// A project's health; outdated keeps those with no current update.
+    pub health: Option<ProjectListHealth>,
+    /// A label's id: only projects with this label.
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -125,6 +180,10 @@ pub struct ProjectViewFilter {
 pub struct ProjectViewDisplay {
     pub layout: ProjectViewLayout,
     pub group_by: ProjectGroupBy,
+    /// Unset keeps the list in the order it was loaded in.
+    pub order_by: Option<ProjectOrderBy>,
+    /// Descending instead of ascending.
+    pub reverse: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -213,6 +272,7 @@ pub(crate) fn save_project_view(
         Some(none) if none.eq_ignore_ascii_case("none") => Some("none".to_owned()),
         Some(initiative) => Some(store::uuid(initiative)?),
     };
+    filter.label = filter.label.as_deref().map(store::uuid).transpose()?;
     if let Some(ProjectUpdateBefore::Day { day }) = &mut filter.update_before {
         *day = NaiveDate::parse_from_str(day.trim(), "%Y-%m-%d")
             .map_err(|_| Refusal::Invalid)?

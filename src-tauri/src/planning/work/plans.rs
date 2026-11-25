@@ -4,7 +4,8 @@
 use super::super::catalog::{self, LinkEdit, ProjectEdit};
 use super::super::types::{
     DateResolution, Milestone, Project, ProjectActivity, ProjectHealth, ProjectStatus,
-    ProjectStatusAppearanceEdit, ProjectStatusName, ProjectUpdate, ProjectUpdatePage, TaskStatus,
+    ProjectStatusAppearanceEdit, ProjectStatusName, ProjectSummary, ProjectUpdate,
+    ProjectUpdatePage, TaskStatus,
 };
 use super::super::updates;
 use super::comments::Author;
@@ -134,6 +135,24 @@ pub(crate) fn milestone_reorder(
         |tx, now| {
             let milestones = catalog::reorder_milestones(tx, project_id, order, now)?;
             Ok((store::uuid(project_id)?, milestones))
+        },
+    )
+}
+
+pub(crate) fn project_move(
+    app: &AppHandle,
+    operation_id: &str,
+    project_id: &str,
+    before: Option<&str>,
+) -> Result<Vec<ProjectSummary>, String> {
+    project_change(
+        app,
+        operation_id,
+        "planning_project_move",
+        &(project_id, before),
+        |tx, _now| {
+            catalog::move_project(tx, project_id, before)?;
+            Ok((store::uuid(project_id)?, store::projects(tx, false)?))
         },
     )
 }
@@ -471,4 +490,15 @@ pub fn planning_milestone_reorder(
     milestone_ids: Vec<String>,
 ) -> Result<Vec<Milestone>, String> {
     milestone_reorder(&app, &operation_id, &project_id, &milestone_ids)
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_project_move(
+    app: AppHandle,
+    operation_id: String,
+    project_id: String,
+    before: Option<String>,
+) -> Result<Vec<ProjectSummary>, String> {
+    project_move(&app, &operation_id, &project_id, before.as_deref())
 }

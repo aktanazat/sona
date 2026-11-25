@@ -7056,6 +7056,22 @@ pub(super) async fn call(
             })
             .await?
         }
+        "planning_project_move" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let project_id = args.take("projectId")?;
+            let before: Option<String> = args.take("before")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::plans::planning_project_move(
+                    handle.clone(),
+                    operation_id,
+                    project_id,
+                    before,
+                ))
+            })
+            .await?
+        }
         "work_time_block" => {
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;

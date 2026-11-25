@@ -304,6 +304,8 @@ pub enum WorkVerb {
     ProjectSave(catalog::ProjectSaveArgs),
     /// Put a project away, or bring it back with --restore.
     ProjectArchive(catalog::ProjectArchiveArgs),
+    /// Move a project in the manual order: before another project, or last.
+    ProjectMove(catalog::ProjectMoveArgs),
     /// A project's milestones, with target days and task counts.
     Milestones(catalog::MilestonesArgs),
     /// Projects on a time axis from start to target day, with the
@@ -2294,6 +2296,7 @@ impl WorkVerb {
             | Self::Remind(_)
             | Self::ProjectSave(_)
             | Self::ProjectArchive(_)
+            | Self::ProjectMove(_)
             | Self::MilestoneSave(_)
             | Self::MilestoneDelete(_)
             | Self::PersonSave(_)
@@ -3449,6 +3452,7 @@ pub(super) async fn answer(
         WorkVerb::Projects(args) => tracker.projects(args).await,
         WorkVerb::ProjectSave(args) => tracker.project_save(args).await,
         WorkVerb::ProjectArchive(args) => tracker.project_archive(args).await,
+        WorkVerb::ProjectMove(args) => tracker.project_move(args).await,
         WorkVerb::Milestones(args) => tracker.milestones(args).await,
         WorkVerb::Timeline(args) => tracker.timeline(args).await,
         WorkVerb::Insights(args) => tracker.insights(args).await,
