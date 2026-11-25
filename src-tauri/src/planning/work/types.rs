@@ -984,6 +984,7 @@ pub struct WorkProjectChoice {
     pub id: String,
     pub title: String,
     pub status: ProjectStatus,
+    pub label_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

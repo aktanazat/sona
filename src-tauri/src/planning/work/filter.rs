@@ -24,6 +24,7 @@ pub enum WorkFilterField {
     Project,
     Milestone,
     Label,
+    ProjectLabel,
     Parent,
     Cycle,
     CycleScope,
@@ -46,6 +47,7 @@ impl WorkFilterField {
             Self::Project => "project",
             Self::Milestone => "milestone",
             Self::Label => "label",
+            Self::ProjectLabel => "project label",
             Self::Parent => "parent",
             Self::Cycle => "cycle",
             Self::CycleScope => "cycle scope",
@@ -98,6 +100,8 @@ impl WorkFilterOp {
 /// joined after the start. An estimate is its points, 0 to 64; `for` is
 /// the person the work is owed to; `completed` is the day it was marked
 /// done. `none` stands for an empty field and `me` for the user as owner.
+/// `project_label` matches work whose project holds the label, and `none`
+/// work whose project holds none.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkCondition {
@@ -169,6 +173,8 @@ enum Value {
     Planned(HashSet<String>),
     /// Work that joined its cycle after the start, by id.
     Added(HashSet<String>),
+    /// Projects holding a label, by id; a task matches on its project.
+    Projects(HashSet<String>),
 }
 
 /// A condition with its values read: people with the ids merged into
@@ -252,6 +258,21 @@ fn day(value: &str, now_ms: i64) -> Result<Value> {
     ))
 }
 
+/// The projects holding `label`, or the projects holding no label when it is `None`.
+fn projects_labelled(conn: &Connection, label: Option<&str>) -> Result<HashSet<String>> {
+    let ids = match label {
+        Some(label) => conn
+            .prepare("SELECT project_id FROM planning_project_labels WHERE label_id = ?1")?
+            .query_map([label], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?,
+        None => conn
+            .prepare("SELECT id FROM planning_projects WHERE id NOT IN (SELECT project_id FROM planning_project_labels)")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?,
+    };
+    Ok(ids)
+}
+
 /// Reads every filter's values; `merged` gives a person with the ids
 /// merged into them. A value its field cannot take is refused, and so is a
 /// group with nothing in it.
@@ -310,7 +331,12 @@ impl Reader<'_> {
         let mut values = Vec::new();
         for raw in &condition.values {
             let text = raw.trim().to_lowercase();
-            if text == "none" && field != WorkFilterField::Priority {
+            if text == "none"
+                && !matches!(
+                    field,
+                    WorkFilterField::Priority | WorkFilterField::ProjectLabel
+                )
+            {
                 values.push(Value::None);
                 continue;
             }
@@ -400,6 +426,12 @@ impl Reader<'_> {
                 | WorkFilterField::Completed => {
                     values.push(day(&text, now_ms)?);
                 }
+                WorkFilterField::ProjectLabel => {
+                    values.push(Value::Projects(projects_labelled(
+                        conn,
+                        (text != "none").then_some(raw.trim()),
+                    )?));
+                }
                 WorkFilterField::Project | WorkFilterField::Milestone | WorkFilterField::Label => {
                     values.push(Value::Text(raw.trim().to_owned()));
                 }
@@ -432,7 +464,8 @@ fn text_of(field: WorkFilterField, item: &WorkItem, doer: Option<&str>) -> Optio
         | WorkFilterField::Created
         | WorkFilterField::Updated
         | WorkFilterField::Completed
-        | WorkFilterField::Repeat => None,
+        | WorkFilterField::Repeat
+        | WorkFilterField::ProjectLabel => None,
     }
 }
 
@@ -467,6 +500,9 @@ fn hits(
         (_, Value::Repeating) => false,
         (WorkFilterField::Label, Value::None) => item.label_ids.is_empty(),
         (WorkFilterField::Label, Value::Text(id)) => item.label_ids.contains(id),
+        (WorkFilterField::ProjectLabel, Value::Projects(ids)) => {
+            item.project_id.as_ref().is_some_and(|id| ids.contains(id))
+        }
         (WorkFilterField::Owner, Value::Me) => item.owner_is_self,
         (field, Value::None) if dated(field) => at_of(field, item).is_none(),
         (field, Value::None) => text_of(field, item, doer).is_none(),
@@ -475,6 +511,7 @@ fn hits(
         }
         (field, Value::At(ms)) => at_of(field, item) == Some(*ms),
         (field, Value::Text(text)) => text_of(field, item, doer).as_deref() == Some(text.as_str()),
+        (_, Value::Projects(_)) => false,
         (_, Value::Me) => false,
     }
 }
@@ -523,7 +560,10 @@ fn meets(filter: &ReadyFilter, item: &WorkItem, doer: Option<&str>, repeat: Opti
     };
     let field = condition.field;
     let mut values = condition.values.iter();
-    let set = field == WorkFilterField::Label;
+    let set = matches!(
+        field,
+        WorkFilterField::Label | WorkFilterField::ProjectLabel
+    );
     match condition.op {
         WorkFilterOp::Is if set => values.all(|value| hits(field, item, doer, repeat, value)),
         WorkFilterOp::IncludesAll => values.all(|value| hits(field, item, doer, repeat, value)),

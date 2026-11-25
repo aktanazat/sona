@@ -4804,7 +4804,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_project_list",
     title: "List Sona projects",
     description:
-      "List the projects the Projects page shows, by name: each one's id, summary, lead, members, status (backlog, planned, active, paused, completed or canceled) and status_name, priority, start and target days, colour, icon, labels, links, open and done task counts, milestone count, latest_update_at_ms, whether it was put away, the initiative it sits in, and revision. all:true includes projects put away; trashed:true lists only the projects in the bin, deleted less than 30 days ago. update_before keeps the projects whose latest update was posted before that day, or that have none. link keeps projects that wait on another (blocked), that another waits on (blocking), or with a broken dependency on either side (broken). initiative keeps the projects in that initiative, or in none.",
+      "List the projects the Projects page shows, by name: each one's id, summary, lead, members, status (backlog, planned, active, paused, completed or canceled) and status_name, priority, start and target days, colour, icon, labels, links, open and done task counts, milestone count, latest_update_at_ms, whether it was put away, the initiative it sits in, and revision. all:true includes projects put away; trashed:true lists only the projects in the bin, deleted less than 30 days ago. update_before keeps the projects whose latest update was posted before that day, or that have none. link keeps projects that wait on another (blocked), that another waits on (blocking), or with a broken dependency on either side (broken). initiative keeps the projects in that initiative, or in none. health keeps projects by their latest update's health; outdated means no update, or one older than the project's update cadence. label keeps projects with that label. group_by and order_by arrange the list; order_by manual is the drag order.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4827,6 +4827,22 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           description: "An initiative, by name or id from sona_initiative_list: only its projects. none keeps the projects in no initiative.",
         },
+        health: {
+          type: "string",
+          enum: ["any", "on-track", "at-risk", "off-track", "outdated"],
+          description: "Only projects with this health.",
+        },
+        label: { type: "string", description: "Only projects with this label, by name; any for all." },
+        group_by: {
+          type: "string",
+          enum: ["status", "lead", "priority", "quarter", "health", "initiative", "label", "none"],
+          description: "How the list groups projects; a label puts a project under each of its labels.",
+        },
+        order_by: {
+          type: "string",
+          enum: ["manual", "status", "priority", "name", "start", "target", "created", "updated"],
+          description: "The order of the list; manual is the drag order. Without it the list keeps its saved or default order.",
+        },
         view: {
           type: "string",
           description:
@@ -4843,6 +4859,10 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--update-before", text(input, "update_before")),
       ...assigned("--link", text(input, "link")),
       ...assigned("--initiative", text(input, "initiative")),
+      ...assigned("--health", text(input, "health")),
+      ...assigned("--label", text(input, "label")),
+      ...assigned("--group-by", text(input, "group_by")),
+      ...assigned("--order-by", text(input, "order_by")),
       ...assigned("--view", text(input, "view")),
       "--json",
     ],
@@ -4882,7 +4902,19 @@ export const TOOLS: readonly ToolDefinition[] = [
         link: { type: "string", enum: ["any", "blocked", "blocking", "broken"], description: "Only projects on that side of a dependency." },
         initiative: { ...INITIATIVE, description: `Only its projects; none for projects in no initiative, any for all. ${INITIATIVE.description}` },
         layout: { type: "string", enum: ["list", "board", "timeline"], description: "How the Projects page shows it." },
-        group_by: { type: "string", enum: ["status", "lead", "priority", "quarter", "none"], description: "How it groups projects; quarter is the target day's." },
+        group_by: {
+          type: "string",
+          enum: ["status", "lead", "priority", "quarter", "health", "initiative", "label", "none"],
+          description: "How it groups projects; quarter is the target day's.",
+        },
+        health: { type: "string", enum: ["any", "on-track", "at-risk", "off-track", "outdated"], description: "Only projects with this health." },
+        label: { type: "string", description: "Only projects with this label, by name or id; any for all." },
+        order_by: {
+          type: "string",
+          enum: ["manual", "status", "priority", "name", "start", "target", "created", "updated"],
+          description: "The order the view lists projects in; manual is the drag order. Left out, the view keeps its order.",
+        },
+        reverse: { type: "boolean", description: "Order descending instead of ascending." },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
@@ -4902,6 +4934,10 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...assigned("--initiative", text(input, "initiative")),
       ...assigned("--layout", text(input, "layout")),
       ...assigned("--group-by", text(input, "group_by")),
+      ...assigned("--health", text(input, "health")),
+      ...assigned("--label", text(input, "label")),
+      ...assigned("--order-by", text(input, "order_by")),
+      ...(input.reverse === undefined ? [] : [`--reverse=${flag(input, "reverse")}`]),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",

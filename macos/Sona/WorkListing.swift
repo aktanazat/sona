@@ -155,10 +155,12 @@ enum TaskListing {
             let field: WorkConditionField
             let op: WorkConditionOp
             let values: [Value]
+            let projectLabels: [String: [String]]
 
-            init(_ condition: WorkCondition, now: Int64, cycles: [WorkCycle]) {
+            init(_ condition: WorkCondition, now: Int64, cycles: [WorkCycle], projectLabels: [String: [String]]) {
                 field = condition.field
                 op = condition.op
+                self.projectLabels = projectLabels
                 values = condition.values.map { [field] raw in
                     let whitespace: CharacterSet = field == .repeat ? .whitespacesAndNewlines : .whitespaces
                     let text = raw.trimmingCharacters(in: whitespace).lowercased()
@@ -178,7 +180,7 @@ enum TaskListing {
                     case .due, .created, .updated, .completed:
                         return Self.day(text, now: now)
                     case .status, .delegate, .repeat: return .text(text)
-                    case .owner, .cycle, .project, .milestone, .label, .parent, .estimate, .forPerson:
+                    case .owner, .cycle, .project, .milestone, .label, .projectLabel, .parent, .estimate, .forPerson:
                         return .text(raw.trimmingCharacters(in: .whitespaces))
                     }
                 }
@@ -220,7 +222,7 @@ enum TaskListing {
                 case .estimate: row.estimate.map { String($0) }
                 case .forPerson: row.forPersonId
                 case .repeat: row.repeat?.every
-                case .label, .due, .created, .updated, .completed: nil
+                case .label, .projectLabel, .due, .created, .updated, .completed: nil
                 }
             }
 
@@ -243,6 +245,8 @@ enum TaskListing {
                 case (_, .repeating): false
                 case (.label, .none): row.labelIds.isEmpty
                 case let (.label, .text(id)): row.labelIds.contains(id)
+                case (.projectLabel, .none): projectLabels[row.projectId ?? ""]?.isEmpty ?? true
+                case let (.projectLabel, .text(id)): projectLabels[row.projectId ?? ""]?.contains(id) ?? false
                 case (.owner, .me): row.ownerIsSelf
                 case (_, .me): false
                 case (_, .none): field.dated ? at(row) == nil : text(row) == nil
@@ -277,11 +281,14 @@ enum TaskListing {
             case any([Node])
             case all([Node])
 
-            init(_ filter: WorkFilter, now: Int64, cycles: [WorkCycle]) {
+            init(_ filter: WorkFilter, now: Int64, cycles: [WorkCycle], projectLabels: [String: [String]]) {
                 switch filter {
-                case let .condition(condition): self = .one(Condition(condition, now: now, cycles: cycles))
-                case let .any(members): self = .any(members.map { Node($0, now: now, cycles: cycles) })
-                case let .all(members): self = .all(members.map { Node($0, now: now, cycles: cycles) })
+                case let .condition(condition):
+                    self = .one(Condition(condition, now: now, cycles: cycles, projectLabels: projectLabels))
+                case let .any(members):
+                    self = .any(members.map { Node($0, now: now, cycles: cycles, projectLabels: projectLabels) })
+                case let .all(members):
+                    self = .all(members.map { Node($0, now: now, cycles: cycles, projectLabels: projectLabels) })
                 }
             }
 
@@ -306,7 +313,7 @@ enum TaskListing {
             }
         }
 
-        init(_ query: WorkQuery, now: Int64, cycles: [WorkCycle] = []) {
+        init(_ query: WorkQuery, now: Int64, cycles: [WorkCycle] = [], projectLabels: [String: [String]] = [:]) {
             self.query = query
             self.now = now
             due = query.due.map { DueSpan.pin($0, now: now) }
@@ -322,7 +329,7 @@ enum TaskListing {
             case let .number(number)?: .number(number)
             case .current?, .next?: named.map { .number($0.number) } ?? .nothing
             }
-            filters = (query.filters ?? []).map { Node($0, now: now, cycles: cycles) }
+            filters = (query.filters ?? []).map { Node($0, now: now, cycles: cycles, projectLabels: projectLabels) }
         }
 
         func matches(_ row: WorkItemRow) -> Bool {

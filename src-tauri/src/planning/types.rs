@@ -182,6 +182,9 @@ pub struct Project {
     pub update_every_weeks: Option<u8>,
     /// Local hour of day (0–23) when an update reminder lands.
     pub update_hour: u8,
+    /// The place in the owner's manual order, first to last.
+    #[serde(default)]
+    pub position: i64,
 }
 
 /// A name of the owner's for a project status, inside one of the six

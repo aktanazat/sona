@@ -61,6 +61,8 @@ struct ProjectsView: View {
     @State private var namingView = false
     @State private var viewName = ""
     @State private var viewIcon: String?
+    @State private var selected: Set<String> = []
+    @State private var selectionAnchor: String?
     @FocusState private var keysFocused: Bool
 
     var body: some View {
@@ -147,17 +149,21 @@ struct ProjectsView: View {
         let filter = store.filter
         let now = now
         let cutoff = filter.updateBefore?.cutoffMs(now: .now)
-        return (store.projects ?? []).filter { summary in
+        let kept = (store.projects ?? []).filter { summary in
             if let status = filter.status, summary.project.status != status { return false }
             if filter.overdueOnly, (store.details[summary.id]?.overdueTaskCount(at: now) ?? 0) == 0 { return false }
             if filter.mineOnly, store.details[summary.id]?.hasMyOpenWork != true { return false }
             if let cutoff, let latest = summary.latestUpdateAtMs, latest >= cutoff { return false }
+            if let health = filter.health, store.listHealth(of: summary.id, at: now) != health { return false }
+            if let label = filter.label, !(summary.project.labelIds ?? []).contains(label) { return false }
             if let link = filter.link, !link.keeps(summary.id, store.dependencies) { return false }
             if let initiative = filter.initiative, !initiative.keeps(store.initiative(of: summary.id)?.id) { return false }
             guard !search.isEmpty else { return true }
             return summary.project.title.localizedCaseInsensitiveContains(search)
                 || (summary.project.description?.localizedCaseInsensitiveContains(search) ?? false)
         }
+        guard let order = store.orderBy else { return kept }
+        return kept.ordered(by: order, reverse: store.reverseOrder)
     }
 
     // MARK: List
@@ -166,6 +172,9 @@ struct ProjectsView: View {
         VStack(alignment: .leading, spacing: 0) {
             if store.filter.isActive {
                 filterChips.padding(.bottom, 14)
+            }
+            if !selectedIds.isEmpty {
+                selectionBar.padding(.bottom, 14)
             }
             if let error = store.listError {
                 PlannerFailure(message: error) { Task { await store.loadProjects() } }
@@ -278,6 +287,14 @@ struct ProjectsView: View {
                     Text(Self.title(group)).tag(group)
                 }
             }
+            Picker("Sort by", selection: Binding(get: { store.orderBy }, set: { store.orderBy = $0 })) {
+                Text("Load order").tag(ProjectOrderBy?.none)
+                ForEach(ProjectOrderBy.allCases, id: \.self) { order in
+                    Text(order.label).tag(ProjectOrderBy?.some(order))
+                }
+            }
+            Toggle("Reverse order", isOn: Binding(get: { store.reverseOrder }, set: { store.reverseOrder = $0 }))
+                .disabled(store.orderBy == nil)
             Divider()
             if let opened {
                 Button("Save to “\(opened.name)”") {
@@ -291,6 +308,8 @@ struct ProjectsView: View {
                     store.openedView = nil
                     store.filter = PlanningListFilter()
                     store.groupBy = .status
+                    store.orderBy = nil
+                    store.reverseOrder = false
                 }
                 Button("Delete view", systemImage: "trash", role: .destructive) {
                     Task { await store.deleteView(opened.id) }
@@ -326,6 +345,9 @@ struct ProjectsView: View {
         case .lead: "Group by lead"
         case .priority: "Group by priority"
         case .quarter: "Group by target quarter"
+        case .health: "Group by health"
+        case .initiative: "Group by initiative"
+        case .label: "Group by label"
         case .none: "No grouping"
         }
     }
@@ -387,6 +409,28 @@ struct ProjectsView: View {
                     .labelsHidden()
                 }
             }
+            Section("Health") {
+                Picker("Health", selection: Binding(get: { store.filter.health }, set: { store.filter.health = $0 })) {
+                    Text("Any health").tag(ProjectListHealth?.none)
+                    ForEach(ProjectListHealth.allCases, id: \.self) { health in
+                        Text(health.label).tag(ProjectListHealth?.some(health))
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            }
+            if !model.work.labels.isEmpty {
+                Section("Label") {
+                    Picker("Label", selection: Binding(get: { store.filter.label }, set: { store.filter.label = $0 })) {
+                        Text("Any label").tag(String?.none)
+                        ForEach(model.work.labels) { label in
+                            Text(label.name).tag(String?.some(label.id))
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                }
+            }
             Section {
                 Toggle("Show recently deleted", isOn: $showBin)
             }
@@ -425,6 +469,12 @@ struct ProjectsView: View {
             }
             if let initiative = store.filter.initiative {
                 filterChip(initiativeLabel(initiative)) { store.filter.initiative = nil }
+            }
+            if let health = store.filter.health {
+                filterChip(health.label) { store.filter.health = nil }
+            }
+            if let label = store.filter.label {
+                filterChip(model.work.labels.first { $0.id == label }?.name ?? "Label") { store.filter.label = nil }
             }
         }
     }
@@ -513,13 +563,50 @@ struct ProjectsView: View {
                 return (ProjectListGroup(id: "quarter:\(key)", title: title, mark: .symbol("calendar")),
                         keyed[key] ?? [])
             }
+        case .health:
+            let now = now
+            return ProjectListHealth.allCases.compactMap { health in
+                let members = visible.filter { store.listHealth(of: $0.id, at: now) == health }
+                return members.isEmpty ? nil
+                    : (ProjectListGroup(id: "health:\(health.rawValue)", title: health.label,
+                                        mark: .symbol("waveform.path.ecg")), members)
+            }
+        case .initiative:
+            return named(visible, prefix: "initiative", mark: .symbol("flag"),
+                         key: { store.initiative(of: $0.id)?.id },
+                         title: { id in store.initiatives.first { $0.id == id }?.name ?? "" },
+                         untitled: "No initiative")
+        case .label:
+            let names = Dictionary(model.work.labels.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+            return named(visible, prefix: "label", mark: .symbol("tag"), key: { summary in
+                (summary.project.labelIds ?? []).min {
+                    (names[$0] ?? "").localizedStandardCompare(names[$1] ?? "") == .orderedAscending
+                }
+            }, title: { names[$0] ?? "" }, untitled: "No label")
         }
+    }
+
+    /// Groups keyed by `key` and named by `title`; projects with no key share one group, listed last.
+    private func named(_ visible: [PlanningProjectSummary], prefix: String, mark: ProjectListGroup.Mark,
+                       key: (PlanningProjectSummary) -> String?, title: (String) -> String,
+                       untitled: String) -> [(ProjectListGroup, [PlanningProjectSummary])] {
+        let keyed = Dictionary(grouping: visible) { key($0) ?? "" }
+        return keyed.keys
+            .sorted { left, right in
+                if left.isEmpty != right.isEmpty { return right.isEmpty }
+                return title(left).localizedStandardCompare(title(right)) == .orderedAscending
+            }
+            .map { id in
+                (ProjectListGroup(id: "\(prefix):\(id)", title: id.isEmpty ? untitled : title(id), mark: mark),
+                 keyed[id] ?? [])
+            }
     }
 
     private func list(_ proxy: ScrollViewProxy) -> some View {
         let rows = listRows
         let now = now
         return Card {
+            sortHeader
             ForEach(rows) { row in
                 switch row {
                 case let .group(group, count):
@@ -532,7 +619,7 @@ struct ProjectsView: View {
                         }
                     } toggle: {
                         if collapsed.contains(group.id) { collapsed.remove(group.id) } else { collapsed.insert(group.id) }
-                    }
+                    } drop: { items in dropIntoGroup(group, items) }
                 case let .project(summary):
                     projectRow(summary, now: now)
                         .id(row.id)
@@ -562,8 +649,17 @@ struct ProjectsView: View {
             return .handled
         }
         .onKeyPress(.escape) {
+            if !selected.isEmpty {
+                selected = []
+                return .handled
+            }
             guard peeking else { return .ignored }
             peeking = false
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "a"), phases: .down) { press in
+            guard press.modifiers == .command else { return .ignored }
+            selected = Set(visibleProjects.map(\.id))
             return .handled
         }
         .onAppear { keysFocused = true }
@@ -590,6 +686,154 @@ struct ProjectsView: View {
         return .handled
     }
 
+    /// A plain click opens the project; ⌘-click toggles it in the selection and ⇧-click selects
+    /// the run from the last project clicked.
+    private func select(_ id: String) {
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.command) {
+            if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+            selectionAnchor = id
+        } else if flags.contains(.shift), let anchor = selectionAnchor {
+            let ids = listRows.compactMap(\.projectId)
+            guard let from = ids.firstIndex(of: anchor), let to = ids.firstIndex(of: id) else { return }
+            selected.formUnion(ids[min(from, to)...max(from, to)])
+        } else {
+            selected = []
+            selectionAnchor = nil
+            store.open(id)
+        }
+    }
+
+    /// The selected projects still in the list, in list order.
+    private var selectedIds: [String] { visibleProjects.map(\.id).filter(selected.contains) }
+
+    /// Runs `change` on the selected projects, then clears the selection.
+    private func bulk(_ change: @escaping ([String]) async -> Void) {
+        let ids = selectedIds
+        selected = []
+        Task { await change(ids) }
+    }
+
+    private var selectionBar: some View {
+        HStack(spacing: 12) {
+            Text("\(selectedIds.count) selected")
+                .font(TypeScale.label(12.5).weight(.medium))
+                .foregroundStyle(Theme.ink)
+            bulkMenu("Status") {
+                ForEach(PlanningProjectStatus.allCases) { status in
+                    Button(status.label) { bulk { ids in await store.saveProjects(ids, PlanningProjectSave(status: status)) } }
+                }
+            }
+            bulkMenu("Priority") {
+                ForEach([TaskPriority.urgent, .high, .medium, .low, .none]) { priority in
+                    Button(priority.label) {
+                        bulk { ids in await store.saveProjects(ids, PlanningProjectSave(priority: priority.rawValue)) }
+                    }
+                }
+            }
+            bulkMenu("Initiative") {
+                ForEach(store.initiatives) { initiative in
+                    Button(initiative.name) { bulk { ids in await store.addProjects(ids, toInitiative: initiative.id) } }
+                }
+            }
+            Button("Delete", role: .destructive) {
+                bulk { ids in await store.saveProjects(ids, PlanningProjectSave(trashed: true)) }
+            }
+            .buttonStyle(.plain)
+            .font(TypeScale.label(12))
+            Spacer()
+            Button { selected = [] } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear selection")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: Theme.compactHeight)
+        .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+    }
+
+    private func bulkMenu<Items: View>(_ title: String, @ViewBuilder items: () -> Items) -> some View {
+        Menu { items() } label: { Text(title).font(TypeScale.label(12)) }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+    }
+
+    /// The column headers of the list. A click sorts by the column; a second click reverses it.
+    private var sortHeader: some View {
+        HStack(spacing: 10) {
+            sortButton("Name", .name)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            sortButton("Status", .status)
+            sortButton("Priority", .priority)
+            sortButton("Target", .target)
+                .frame(width: 92, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 28)
+        .background(Theme.inset.opacity(0.55))
+        .overlay(alignment: .bottom) { Hairline() }
+    }
+
+    private func sortButton(_ title: String, _ order: ProjectOrderBy) -> some View {
+        let active = store.orderBy == order
+        return Button {
+            if active {
+                store.reverseOrder.toggle()
+            } else {
+                store.orderBy = order
+                store.reverseOrder = false
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(title)
+                if active {
+                    Image(systemName: store.reverseOrder ? "arrow.up" : "arrow.down")
+                        .font(.system(size: 8, weight: .bold))
+                }
+            }
+            .font(TypeScale.label(11.5))
+            .foregroundStyle(active ? Theme.ink : Theme.inkTertiary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Sort by \(title.lowercased())")
+    }
+
+    /// A drag carries the whole selection when its row is in it, so several projects move at once.
+    private func dragPayload(_ id: String) -> String {
+        selected.contains(id) ? selectedIds.joined(separator: "\n") : id
+    }
+
+    private func droppedIds(_ items: [String]) -> [String] {
+        items.flatMap { $0.split(separator: "\n").map(String.init) }
+    }
+
+    /// Drops projects above `target`. Only manual order takes a drop. Across groups it
+    /// takes one only in a priority grouping, where the drop also sets the priority.
+    private func reorder(_ ids: [String], onto target: PlanningProjectSummary) -> Bool {
+        guard store.orderBy == .manual, !ids.isEmpty, !ids.contains(target.id) else { return false }
+        let sameGroup = groupedProjects.contains { _, members in
+            members.contains { $0.id == target.id } && ids.allSatisfy { id in members.contains { $0.id == id } }
+        }
+        guard store.groupBy == .none || store.groupBy == .priority || sameGroup else { return false }
+        let priority = target.project.priority ?? 0
+        let retagged = store.groupBy == .priority
+            ? ids.filter { id in (store.projects?.first { $0.id == id }?.project.priority ?? 0) != priority }
+            : []
+        Task {
+            if !retagged.isEmpty { await store.saveProjects(retagged, PlanningProjectSave(priority: priority)) }
+            for id in ids { await store.moveProject(id, before: target.id) }
+        }
+        return true
+    }
+
+    /// Dropping projects on a priority group's header sets their priority.
+    private func dropIntoGroup(_ group: ProjectListGroup, _ items: [String]) -> Bool {
+        guard case let .priority(priority) = group.mark else { return false }
+        let ids = droppedIds(items)
+        guard !ids.isEmpty else { return false }
+        Task { await store.saveProjects(ids, PlanningProjectSave(priority: priority.rawValue)) }
+        return true
+    }
+
     private func projectRow(_ summary: PlanningProjectSummary, now: Int64) -> some View {
         let total = summary.openTaskCount + summary.completedTaskCount
         let detail = store.details[summary.id]
@@ -598,7 +842,8 @@ struct ProjectsView: View {
         let priority = TaskPriority(summary.project.priority ?? 0)
         let labels = model.workLabels
         let tags = (summary.project.labelIds ?? []).compactMap { labels[$0] }
-        return DenseRow(highlighted: cursor == summary.id, action: { store.open(summary.id) },
+        return DenseRow(highlighted: cursor == summary.id || selected.contains(summary.id),
+                        action: { select(summary.id) },
                         hover: { if $0 { cursor = summary.id } }) {
             PriorityIcon(priority: priority)
                 .frame(width: 16)
@@ -656,6 +901,8 @@ struct ProjectsView: View {
             Divider()
             Button("Delete project", role: .destructive) { Task { await store.binProject(summary.project) } }
         }
+        .draggable(dragPayload(summary.id))
+        .dropDestination(for: String.self) { items, _ in reorder(droppedIds(items), onto: summary) }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { store.open(summary.id) }
@@ -1435,6 +1682,7 @@ private struct GroupHeader<Icon: View>: View {
     var collapsed: Bool?
     @ViewBuilder let icon: () -> Icon
     var toggle: (() -> Void)?
+    var drop: (([String]) -> Bool)?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1458,6 +1706,7 @@ private struct GroupHeader<Icon: View>: View {
         .overlay(alignment: .bottom) { Hairline() }
         .contentShape(Rectangle())
         .onTapGesture { toggle?() }
+        .dropDestination(for: String.self) { items, _ in drop?(items) ?? false }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(toggle == nil ? .isHeader : [.isHeader, .isButton])
         .accessibilityAction { toggle?() }

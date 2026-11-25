@@ -2276,6 +2276,7 @@ pub fn run(cli_args: CliArgs) {
             planning::work::plans::planning_project_save,
             planning::work::plans::planning_milestone_save,
             planning::work::plans::planning_milestone_reorder,
+            planning::work::plans::planning_project_move,
             planning::work::plans::planning_project_status_names,
             planning::work::plans::planning_project_status_name_save,
             planning::work::plans::planning_project_status_name_delete,

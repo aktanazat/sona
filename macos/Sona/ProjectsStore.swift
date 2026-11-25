@@ -149,6 +149,7 @@ struct PlanningProject: Decodable, Identifiable, Equatable {
     var statusNameId: String? = nil
     var updateEveryWeeks: Int? = nil
     var updateHour: Int? = nil
+    var position: Int64? = nil
 }
 
 /// The owner's own name for a status, kept inside one of the six categories.
@@ -316,6 +317,93 @@ struct PlanningProjectDetail: Decodable, Equatable {
     var milestoneProgress: [PlanningMilestoneProgress] = []
 }
 
+extension PlanningProjectDetail {
+    /// The health a project list shows: its latest update's, or outdated when
+    /// there is none or it is older than the project's update cadence.
+    func listHealth(at now: Int64) -> ProjectListHealth {
+        guard let latest = latestUpdate else { return .outdated }
+        let week: Int64 = 7 * 24 * 60 * 60 * 1000
+        if let weeks = project.updateEveryWeeks, now - latest.createdAtMs > Int64(weeks) * week { return .outdated }
+        switch latest.health {
+        case .onTrack: return .onTrack
+        case .atRisk: return .atRisk
+        case .offTrack: return .offTrack
+        }
+    }
+}
+
+extension ProjectListHealth {
+    var label: String {
+        switch self {
+        case .onTrack: "On track"
+        case .atRisk: "At risk"
+        case .offTrack: "Off track"
+        case .outdated: "Outdated"
+        }
+    }
+}
+
+extension ProjectOrderBy {
+    var label: String {
+        switch self {
+        case .manual: "Manual"
+        case .status: "Status"
+        case .priority: "Priority"
+        case .name: "Name"
+        case .start: "Start date"
+        case .target: "Target date"
+        case .created: "Created"
+        case .updated: "Updated"
+        }
+    }
+}
+
+extension ProjectsStore {
+    /// A project with no loaded detail has no update to read, so it is outdated.
+    func listHealth(of id: String, at now: Int64) -> ProjectListHealth {
+        details[id]?.listHealth(at: now) ?? .outdated
+    }
+}
+
+extension ProjectOrderBy {
+    /// Whether `a` sorts before `b`, as the core's `project_order` reads it.
+    func precedes(_ a: PlanningProject, _ b: PlanningProject) -> Bool {
+        switch self {
+        case .manual: (a.position ?? .max) < (b.position ?? .max)
+        case .status: Self.statusRank(a.status) < Self.statusRank(b.status)
+        case .priority: Self.priorityRank(a.priority) < Self.priorityRank(b.priority)
+        case .name: a.title.lowercased() < b.title.lowercased()
+        case .start: (a.startAtMs ?? .max) < (b.startAtMs ?? .max)
+        case .target: (a.targetAtMs ?? .max) < (b.targetAtMs ?? .max)
+        case .created: a.createdAtMs < b.createdAtMs
+        case .updated: a.updatedAtMs < b.updatedAtMs
+        }
+    }
+
+    private static func statusRank(_ status: PlanningProjectStatus) -> Int {
+        PlanningProjectStatus.allCases.firstIndex(of: status) ?? 0
+    }
+
+    /// No priority sorts last; urgent first.
+    private static func priorityRank(_ priority: Int?) -> Int {
+        let value = priority ?? 0
+        return value == 0 ? 5 : value
+    }
+}
+
+extension Array where Element == PlanningProjectSummary {
+    /// The projects in `order`. `reverse` flips every comparison; ties keep
+    /// the order they came in.
+    func ordered(by order: ProjectOrderBy, reverse: Bool) -> [PlanningProjectSummary] {
+        enumerated().sorted { left, right in
+            let (a, b) = (left.element.project, right.element.project)
+            if order.precedes(a, b) { return !reverse }
+            if order.precedes(b, a) { return reverse }
+            return left.offset < right.offset
+        }.map(\.element)
+    }
+}
+
 /// What the projects list is narrowed to.
 struct PlanningListFilter: Equatable {
     var status: PlanningProjectStatus?
@@ -324,9 +412,12 @@ struct PlanningListFilter: Equatable {
     var updateBefore: PlanningUpdateBefore?
     var link: PlanningLinkFilter?
     var initiative: PlanningInitiativeFilter?
+    var health: ProjectListHealth?
+    var label: String?
 
     var isActive: Bool {
         status != nil || overdueOnly || mineOnly || updateBefore != nil || link != nil || initiative != nil
+            || health != nil || label != nil
     }
 }
 
@@ -725,6 +816,7 @@ struct PlanningProjectSave: Encodable, Equatable {
     var labelIds: [String]?
     var links: [PlanningProjectLinkInput]?
     var trashed: Bool?
+    var archived: Bool?
     var updateEveryWeeks: PlanningFieldChange<Int>?
     var updateHour: Int?
 
@@ -732,7 +824,7 @@ struct PlanningProjectSave: Encodable, Equatable {
         case title, summary, description, status, statusNameId, priority, leadPersonId, leadIsSelf
         case memberPersonIds, membersIncludeSelf
         case startAtMs, startResolution
-        case targetAtMs, targetResolution, hue, icon, labelIds, links, trashed
+        case targetAtMs, targetResolution, hue, icon, labelIds, links, trashed, archived
         case updateEveryWeeks, updateHour
     }
 
@@ -757,6 +849,7 @@ struct PlanningProjectSave: Encodable, Equatable {
         try container.encodeIfPresent(labelIds, forKey: .labelIds)
         try container.encodeIfPresent(links, forKey: .links)
         try container.encodeIfPresent(trashed, forKey: .trashed)
+        try container.encodeIfPresent(archived, forKey: .archived)
         try Self.put(updateEveryWeeks, .updateEveryWeeks, &container)
         try container.encodeIfPresent(updateHour, forKey: .updateHour)
     }
@@ -943,6 +1036,9 @@ final class ProjectsStore {
     var filter = PlanningListFilter()
     /// What the list groups projects by.
     var groupBy: ProjectGroupBy = .status
+    /// How the list orders projects; nil keeps the order the core lists them in.
+    var orderBy: ProjectOrderBy?
+    var reverseOrder = false
     /// The Projects page's saved views, by name.
     private(set) var views: [ProjectView] = []
     /// The saved view the list shows; nil for none.
@@ -1256,7 +1352,8 @@ final class ProjectsStore {
     func saveView(id: String?, name: String, icon: String?, layout: ProjectsLayout) async {
         let input = ProjectViewInput(
             name: name, icon: icon, filter: filter.saved,
-            display: ProjectViewDisplay(layout: ProjectViewLayout(rawValue: layout.rawValue) ?? .list, groupBy: groupBy))
+            display: ProjectViewDisplay(layout: ProjectViewLayout(rawValue: layout.rawValue) ?? .list, groupBy: groupBy,
+                                        orderBy: orderBy, reverse: reverseOrder))
         do {
             let saved: ProjectView = try await write {
                 try await self.core.request("work_project_view_save", ProjectViewParams(
@@ -1286,6 +1383,8 @@ final class ProjectsStore {
     func open(view: ProjectView) -> ProjectsLayout {
         filter = PlanningListFilter(view.filter)
         groupBy = view.display.groupBy
+        orderBy = view.display.orderBy
+        reverseOrder = view.display.reverse
         openedView = view.id
         return ProjectsLayout(rawValue: view.display.layout.rawValue) ?? .list
     }
@@ -1914,6 +2013,49 @@ final class ProjectsStore {
         }
     }
 
+    /// Applies `change` to each project in `ids`, in one write.
+    func saveProjects(_ ids: [String], _ change: PlanningProjectSave) async {
+        do {
+            try await write {
+                for id in ids {
+                    let _: PlanningProject = try await self.core.request("planning_project_save", PlanningProjectSaveParams(
+                        operationId: UUID().uuidString, id: id, input: change))
+                }
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    /// Puts each project in `ids` into the initiative, in one write.
+    func addProjects(_ ids: [String], toInitiative initiativeId: String) async {
+        do {
+            try await write {
+                for id in ids {
+                    let _: PlanningInitiative = try await self.core.request("planning_initiative_add_project", PlanningInitiativeProjectParams(
+                        operationId: UUID().uuidString, initiativeId: initiativeId, projectId: id))
+                }
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    /// Moves a project above `before`, or to the end of the order when nil.
+    func moveProject(_ id: String, before: String?) async {
+        do {
+            let _: [PlanningProjectSummary] = try await write {
+                try await self.core.request("planning_project_move", PlanningProjectMoveParams(
+                    operationId: UUID().uuidString, projectId: id, before: before))
+            }
+        } catch {
+            mutationError = error.localizedDescription
+        }
+        await refresh()
+    }
+
     func setMilestoneStatus(_ milestone: PlanningMilestone, _ status: PlanningWorkStatus) async {
         guard !mutating else {
             mutationError = "Wait for the current change to finish."
@@ -2008,7 +2150,8 @@ extension PlanningListFilter {
             overdueOnly: saved.overdueOnly, mineOnly: saved.mineOnly,
             updateBefore: saved.updateBefore.flatMap(PlanningUpdateBefore.init),
             link: saved.link.flatMap(PlanningLinkFilter.init(rawValue:)),
-            initiative: saved.initiative.map { $0 == "none" ? .outside : .within($0) })
+            initiative: saved.initiative.map { $0 == "none" ? .outside : .within($0) },
+            health: saved.health, label: saved.label)
     }
 
     var saved: ProjectViewFilter {
@@ -2018,7 +2161,8 @@ extension PlanningListFilter {
         case let .within(id)?: id
         }
         return ProjectViewFilter(status: status?.rawValue, overdueOnly: overdueOnly, mineOnly: mineOnly,
-                                 updateBefore: updateBefore?.saved, link: link?.rawValue, initiative: initiative)
+                                 updateBefore: updateBefore?.saved, link: link?.rawValue, initiative: initiative,
+                                 health: health, label: label)
     }
 }
 
@@ -2181,6 +2325,12 @@ private struct PlanningInitiativeProjectParams: Encodable {
     let operationId: String
     let initiativeId: String?
     let projectId: String
+}
+
+private struct PlanningProjectMoveParams: Encodable {
+    let operationId: String
+    let projectId: String
+    let before: String?
 }
 
 private struct PlanningInitiativeUpdatesParams: Encodable {

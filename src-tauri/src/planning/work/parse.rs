@@ -1707,6 +1707,7 @@ mod tests {
                     id: title.to_lowercase(),
                     title: (*title).to_owned(),
                     status: ProjectStatus::Active,
+                    label_ids: Vec::new(),
                 })
                 .collect(),
             people: people

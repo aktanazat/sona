@@ -118,6 +118,17 @@ pub(crate) const PROJECT_STATUS_APPEARANCE_MIGRATION: &str =
 ALTER TABLE planning_project_status_names
     ADD COLUMN hue INTEGER CHECK(hue IS NULL OR (hue >= 0 AND hue <= 360));";
 
+/// Projects keep the order the owner drags them into; the first projects
+/// made take the first places, ties by id.
+pub(crate) const PROJECT_POSITION_MIGRATION: &str =
+    "ALTER TABLE planning_projects ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+UPDATE planning_projects SET position = (
+    SELECT count(*) FROM planning_projects other
+    WHERE other.created_at_ms < planning_projects.created_at_ms
+        OR (other.created_at_ms = planning_projects.created_at_ms
+            AND other.id <= planning_projects.id)
+);";
+
 /// Dependencies and initiatives join a project's history: a dependency
 /// added or removed is in both projects' histories, each naming the other,
 /// and a project going into, between or out of initiatives names them,
@@ -718,9 +729,9 @@ pub(crate) fn save_project(
                      lead_person_id, target_at_ms, hue, archived_at_ms, priority, start_at_ms,
                      start_resolution, target_resolution, icon, trashed_at_ms, lead_is_self,
                      members_include_self, summary, status_name_id, update_every_weeks,
-                     update_hour)
+                     update_hour, position)
                  VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, (SELECT coalesce(max(position), 0) + 1 FROM planning_projects))",
                 params![
                     id,
                     title,
@@ -879,6 +890,42 @@ pub(crate) fn reorder_milestones(
         params![project_id, now_ms],
     )?;
     Ok(super::progress::milestone_progress(conn, &project_id)?.0)
+}
+
+/// Moves a project above another project, or to the end when `before` is
+/// none. The other projects keep their order.
+pub(crate) fn move_project(
+    conn: &Connection,
+    project_id: &str,
+    before: Option<&str>,
+) -> Result<()> {
+    let project_id = store::uuid(project_id)?;
+    store::project(conn, &project_id)?;
+    let before = before.map(store::uuid).transpose()?;
+    if before.as_deref() == Some(project_id.as_str()) {
+        return Ok(());
+    }
+    let mut statement =
+        conn.prepare("SELECT id FROM planning_projects ORDER BY position, created_at_ms, id")?;
+    let mut order = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    order.retain(|id| *id != project_id);
+    let at = match &before {
+        Some(before) => order
+            .iter()
+            .position(|id| id == before)
+            .ok_or(Refusal::NotFound)?,
+        None => order.len(),
+    };
+    order.insert(at, project_id);
+    for (index, id) in order.iter().enumerate() {
+        conn.execute(
+            "UPDATE planning_projects SET position = ?2 WHERE id = ?1 AND position != ?2",
+            params![id, i64::try_from(index)? + 1],
+        )?;
+    }
+    Ok(())
 }
 
 /// What a milestone is set to; `None` keeps, an empty description clears.

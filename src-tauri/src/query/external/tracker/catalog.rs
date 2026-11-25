@@ -19,7 +19,7 @@ use crate::planning::catalog::{LinkEdit, MilestoneEdit, ProjectEdit};
 use crate::planning::store as plans;
 use crate::planning::work;
 use crate::planning::work::types::{WorkOwner, WorkStatus};
-use crate::planning::work::views::ProjectLinkFilter;
+use crate::planning::work::views::{ProjectLinkFilter, ProjectViewDisplay, ProjectViewFilter};
 use crate::planning::{
     DateResolution, Milestone, Project, ProjectLink, ProjectStatus, ProjectStatusAppearanceEdit,
     ProjectStatusName, TaskStatus,
@@ -176,6 +176,21 @@ pub struct ProjectsArgs {
     /// as the view groups them; the other flags narrow it.
     #[arg(long, value_name = "VIEW")]
     pub view: Option<String>,
+    /// Only projects with this health; outdated for those with no current
+    /// update.
+    #[arg(long, value_enum)]
+    pub health: Option<super::views::ProjectHealthArg>,
+    /// Only projects with this label, by name or id.
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
+    /// Group the projects: status, lead, priority, quarter, health,
+    /// initiative, label or none.
+    #[arg(long, value_enum)]
+    pub group_by: Option<super::views::ProjectGroupArg>,
+    /// Order the projects by this instead of by title. A view's own order
+    /// applies when no order is given.
+    #[arg(long, value_enum)]
+    pub order_by: Option<super::views::ProjectOrderArg>,
 }
 
 fn calendar_day(value: &str) -> Result<NaiveDate, String> {
@@ -264,6 +279,16 @@ pub struct ProjectArchiveArgs {
     /// Show the project as it would be left; nothing changes.
     #[arg(long)]
     pub dry_run: bool,
+    #[command(flatten)]
+    pub write: WriteArgs,
+}
+
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+pub struct ProjectMoveArgs {
+    pub project: String,
+    /// Put it just before this project; none puts it last.
+    #[arg(long, value_name = "PROJECT")]
+    pub before: Option<String>,
     #[command(flatten)]
     pub write: WriteArgs,
 }
@@ -508,6 +533,18 @@ pub struct ExternalWorkProject {
     pub update_every_weeks: Option<u8>,
     /// Local hour of day (0–23) for update reminders.
     pub update_hour: u8,
+    /// Health as project lists show it; outdated when there is no current update.
+    pub health: planning::work::views::ProjectListHealth,
+    /// The place in the owner's manual order.
+    pub position: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    /// Label ids, for label filters; not part of the output.
+    #[serde(skip)]
+    pub label_ids: Vec<String>,
+    /// The initiative's status, for ordering its group; not part of the output.
+    #[serde(skip)]
+    pub initiative_status: Option<planning::work::initiatives::InitiativeStatus>,
     pub revision: i64,
 }
 
@@ -819,11 +856,10 @@ impl Tracker<'_> {
                 done += 1;
             }
         }
-        let (milestones, latest_update_at_ms, status_name, initiative) =
+        let (milestones, latest, status_name, initiative) =
             planning::history(self.history, |conn| {
                 let milestones = plans::records(conn, &project.id)?.milestones.len();
-                let latest = planning::updates::latest(conn, &project.id)?
-                    .map(|update| update.created_at_ms);
+                let latest = planning::updates::latest(conn, &project.id)?;
                 let status_name = project
                     .status_name_id
                     .as_deref()
@@ -831,13 +867,27 @@ impl Tracker<'_> {
                     .transpose()?
                     .map(|name| name.name);
                 let initiative = planning::work::initiatives::initiative_of(conn, &project.id)?
-                    .map(|initiative| ExternalWorkPersonRef {
-                        id: initiative.id,
-                        name: initiative.name,
+                    .map(|initiative| {
+                        (
+                            ExternalWorkPersonRef {
+                                id: initiative.id,
+                                name: initiative.name,
+                            },
+                            initiative.status,
+                        )
                     });
                 Ok((milestones, latest, status_name, initiative))
             })
             .unwrap_or_default();
+        let health = planning::work::views::list_health(
+            latest
+                .as_ref()
+                .map(|update| (update.health, update.created_at_ms)),
+            project.update_every_weeks,
+            super::now_ms(),
+        );
+        let latest_update_at_ms = latest.as_ref().map(|update| update.created_at_ms);
+        let (initiative, initiative_status) = initiative.unzip();
         let labels = self.all_labels().unwrap_or_default();
         ExternalWorkProject {
             id: project.id.clone(),
@@ -879,6 +929,12 @@ impl Tracker<'_> {
             initiative,
             update_every_weeks: project.update_every_weeks,
             update_hour: project.update_hour,
+            health,
+            position: project.position,
+            created_at_ms: project.created_at_ms,
+            updated_at_ms: project.updated_at_ms,
+            label_ids: project.label_ids.clone(),
+            initiative_status,
             revision: project.revision,
         }
     }
@@ -945,24 +1001,44 @@ impl Tracker<'_> {
                 })
             })
             .collect();
-        let mut groups = None;
-        if let Some(view) = &args.view {
-            let view = self.project_view_named(view)?;
-            let dependencies = self.all_dependencies()?;
-            let linked = |filter: ProjectLinkFilter, id: &str| {
-                let filter = match filter {
-                    ProjectLinkFilter::Blocked => LinkFilter::Blocked,
-                    ProjectLinkFilter::Blocking => LinkFilter::Blocking,
-                    ProjectLinkFilter::Broken => LinkFilter::Broken,
-                };
-                filter.keeps(id, &dependencies)
-            };
-            let now = super::now_ms();
-            rows.retain(|row| {
-                super::views::project_keeps(&view.filter, row, &board.rows, &linked, now)
-            });
-            groups = super::views::project_groups(&rows, view.display.group_by);
+        let view = args
+            .view
+            .as_deref()
+            .map(|value| self.project_view_named(value))
+            .transpose()?;
+        let mut filter = view
+            .as_ref()
+            .map_or_else(ProjectViewFilter::default, |view| view.filter.clone());
+        let mut display = view
+            .as_ref()
+            .map_or_else(ProjectViewDisplay::default, |view| view.display);
+        if let Some(health) = args.health {
+            filter.health = health.health();
         }
+        if let Some(label) = args.label.as_deref() {
+            filter.label = self.label_filter(label)?;
+        }
+        if let Some(group) = args.group_by {
+            display.group_by = group.group();
+        }
+        if let Some(order) = args.order_by {
+            display.order_by = Some(order.order());
+        }
+        let dependencies = self.all_dependencies()?;
+        let linked = |filter: ProjectLinkFilter, id: &str| {
+            let filter = match filter {
+                ProjectLinkFilter::Blocked => LinkFilter::Blocked,
+                ProjectLinkFilter::Blocking => LinkFilter::Blocking,
+                ProjectLinkFilter::Broken => LinkFilter::Broken,
+            };
+            filter.keeps(id, &dependencies)
+        };
+        let now = super::now_ms();
+        rows.retain(|row| super::views::project_keeps(&filter, row, &board.rows, &linked, now));
+        if let Some(by) = display.order_by {
+            super::views::project_order(&mut rows, by, display.reverse);
+        }
+        let groups = super::views::project_groups(&rows, display.group_by);
         Ok(WorkAnswer::Projects(ExternalWorkProjects {
             schema_version: QUERY_SCHEMA_VERSION,
             projects: rows,
@@ -1125,6 +1201,36 @@ impl Tracker<'_> {
             operation_id: Some(operation_id),
             created: existing.is_none(),
             project: self.project_row(&project, &board),
+        }))
+    }
+
+    pub(super) async fn project_move(
+        &self,
+        args: &ProjectMoveArgs,
+    ) -> Result<WorkAnswer, ExternalError> {
+        let board = self.board().await?;
+        let projects = self.every_project()?;
+        let current = Self::pick_project(&args.project, &projects)?;
+        let before = args
+            .before
+            .as_deref()
+            .map(|value| Self::pick_project(value, &projects))
+            .transpose()?
+            .map(|project| project.id.clone());
+        let operation_id = args
+            .write
+            .operation_id("project-move", &(&current.id, &before))?;
+        self.applies("moving a project")?;
+        work::plans::project_move(self.app, &operation_id, &current.id, before.as_deref())
+            .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
+        let projects = self.every_project()?;
+        let moved = Self::pick_project(&args.project, &projects)?;
+        Ok(WorkAnswer::Project(ExternalWorkProjectChange {
+            schema_version: QUERY_SCHEMA_VERSION,
+            dry_run: false,
+            operation_id: Some(operation_id),
+            created: false,
+            project: self.project_row(moved, &board),
         }))
     }
 

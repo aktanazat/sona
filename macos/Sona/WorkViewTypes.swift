@@ -92,6 +92,7 @@ struct WorkQuery: Codable, Equatable, Hashable {
 enum WorkConditionField: String, Codable, CaseIterable, Hashable, Identifiable {
     case status, priority, owner, delegate, project, milestone, label, parent, cycle
     case cycleScope = "cycle_scope"
+    case projectLabel = "project_label"
     case due, created, updated, estimate
     case forPerson = "for"
     case completed, `repeat`
@@ -103,13 +104,14 @@ enum WorkConditionField: String, Codable, CaseIterable, Hashable, Identifiable {
         case .cycleScope: "Cycle scope"
         case .forPerson: "For"
         case .repeat: "Repeats"
+        case .projectLabel: "Project label"
         default: rawValue.prefix(1).uppercased() + rawValue.dropFirst()
         }
     }
     var dated: Bool { self == .due || self == .created || self == .updated || self == .completed }
     var operators: [WorkConditionOp] {
         dated ? [.before, .after, .is, .isNot]
-            : self == .label ? [.includesAll, .includesAny, .noneOf]
+            : self == .label || self == .projectLabel ? [.includesAll, .includesAny, .noneOf]
             : self == .cycleScope ? [.is, .isNot]
             : [.is, .isNot, .anyOf, .noneOf]
     }
@@ -302,6 +304,9 @@ struct ProjectViewFilter: Codable, Equatable, Hashable {
     var link: String?
     /// An initiative's id, or `none` for projects in no initiative.
     var initiative: String?
+    var health: ProjectListHealth?
+    /// A label's id: only projects with this label.
+    var label: String?
 }
 
 /// How long ago a project's latest update has to be, at least.
@@ -311,11 +316,30 @@ struct ProjectUpdateBefore: Codable, Equatable, Hashable {
 }
 
 enum ProjectViewLayout: String, Codable, Hashable { case list, board, timeline }
-enum ProjectGroupBy: String, Codable, CaseIterable, Hashable { case status, lead, priority, quarter, none }
+enum ProjectGroupBy: String, Codable, CaseIterable, Hashable {
+    case status, lead, priority, quarter, health, initiative, label, none
+}
+
+/// A project's health as a list reads it: outdated when there is no latest
+/// update or it is older than the project's update cadence.
+enum ProjectListHealth: String, Codable, CaseIterable, Hashable {
+    case onTrack = "on_track"
+    case atRisk = "at_risk"
+    case offTrack = "off_track"
+    case outdated
+}
+
+/// The order a project list sorts by; manual is the order set by dragging.
+enum ProjectOrderBy: String, Codable, CaseIterable, Hashable {
+    case manual, status, priority, name, start, target, created, updated
+}
 
 struct ProjectViewDisplay: Codable, Equatable, Hashable {
     var layout: ProjectViewLayout = .list
     var groupBy: ProjectGroupBy = .status
+    /// Nil keeps the list in the order it was loaded in.
+    var orderBy: ProjectOrderBy?
+    var reverse = false
 }
 
 /// A saved view of the Projects page.

@@ -611,6 +611,7 @@ struct WorkProjectChoice: Codable, Identifiable, Equatable {
     var id: String
     var title: String
     var status: PlanningProjectStatus
+    var labelIds: [String] = []
 }
 
 struct WorkPersonChoice: Codable, Identifiable, Equatable {

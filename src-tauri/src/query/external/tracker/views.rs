@@ -9,8 +9,9 @@ use super::{
 };
 use crate::planning;
 use crate::planning::work::views::{
-    self, ProjectGroupBy, ProjectLinkFilter, ProjectUpdateBefore, ProjectView, ProjectViewDisplay,
-    ProjectViewFilter, ProjectViewInput, ProjectViewLayout,
+    self, ProjectGroupBy, ProjectLinkFilter, ProjectListHealth, ProjectOrderBy,
+    ProjectUpdateBefore, ProjectView, ProjectViewDisplay, ProjectViewFilter, ProjectViewInput,
+    ProjectViewLayout,
 };
 use crate::planning::work::{self, types::WorkGroupBy, types::WorkItemRow, types::WorkStatus};
 use crate::query::external::{ExternalError, ExternalScope};
@@ -620,7 +621,73 @@ pub enum ProjectGroupArg {
     Lead,
     Priority,
     Quarter,
+    Health,
+    Initiative,
+    Label,
     None,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ProjectHealthArg {
+    Any,
+    OnTrack,
+    AtRisk,
+    OffTrack,
+    Outdated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ProjectOrderArg {
+    Manual,
+    Status,
+    Priority,
+    Name,
+    Start,
+    Target,
+    Created,
+    Updated,
+}
+
+impl ProjectHealthArg {
+    pub(super) fn health(self) -> Option<ProjectListHealth> {
+        match self {
+            Self::Any => None,
+            Self::OnTrack => Some(ProjectListHealth::OnTrack),
+            Self::AtRisk => Some(ProjectListHealth::AtRisk),
+            Self::OffTrack => Some(ProjectListHealth::OffTrack),
+            Self::Outdated => Some(ProjectListHealth::Outdated),
+        }
+    }
+}
+
+impl ProjectGroupArg {
+    pub(super) fn group(self) -> ProjectGroupBy {
+        match self {
+            Self::Status => ProjectGroupBy::Status,
+            Self::Lead => ProjectGroupBy::Lead,
+            Self::Priority => ProjectGroupBy::Priority,
+            Self::Quarter => ProjectGroupBy::Quarter,
+            Self::Health => ProjectGroupBy::Health,
+            Self::Initiative => ProjectGroupBy::Initiative,
+            Self::Label => ProjectGroupBy::Label,
+            Self::None => ProjectGroupBy::None,
+        }
+    }
+}
+
+impl ProjectOrderArg {
+    pub(super) fn order(self) -> ProjectOrderBy {
+        match self {
+            Self::Manual => ProjectOrderBy::Manual,
+            Self::Status => ProjectOrderBy::Status,
+            Self::Priority => ProjectOrderBy::Priority,
+            Self::Name => ProjectOrderBy::Name,
+            Self::Start => ProjectOrderBy::Start,
+            Self::Target => ProjectOrderBy::Target,
+            Self::Created => ProjectOrderBy::Created,
+            Self::Updated => ProjectOrderBy::Updated,
+        }
+    }
 }
 
 /// How long ago a latest update must be: 1w, 2w, 1m, a day as
@@ -675,11 +742,25 @@ pub struct ProjectViewSaveArgs {
     /// in no initiative, any for all.
     #[arg(long, value_name = "INITIATIVE")]
     pub initiative: Option<String>,
+    /// Only projects with this health; outdated for those with no current
+    /// update; any for all.
+    #[arg(long, value_enum)]
+    pub health: Option<ProjectHealthArg>,
+    /// Only projects with this label, by name or id; any for all.
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
     #[arg(long, value_enum)]
     pub layout: Option<ProjectLayoutArg>,
-    /// status, lead, priority, quarter (of the target day) or none.
+    /// status, lead, priority, quarter (of the target day), health,
+    /// initiative, label or none.
     #[arg(long, value_enum)]
     pub group_by: Option<ProjectGroupArg>,
+    /// The order the projects list in: manual (drag order) by default.
+    #[arg(long, value_enum)]
+    pub order_by: Option<ProjectOrderArg>,
+    /// Descending instead of ascending: true or false.
+    #[arg(long, value_name = "BOOL")]
+    pub reverse: Option<bool>,
     /// Show the view as it would be saved; nothing changes.
     #[arg(long)]
     pub dry_run: bool,
@@ -706,6 +787,8 @@ pub struct ExternalProjectView {
     pub filter: ProjectViewFilter,
     pub layout: ProjectViewLayout,
     pub group_by: ProjectGroupBy,
+    pub order_by: Option<ProjectOrderBy>,
+    pub reverse: bool,
     pub revision: i64,
     /// Opens the view on the Projects page: `sona://projects?view=<id>`.
     pub link: String,
@@ -741,6 +824,8 @@ fn external(view: &ProjectView) -> ExternalProjectView {
         filter: view.filter.clone(),
         layout: view.display.layout,
         group_by: view.display.group_by,
+        order_by: view.display.order_by,
+        reverse: view.display.reverse,
         revision: view.revision,
         link: format!("sona://projects?view={}", view.id),
     }
@@ -770,6 +855,20 @@ impl Tracker<'_> {
         )
         .cloned()
         .map_err(|refusal| refusal.hint("List them with: sona work project-views"))
+    }
+
+    /// The label id a project filter keeps; any keeps every label.
+    pub(super) fn label_filter(&self, value: &str) -> Result<Option<String>, ExternalError> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("any") {
+            return Ok(None);
+        }
+        let all = self.all_labels()?;
+        Ok(Some(
+            pick("label", value, &all, |item| &item.id, |item| &item.name)?
+                .id
+                .clone(),
+        ))
     }
 
     pub(super) async fn project_view_verb(
@@ -851,6 +950,12 @@ impl Tracker<'_> {
                 Some(Self::pick_initiative(initiative, &all)?.id.clone())
             };
         }
+        if let Some(health) = args.health {
+            filter.health = health.health();
+        }
+        if let Some(label) = args.label.as_deref() {
+            filter.label = self.label_filter(label)?;
+        }
         if let Some(layout) = args.layout {
             display.layout = match layout {
                 ProjectLayoutArg::List => ProjectViewLayout::List,
@@ -859,13 +964,13 @@ impl Tracker<'_> {
             };
         }
         if let Some(group) = args.group_by {
-            display.group_by = match group {
-                ProjectGroupArg::Status => ProjectGroupBy::Status,
-                ProjectGroupArg::Lead => ProjectGroupBy::Lead,
-                ProjectGroupArg::Priority => ProjectGroupBy::Priority,
-                ProjectGroupArg::Quarter => ProjectGroupBy::Quarter,
-                ProjectGroupArg::None => ProjectGroupBy::None,
-            };
+            display.group_by = group.group();
+        }
+        if let Some(order) = args.order_by {
+            display.order_by = Some(order.order());
+        }
+        if let Some(reverse) = args.reverse {
+            display.reverse = reverse;
         }
         let input = ProjectViewInput {
             name: name.to_owned(),
@@ -980,6 +1085,16 @@ pub(super) fn project_keeps(
     if filter.link.is_some_and(|link| !links(link, &project.id)) {
         return false;
     }
+    if filter.health.is_some_and(|health| health != project.health) {
+        return false;
+    }
+    if filter
+        .label
+        .as_ref()
+        .is_some_and(|label| !project.label_ids.contains(label))
+    {
+        return false;
+    }
     match filter.initiative.as_deref() {
         None => true,
         Some("none") => project.initiative.is_none(),
@@ -991,96 +1106,207 @@ pub(super) fn project_keeps(
 }
 
 /// Projects in the groups `by` makes, in the order the Projects page shows
-/// them; none when `by` is none.
+/// them; none when `by` is none. A project with several labels is in each.
 pub(super) fn project_groups(
     projects: &[ExternalWorkProject],
     by: ProjectGroupBy,
 ) -> Option<Vec<ExternalProjectGroup>> {
+    if matches!(by, ProjectGroupBy::None) {
+        return None;
+    }
     let mut found: Vec<((u8, String), ExternalProjectGroup)> = Vec::new();
     for project in projects {
-        let (rank, key, title) = match by {
-            ProjectGroupBy::None => return None,
-            ProjectGroupBy::Status => {
-                let order = [
-                    planning::ProjectStatus::Backlog,
-                    planning::ProjectStatus::Planned,
-                    planning::ProjectStatus::Active,
-                    planning::ProjectStatus::Paused,
-                    planning::ProjectStatus::Completed,
-                    planning::ProjectStatus::Canceled,
-                ]
-                .iter()
-                .position(|status| *status == project.status)
-                .unwrap_or_default();
-                let word = serde_json::to_value(project.status)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                let mut title = word.clone();
-                if let Some(first) = title.get_mut(..1) {
-                    first.make_ascii_uppercase();
-                }
-                (
-                    (u8::try_from(order).unwrap_or(u8::MAX), String::new()),
-                    format!("status:{word}"),
-                    title,
-                )
+        for (rank, key, title) in group_keys(project, by) {
+            match found.iter_mut().find(|(_, group)| group.key == key) {
+                Some((_, group)) => group.projects.push(project.id.clone()),
+                None => found.push((
+                    rank,
+                    ExternalProjectGroup {
+                        key,
+                        title,
+                        projects: vec![project.id.clone()],
+                    },
+                )),
             }
-            ProjectGroupBy::Lead => match (&project.lead, project.lead_is_self) {
-                (_, true) => ((0, String::new()), "lead:self".to_owned(), "Me".to_owned()),
-                (Some(lead), false) => (
-                    (1, lead.name.to_lowercase()),
-                    format!("lead:{}", lead.id),
-                    lead.name.clone(),
-                ),
-                (None, false) => (
-                    (2, String::new()),
-                    "lead:none".to_owned(),
-                    "No lead".to_owned(),
-                ),
-            },
-            ProjectGroupBy::Priority => {
-                let value = project.priority.value();
-                (
-                    (if value == 0 { 5 } else { value }, String::new()),
-                    format!("priority:{value}"),
-                    project.priority.text().to_owned(),
-                )
-            }
-            ProjectGroupBy::Quarter => match project
-                .target_at_ms
-                .and_then(|at| Local.timestamp_millis_opt(at).single())
-            {
-                Some(target) => {
-                    let quarter = (target.month() - 1) / 3 + 1;
-                    let year = target.year();
-                    (
-                        (0, format!("{year:04}{quarter}")),
-                        format!("quarter:{year}-q{quarter}"),
-                        format!("Q{quarter} {year}"),
-                    )
-                }
-                None => (
-                    (1, String::new()),
-                    "quarter:none".to_owned(),
-                    "No target".to_owned(),
-                ),
-            },
-        };
-        match found.iter_mut().find(|(_, group)| group.key == key) {
-            Some((_, group)) => group.projects.push(project.id.clone()),
-            None => found.push((
-                rank,
-                ExternalProjectGroup {
-                    key,
-                    title,
-                    projects: vec![project.id.clone()],
-                },
-            )),
         }
     }
     found.sort_by(|(left, _), (right, _)| left.cmp(right));
     Some(found.into_iter().map(|(_, group)| group).collect())
+}
+
+/// The groups one project is in, as (rank, key, title).
+fn group_keys(
+    project: &ExternalWorkProject,
+    by: ProjectGroupBy,
+) -> Vec<((u8, String), String, String)> {
+    match by {
+        ProjectGroupBy::None => Vec::new(),
+        ProjectGroupBy::Status => {
+            let word = serde_json::to_value(project.status)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let mut title = word.clone();
+            if let Some(first) = title.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            vec![(
+                (status_rank(project.status), String::new()),
+                format!("status:{word}"),
+                title,
+            )]
+        }
+        ProjectGroupBy::Lead => vec![match (&project.lead, project.lead_is_self) {
+            (_, true) => ((0, String::new()), "lead:self".to_owned(), "Me".to_owned()),
+            (Some(lead), false) => (
+                (1, lead.name.to_lowercase()),
+                format!("lead:{}", lead.id),
+                lead.name.clone(),
+            ),
+            (None, false) => (
+                (2, String::new()),
+                "lead:none".to_owned(),
+                "No lead".to_owned(),
+            ),
+        }],
+        ProjectGroupBy::Priority => {
+            let value = project.priority.value();
+            vec![(
+                (priority_rank(&project.priority), String::new()),
+                format!("priority:{value}"),
+                project.priority.text().to_owned(),
+            )]
+        }
+        ProjectGroupBy::Quarter => vec![match project
+            .target_at_ms
+            .and_then(|at| Local.timestamp_millis_opt(at).single())
+        {
+            Some(target) => {
+                let quarter = (target.month() - 1) / 3 + 1;
+                let year = target.year();
+                (
+                    (0, format!("{year:04}{quarter}")),
+                    format!("quarter:{year}-q{quarter}"),
+                    format!("Q{quarter} {year}"),
+                )
+            }
+            None => (
+                (1, String::new()),
+                "quarter:none".to_owned(),
+                "No target".to_owned(),
+            ),
+        }],
+        ProjectGroupBy::Health => {
+            let (rank, word, title) = match project.health {
+                ProjectListHealth::OnTrack => (0, "on_track", "On track"),
+                ProjectListHealth::AtRisk => (1, "at_risk", "At risk"),
+                ProjectListHealth::OffTrack => (2, "off_track", "Off track"),
+                ProjectListHealth::Outdated => (3, "outdated", "Outdated"),
+            };
+            vec![(
+                (rank, String::new()),
+                format!("health:{word}"),
+                title.to_owned(),
+            )]
+        }
+        ProjectGroupBy::Initiative => vec![match &project.initiative {
+            Some(initiative) => (
+                (
+                    initiative_rank(project.initiative_status),
+                    initiative.name.to_lowercase(),
+                ),
+                format!("initiative:{}", initiative.id),
+                initiative.name.clone(),
+            ),
+            None => (
+                (u8::MAX, String::new()),
+                "initiative:none".to_owned(),
+                "No initiative".to_owned(),
+            ),
+        }],
+        ProjectGroupBy::Label => project
+            .labels
+            .iter()
+            .map(|label| {
+                (
+                    (0, label.to_lowercase()),
+                    format!("label:{}", label.to_lowercase()),
+                    label.clone(),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn status_rank(status: planning::ProjectStatus) -> u8 {
+    let order = [
+        planning::ProjectStatus::Backlog,
+        planning::ProjectStatus::Planned,
+        planning::ProjectStatus::Active,
+        planning::ProjectStatus::Paused,
+        planning::ProjectStatus::Completed,
+        planning::ProjectStatus::Canceled,
+    ]
+    .iter()
+    .position(|candidate| *candidate == status)
+    .unwrap_or_default();
+    u8::try_from(order).unwrap_or(u8::MAX)
+}
+
+fn priority_rank(priority: &Priority) -> u8 {
+    let value = priority.value();
+    if value == 0 {
+        5
+    } else {
+        value
+    }
+}
+
+fn initiative_rank(status: Option<planning::work::initiatives::InitiativeStatus>) -> u8 {
+    use planning::work::initiatives::InitiativeStatus as Status;
+    match status {
+        Some(Status::Active) => 0,
+        Some(Status::Planned) => 1,
+        Some(Status::Paused) => 2,
+        Some(Status::Backlog) => 3,
+        Some(Status::Completed) => 4,
+        Some(Status::Canceled) => 5,
+        None => 6,
+    }
+}
+
+/// Sorts projects by `by`, descending when `reverse` is set. Equal projects
+/// keep the order they came in.
+pub(super) fn project_order(
+    projects: &mut [ExternalWorkProject],
+    by: ProjectOrderBy,
+    reverse: bool,
+) {
+    projects.sort_by(|left, right| {
+        let order = match by {
+            ProjectOrderBy::Manual => left.position.cmp(&right.position),
+            ProjectOrderBy::Status => status_rank(left.status).cmp(&status_rank(right.status)),
+            ProjectOrderBy::Priority => {
+                priority_rank(&left.priority).cmp(&priority_rank(&right.priority))
+            }
+            ProjectOrderBy::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+            ProjectOrderBy::Start => left
+                .start_at_ms
+                .unwrap_or(i64::MAX)
+                .cmp(&right.start_at_ms.unwrap_or(i64::MAX)),
+            ProjectOrderBy::Target => left
+                .target_at_ms
+                .unwrap_or(i64::MAX)
+                .cmp(&right.target_at_ms.unwrap_or(i64::MAX)),
+            ProjectOrderBy::Created => left.created_at_ms.cmp(&right.created_at_ms),
+            ProjectOrderBy::Updated => left.updated_at_ms.cmp(&right.updated_at_ms),
+        };
+        if reverse {
+            order.reverse()
+        } else {
+            order
+        }
+    });
 }
 
 pub(super) fn text(answer: &ExternalProjectViewAnswer, text: &mut String) {
