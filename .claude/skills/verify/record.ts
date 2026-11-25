@@ -116,6 +116,9 @@ function clock(seconds: number): string {
   return `${minutes}:${(seconds - minutes * 60).toFixed(1).padStart(4, "0")}`;
 }
 
+/* Stills come from screencapture: a second avfoundation capture blocks while a
+ * recording holds the screen. Its -D counts displays from 1 in the order
+ * avfoundation numbers "Capture screen 0, 1, ...". */
 function screens(): void {
   const listing = spawnSync(
     "ffmpeg",
@@ -126,23 +129,9 @@ function screens(): void {
   if (devices.length === 0) fail(`ffmpeg lists no screens:\n${listing}`);
   const dir = "/private/var/tmp/sona-evidence/screens";
   mkdirSync(dir, { recursive: true });
-  for (const [, device] of devices) {
+  for (const [, device, screen] of devices) {
     const png = join(dir, `screen-${device}.png`);
-    run("ffmpeg", [
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-f",
-      "avfoundation",
-      "-pixel_format",
-      "nv12",
-      "-i",
-      `${device}:none`,
-      "-frames:v",
-      "1",
-      "-y",
-      png,
-    ]);
+    run("screencapture", ["-x", "-D", String(Number(screen) + 1), png]);
     console.log(`--screen ${device}: ${png}`);
   }
 }
@@ -407,7 +396,7 @@ async function stop(dir: string): Promise<void> {
     [
       `# ${session.title}`,
       "",
-      `- Commit: ${session.commit}${session.dirty ? " with uncommitted edits" : ""} on ${session.branch}`,
+      `- Commit: ${session.commit}${session.dirty ? " with uncommitted edits" : ""} on ${session.branch || "a detached checkout"}`,
       `- Recorded: ${session.startedAt}, ${videoLength.toFixed(1)} s, screen ${session.screen}`,
       `- Checks: ${RESULTS.map((result) => `${counts[result]} ${result}`).join(", ")}`,
       "",
