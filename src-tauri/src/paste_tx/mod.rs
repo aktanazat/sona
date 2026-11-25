@@ -303,6 +303,7 @@ mod tests {
             crate::settings::AutoSubmitKey::Enter,
             crate::settings::AutoSubmitKey::CtrlEnter,
             crate::settings::AutoSubmitKey::CmdEnter,
+            crate::settings::AutoSubmitKey::ShiftEnter,
         ] {
             let mut state = TxState::new();
             let injected = Instant::now();

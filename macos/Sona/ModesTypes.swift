@@ -185,6 +185,7 @@ enum ModeAutoSubmitKey: String, Codable, CaseIterable, Hashable, Identifiable {
     case enter
     case ctrlEnter = "ctrl_enter"
     case cmdEnter = "cmd_enter"
+    case shiftEnter = "shift_enter"
 
     var id: String { rawValue }
 
@@ -193,6 +194,7 @@ enum ModeAutoSubmitKey: String, Codable, CaseIterable, Hashable, Identifiable {
         case .enter: "Enter"
         case .ctrlEnter: "Ctrl+Enter"
         case .cmdEnter: "Cmd+Enter"
+        case .shiftEnter: "Shift+Enter"
         }
     }
 }

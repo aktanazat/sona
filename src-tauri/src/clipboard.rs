@@ -807,46 +807,33 @@ fn paste_direct(
 }
 
 pub(crate) fn send_return_key(enigo: &mut Enigo, key_type: AutoSubmitKey) -> Result<(), String> {
-    match key_type {
-        AutoSubmitKey::Enter => {
-            enigo
-                .key(Key::Return, Direction::Press)
-                .map_err(|e| format!("Failed to press Return key: {}", e))?;
-            enigo
-                .key(Key::Return, Direction::Release)
-                .map_err(|e| format!("Failed to release Return key: {}", e))?;
-        }
-        AutoSubmitKey::CtrlEnter => {
-            enigo
-                .key(Key::Control, Direction::Press)
-                .map_err(|e| format!("Failed to press Control key: {}", e))?;
-            enigo
-                .key(Key::Return, Direction::Press)
-                .map_err(|e| format!("Failed to press Return key: {}", e))?;
-            enigo
-                .key(Key::Return, Direction::Release)
-                .map_err(|e| format!("Failed to release Return key: {}", e))?;
-            enigo
-                .key(Key::Control, Direction::Release)
-                .map_err(|e| format!("Failed to release Control key: {}", e))?;
-        }
-        AutoSubmitKey::CmdEnter => {
-            enigo
-                .key(Key::Meta, Direction::Press)
-                .map_err(|e| format!("Failed to press Meta/Cmd key: {}", e))?;
-            enigo
-                .key(Key::Return, Direction::Press)
-                .map_err(|e| format!("Failed to press Return key: {}", e))?;
-            enigo
-                .key(Key::Return, Direction::Release)
-                .map_err(|e| format!("Failed to release Return key: {}", e))?;
-            enigo
-                .key(Key::Meta, Direction::Release)
-                .map_err(|e| format!("Failed to release Meta/Cmd key: {}", e))?;
-        }
+    let modifier = match key_type {
+        AutoSubmitKey::Enter => None,
+        AutoSubmitKey::CtrlEnter => Some((Key::Control, "Control")),
+        AutoSubmitKey::CmdEnter => Some((Key::Meta, "Meta/Cmd")),
+        AutoSubmitKey::ShiftEnter => Some((Key::Shift, "Shift")),
+    };
+    if let Some((key, name)) = modifier {
+        enigo
+            .key(key, Direction::Press)
+            .map_err(|error| format!("Failed to press {name} key: {error}"))?;
     }
-
-    Ok(())
+    let result = enigo
+        .key(Key::Return, Direction::Press)
+        .map_err(|error| format!("Failed to press Return key: {error}"))
+        .and_then(|()| {
+            enigo
+                .key(Key::Return, Direction::Release)
+                .map_err(|error| format!("Failed to release Return key: {error}"))
+        });
+    if let Some((key, name)) = modifier {
+        let release = enigo
+            .key(key, Direction::Release)
+            .map_err(|error| format!("Failed to release {name} key: {error}"));
+        result.and(release)
+    } else {
+        result
+    }
 }
 
 /// Sends the mode's submit key. Delivery decides whether a route earns this;
