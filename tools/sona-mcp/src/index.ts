@@ -15,8 +15,12 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { runSona, SonaCliError } from "./cli.ts";
 import { publishedTools, SonaInputError, TOOL_INPUT } from "./tools.ts";
+
+/* What `sona work guidance --json` answers, as far as the instructions need it. */
+const GUIDANCE = z.object({ current: z.object({ text: z.string() }) });
 
 /* Read by clients that show a server's instructions to their model: the
  * order an agent works a task in, which no single tool description holds. */
@@ -53,12 +57,20 @@ function refusalCode(refusal: string): ErrorCode {
  * transpiles without type-checking and the root lint never reaches this
  * directory — so a test that never constructs the server cannot tell a missing
  * export from a working one. `selection` is `SONA_MCP_TOOLS`; an unknown tool
- * name in it throws here, so a typo stops the server at start. */
-export function createServer(selection = process.env.SONA_MCP_TOOLS): Server {
+ * name in it throws here, so a typo stops the server at start. `guidance` is
+ * the user's standing guidance, read once at start and sent with the
+ * instructions, so an agent follows it from its first call. */
+export function createServer(
+  selection = process.env.SONA_MCP_TOOLS,
+  guidance = "",
+): Server {
   const tools = publishedTools(selection);
+  const instructions = guidance.trim() === ""
+    ? INSTRUCTIONS
+    : `${INSTRUCTIONS}\n\nThe user's standing guidance for every answer and change; follow it unless the request says otherwise:\n${guidance.trim()}`;
   const server = new Server(
     { name: "sona-mcp", version: "0.1.0" },
-    { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
+    { capabilities: { tools: {} }, instructions },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, () => ({
@@ -102,7 +114,7 @@ export function createServer(selection = process.env.SONA_MCP_TOOLS): Server {
        * this server declares no output schema, so a second copy of the same
        * bytes in a second field would be payload rather than information. */
       return {
-        content: [{ type: "text", text: JSON.stringify(answer, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(answer) }],
       };
     } catch (error) {
       if (error instanceof SonaInputError) {
@@ -130,7 +142,12 @@ export function createServer(selection = process.env.SONA_MCP_TOOLS): Server {
 }
 
 /* Run as the binary: take stdio. Imported: do nothing, so a test can hold a
- * server of its own without racing this one for the same file descriptors. */
+ * server of its own without racing this one for the same file descriptors.
+ * Guidance that cannot be read (Sona closed, access off) is left out. */
 if (import.meta.main) {
-  await createServer().connect(new StdioServerTransport());
+  const guidance = await runSona(["work", "guidance", "--json"]).then(
+    (answer) => GUIDANCE.safeParse(answer).data?.current.text ?? "",
+    () => "",
+  );
+  await createServer(undefined, guidance).connect(new StdioServerTransport());
 }

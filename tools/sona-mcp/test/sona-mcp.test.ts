@@ -929,11 +929,22 @@ describe("running sona", () => {
   });
 });
 
-async function connected(selection?: string): Promise<Client> {
+describe("instructions", () => {
+  test("the user's standing guidance reaches an agent on connect", async () => {
+    const client = await connected(undefined, "Title tasks as verbs.");
+    try {
+      expect(client.getInstructions()).toContain("Title tasks as verbs.");
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+async function connected(selection?: string, guidance?: string): Promise<Client> {
   const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "sona-mcp-test", version: "0.1.0" });
   await Promise.all([
-    createServer(selection).connect(serverEnd),
+    createServer(selection, guidance).connect(serverEnd),
     client.connect(clientEnd),
   ]);
   return client;
