@@ -44,7 +44,10 @@ final class CameraWatermarkController: NSObject, OSSystemExtensionRequestDelegat
 
     func attach(core: Core) { self.core = core }
 
+    /// Runs on every live update of the meeting panel, so the state file is
+    /// written only when recording actually starts or stops.
     func setRecording(_ recording: Bool) {
+        guard recording != self.recording else { return }
         self.recording = recording
         publish()
         updateHeartbeat()
