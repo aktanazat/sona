@@ -20,6 +20,11 @@
       "file": "0004_bootstrap_registry.sql",
       "version": "0004_bootstrap_registry",
       "checksum": "sha256:ae6e9b051ea617b15b02614b352dcc65ce08a93cee0e70f214893b9af0c224e8"
+    },
+    {
+      "file": "0005_idempotency_retention.sql",
+      "version": "0005_idempotency_retention",
+      "checksum": "sha256:8889299028bc834667f68fd3cee7cec68c170a8324a7b6ad13739c2485d28f87"
     }
   ]
 }

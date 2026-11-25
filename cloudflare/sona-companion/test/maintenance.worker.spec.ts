@@ -1,15 +1,16 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CHANGE_RETENTION_MS,
+  IDEMPOTENCY_RETENTION_MS,
   JOB_RETRY_MS,
   MAINTENANCE_PAGE_SIZE,
   MAX_CHUNK_BYTES,
 } from "../src/constants";
 import { claimJob, r2ChunkKey } from "../src/db";
 import { base64UrlDecode, sha256Base64Url } from "../src/encoding";
-import { runMaintenance } from "../src/maintenance";
+import { processMaintenanceJob, runMaintenance } from "../src/maintenance";
 import {
   bootstrap,
   createUploadPayload,
@@ -21,6 +22,10 @@ import {
 } from "./helpers";
 
 describe("maintenance", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("continues reconciliation after a bounded scan page", async () => {
     const device = await makeDevice();
     await bootstrap(device);
@@ -210,5 +215,91 @@ describe("maintenance", () => {
       .bind(device.vaultId)
       .first<{ count: number }>();
     expect(remainingAfterSecondPage?.count).toBe(0);
+  });
+
+  it("purges every expired mutation nonce in one pass, not one page", async () => {
+    const device = await makeDevice();
+    await bootstrap(device);
+    const now = Date.now();
+    await env.DB.batch(
+      Array.from({ length: MAINTENANCE_PAGE_SIZE * 4 }, (_, index) =>
+        env.DB.prepare(
+          "INSERT INTO mutation_nonces (vault_id, device_id, nonce, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+        ).bind(
+          device.vaultId,
+          device.deviceId,
+          new Uint8Array(16).fill(index),
+          now - 1,
+          now - 2,
+        ),
+      ),
+    );
+
+    await runMaintenance(env, now);
+    const remaining = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM mutation_nonces WHERE expires_at <= ?",
+    )
+      .bind(now)
+      .first<{ count: number }>();
+    expect(remaining?.count).toBe(0);
+  });
+
+  it("forgets idempotency results past retention and keeps recent ones", async () => {
+    const device = await makeDevice();
+    await bootstrap(device);
+    const now = Date.now();
+    const insert = (key: string, createdAt: number): D1PreparedStatement =>
+      env.DB.prepare(
+        "INSERT INTO idempotency_results (vault_id, device_id, idempotency_key, operation, target, body_digest, status, response_json, created_at) VALUES (?, ?, ?, 'commit_upload', 'upload:fixture', 'digest', 200, '{}', ?)",
+      ).bind(device.vaultId, device.deviceId, key, createdAt);
+    const expiredKey = testId("expired_result");
+    const recentKey = testId("recent_result");
+    await env.DB.batch([
+      insert(expiredKey, now - IDEMPOTENCY_RETENTION_MS - 1),
+      insert(recentKey, now - IDEMPOTENCY_RETENTION_MS + 1),
+    ]);
+
+    await runMaintenance(env, now);
+    const kept = await env.DB.prepare(
+      "SELECT idempotency_key FROM idempotency_results WHERE idempotency_key IN (?, ?)",
+    )
+      .bind(expiredKey, recentKey)
+      .all<{ idempotency_key: string }>();
+    expect(kept.results).toEqual([{ idempotency_key: recentKey }]);
+  });
+
+  it("queues the next page of a multi-page cleanup at once", async () => {
+    const device = await makeDevice();
+    await bootstrap(device);
+    const chunks = Array.from(
+      { length: MAINTENANCE_PAGE_SIZE + 1 },
+      (_, index) =>
+        new Uint8Array(index < MAINTENANCE_PAGE_SIZE ? MAX_CHUNK_BYTES : 28),
+    );
+    const payload = await createUploadPayload(device, { chunks });
+    const created = await signedFetch(device, {
+      method: "POST",
+      path: "/v1/uploads",
+      body: JSON.stringify(payload.json),
+      idempotencyKey: testId("create_operation"),
+    });
+    expect(created.status).toBe(201);
+    const now = Date.now();
+    const jobId = testId("cleanup_job");
+    await env.DB.prepare(
+      "INSERT INTO maintenance_jobs (job_id, vault_id, job_class, target_id, payload_json, state, next_attempt_at, created_at, updated_at) VALUES (?, ?, 'cleanup_upload', ?, '{}', 'queued', ?, ?, ?)",
+    )
+      .bind(jobId, device.vaultId, String(payload.json.uploadId), now, now, now)
+      .run();
+    const sent = vi.spyOn(env.MAINTENANCE, "send");
+
+    await processMaintenanceJob(env, jobId, now);
+    const job = await env.DB.prepare(
+      "SELECT progress, state FROM maintenance_jobs WHERE job_id = ?",
+    )
+      .bind(jobId)
+      .first<{ progress: number; state: string }>();
+    expect(job).toEqual({ progress: MAINTENANCE_PAGE_SIZE, state: "queued" });
+    expect(sent).toHaveBeenCalledWith({ job_id: jobId });
   });
 });

@@ -120,16 +120,26 @@ export class Sorter {
     feed.objects[change.object_id] = await this.read(change);
   }
 
-  /** Classify one head by opening its manifest; an unreadable head is indexed as `other`. */
+  /**
+   * Classify one head by opening its manifest. A head that is gone or does not
+   * open is indexed as `other`; any other failure fails the pass, so a card is
+   * never taken for `other` and its thought filed a second time.
+   */
   private async read(head: ChangeRow): Promise<FeedObject> {
     const { client, keys, log } = this.deps;
     const revision = { kind: "other" as const, revision_id: head.revision_id };
+    let reply;
+    try {
+      reply = await client.manifest(head.object_id, head.revision_id);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.code !== "not_found")
+        throw error;
+      log(`object ${head.object_id} is gone`);
+      return revision;
+    }
     let opened;
     try {
-      opened = await openManifest(
-        keys,
-        await client.manifest(head.object_id, head.revision_id),
-      );
+      opened = await openManifest(keys, reply);
     } catch (error) {
       log(`object ${head.object_id} is not readable: ${String(error)}`);
       return revision;
