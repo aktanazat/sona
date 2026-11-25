@@ -717,20 +717,25 @@ final class MeetingLiveStore {
     }
 
     /// A press on a ritual card. Every action but the follow-up copy closes the
-    /// card: copying is the one a person does before pressing Done.
+    /// card: copying is the one a person does before pressing Done. Done and
+    /// Dismiss close it even when the core declines, which it does for a card
+    /// it no longer holds: nothing is left to finish, and a card that stays up
+    /// would answer every press the same way.
     func respond(_ event: RitualEvent, action: RitualAction) {
+        let dismisses = action == .wrapDone || action == .prepDismiss
         Task {
             do {
                 let accepted: Bool = try await core.request(
                     "meeting_ritual_respond",
                     MeetingLiveRequest.ritualRespond(event.ritualId, action: action))
-                if accepted, action != .wrapFollowUpCopied, ritual?.ritualId == event.ritualId {
+                if accepted || dismisses, action != .wrapFollowUpCopied, ritual?.ritualId == event.ritualId {
                     clearRitual()
                 }
                 if action == .recordingStop || action == .recordingForgetApp {
                     await loadActive()
                 }
             } catch {
+                if dismisses, ritual?.ritualId == event.ritualId { clearRitual() }
                 self.error = reason(error)
             }
         }

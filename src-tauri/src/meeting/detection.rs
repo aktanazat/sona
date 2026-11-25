@@ -2483,7 +2483,10 @@ impl DetectionRuntime {
             let state = self.lock();
             match state.panel.get(ritual_id) {
                 Some(PendingPanel::Ritual(pending)) => pending.clone(),
-                _ => return false,
+                _ => {
+                    log::info!("Ritual {ritual_id} answered with {action:?} is no longer on show");
+                    return false;
+                }
             }
         };
         match (&pending.ritual, action) {
