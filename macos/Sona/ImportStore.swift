@@ -238,7 +238,7 @@ final class ImportStore {
                 return
             }
             let sentence: String = if failure.remote(as: String.self) == "history_off" {
-                "Saved history is off. Raise Dictations to keep in Library, then import again."
+                "Saved history is off. Raise Dictations to keep in Privacy settings, then import again."
             } else if let meetingError = failure.remote(as: MeetingCommandError.self),
                       meetingError != .importUnreadable {
                 meetingError.label

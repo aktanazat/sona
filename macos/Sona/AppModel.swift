@@ -71,12 +71,12 @@ enum Place: Int, CaseIterable, Identifiable {
 }
 
 /// Settings' pages, in the order its list shows them.
-enum SettingsPlace: Int, CaseIterable, Identifiable {
+enum SettingsPlace: String, CaseIterable, Identifiable {
     case profile, essentials, appearance, shortcuts, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, workImport, documents, about, debug
     case connections, tasks
 
-    var id: Int { rawValue }
+    var id: String { rawValue }
 
     var title: String {
         switch self {

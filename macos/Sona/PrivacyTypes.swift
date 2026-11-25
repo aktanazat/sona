@@ -492,7 +492,7 @@ struct UpstreamHistoryRemovals: Decodable {
             ? "the oldest unsaved dictation"
             : "the \(removals.formatted()) oldest unsaved dictations"
         return "Importing deletes \(oldest). "
-            + "To keep \(removals == 1 ? "it" : "them"), cancel and raise Dictations to keep in Library."
+            + "To keep \(removals == 1 ? "it" : "them"), cancel and raise Dictations to keep in Privacy settings."
     }
 }
 
