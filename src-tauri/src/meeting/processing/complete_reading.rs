@@ -1174,7 +1174,14 @@ pub(super) fn notes(
     let mut longest = usize::MAX;
     let mut input = notes_packs(evidence, &source_scope, speakers, budget.evidence_bytes)?;
     let mut instructions = Cow::Borrowed(prompt);
-    let mut short = Cow::Borrowed(SHORT_NOTES_PROMPT);
+    let (short_base, join_suffix) = match evidence.template.handwritten_outline() {
+        Some(headings) => (
+            Cow::Owned(format!("{SHORT_NOTES_PROMPT}{HANDWRITTEN_OUTLINE_RULE}")),
+            Cow::Owned(format!("],\"my_outline\":{}}}", serialize(&headings)?)),
+        ),
+        None => (Cow::Borrowed(SHORT_NOTES_PROMPT), Cow::Borrowed("]}")),
+    };
+    let mut short = Cow::Borrowed(short_base.as_ref());
     let mut left_out = Vec::new();
     let mut previous = Vec::new();
     let joined = |content| one_topic_per_subject(generator, evidence, content, &check);
@@ -1241,7 +1248,7 @@ pub(super) fn notes(
         };
         let scope = &source_scope;
         instructions = Cow::Owned(format!("{prompt}{NOTES_RECONCILIATION}"));
-        short = Cow::Owned(format!("{SHORT_NOTES_PROMPT}{NOTES_RECONCILIATION}"));
+        short = Cow::Owned(format!("{short_base}{NOTES_RECONCILIATION}"));
         let budget = part_budget(generator, &instructions, ARTIFACT_MAX_TOKENS);
         reply_tokens = budget.reply_tokens;
         longest = join_room(generator, reply_tokens);
@@ -1254,7 +1261,7 @@ pub(super) fn notes(
                 packs(
                     rows,
                     "{\"section_facts\":[",
-                    "]}",
+                    &join_suffix,
                     budget.evidence_bytes,
                     Fill::Even,
                 )
@@ -1361,13 +1368,8 @@ fn joined_as_written(
         fits
     });
     let (summary, summary_trace) = validate_summary_lines(&summary_lines, &evidence.transcript)?;
-    if let NotesTemplate::Custom(template) = &evidence.template {
-        outline.sort_by_key(|topic| {
-            template
-                .sections
-                .iter()
-                .position(|section| section.title == topic.title.text)
-        });
+    if let Some(titles) = evidence.template.fixed_titles() {
+        outline.sort_by_key(|topic| titles.clone().position(|title| title == topic.title.text));
     }
     outline.truncate(32);
     let mut content = GeneratedMeetingArtifacts {
@@ -1481,7 +1483,7 @@ fn one_topic_per_subject(
     mut content: GeneratedMeetingArtifacts,
     check: &dyn Fn() -> Result<(), RunFailure>,
 ) -> Result<GeneratedMeetingArtifacts, ReadingError> {
-    if content.outline.len() < 2 || matches!(evidence.template, NotesTemplate::Custom(_)) {
+    if content.outline.len() < 2 || evidence.template.fixed_titles().is_some() {
         return Ok(content);
     }
     let input = serialize(&TopicsInput {

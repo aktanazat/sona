@@ -2,8 +2,8 @@ import Foundation
 
 /// The notes in the order a reader scans them: the outcome, what was decided,
 /// who does what by when, the numbers, what is still open, then what was
-/// covered. Every word is the model's; this orders and splits them and names
-/// who was talking at the moment each line came from.
+/// covered. This orders the generated content and names who was talking
+/// at the moment each line came from.
 struct MeetingNotesDigest {
     /// When a line was said, and that moment as the page writes it.
     struct Moment {
@@ -141,7 +141,9 @@ struct MeetingNotesDigest {
         }
         self.covered = covered
 
-        let outlineLines = outlineTexts.map { line(0, $0.text, $0.citations) }
+        let outlineLines = content.outline.compactMap { topic in
+            topic.detail.map { line(0, $0.text, $0.citations) }
+        }
         let sources = summary + decisions + actions.map(\.line) + outlineLines + questions + risks
             + [outcome].compactMap { $0 }
         var seen = Set<String>()
