@@ -1945,6 +1945,27 @@ pub fn work_attachment_rename(
     rename_attachment_as(&app, ME, &operation_id, &id, &title)
 }
 
+/// Puts `metadata` in place of the attachment's key-value facts; none
+/// clears them.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn work_attachment_metadata_set(
+    app: AppHandle,
+    operation_id: String,
+    id: String,
+    metadata: BTreeMap<String, String>,
+) -> Result<WorkAttachment, String> {
+    let root = attachment_root(&app)?;
+    attachment_change(
+        &app,
+        &root,
+        &operation_id,
+        "work_attachment_metadata_set",
+        &(&id, &metadata),
+        |tx, root, _| attachments::set_metadata(tx, root, &id, &metadata, ME),
+    )
+}
+
 fn update(
     history: &mut Connection,
     meetings: Option<&Connection>,

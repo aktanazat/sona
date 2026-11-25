@@ -5969,6 +5969,22 @@ pub(super) async fn call(
             })
             .await?
         }
+        "work_attachment_metadata_set" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let metadata = args.take("metadata")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_attachment_metadata_set(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    metadata,
+                ))
+            })
+            .await?
+        }
         "work_labels" => {
             let handle = app.clone();
             off_main_thread(move || reply(crate::planning::work::work_labels(handle.state())))

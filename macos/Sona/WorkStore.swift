@@ -238,6 +238,12 @@ final class WorkStore {
             operationId: Self.newId(), id: attachment.id, title: title))
     }
 
+    /// Puts `metadata` in place of the attachment's key-value facts.
+    func setAttachmentMetadata(_ attachment: WorkAttachment, to metadata: [String: String]) async -> Bool {
+        await write(on: attachment.itemId, "work_attachment_metadata_set", AttachmentMetadataParams(
+            operationId: Self.newId(), id: attachment.id, metadata: metadata))
+    }
+
     func detach(_ attachment: WorkAttachment) async -> Bool {
         let kept: WorkAttachmentSource?
         if let url = attachment.linkURL, attachment.kind == .link {
@@ -2248,6 +2254,11 @@ private struct AttachmentRenameParams: Encodable {
     let operationId: String
     let id: String
     let title: String
+}
+private struct AttachmentMetadataParams: Encodable {
+    let operationId: String
+    let id: String
+    let metadata: [String: String]
 }
 private struct AttachParams: Encodable {
     let operationId: String

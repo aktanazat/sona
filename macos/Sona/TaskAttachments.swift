@@ -164,6 +164,7 @@ struct DetailAttachments: View {
     @State private var addingLink = false
     @State private var renaming: WorkAttachment?
     @State private var renameText = ""
+    @State private var editingFacts: WorkAttachment?
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -228,6 +229,10 @@ struct DetailAttachments: View {
             Button("Rename") { rename() }
             Button("Cancel", role: .cancel) { renaming = nil }
         }
+        .sheet(item: $editingFacts) { attachment in
+            AttachmentFactsForm(attachment: attachment) { editingFacts = nil }
+                .environment(model)
+        }
     }
 
     private var addMenu: some View {
@@ -288,6 +293,7 @@ struct DetailAttachments: View {
             renameText = attachment.title
             renaming = attachment
         }
+        Button("Edit details…") { editingFacts = attachment }
         Button("Remove", role: .destructive) { remove(attachment) }
     }
 
@@ -648,5 +654,65 @@ private struct AddLinkForm: View {
             model.changeWork { model.work.update([itemId], WorkPatch(status: .done)) }
         }
         done()
+    }
+}
+
+/// An attachment's key-value facts as lines of key=value, the way
+/// `sona work attach --meta` takes them. Emptying every line clears them.
+private struct AttachmentFactsForm: View {
+    let attachment: WorkAttachment
+    let done: () -> Void
+    @Environment(AppModel.self) private var model
+    @State private var text = ""
+
+    var body: some View {
+        let facts = Self.facts(in: text)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Details").font(TypeScale.label(13)).foregroundStyle(Theme.ink)
+            Text("One per line, as key=value.").metaText(Theme.inkSecondary)
+            TextEditor(text: $text)
+                .font(TypeScale.mono(12))
+                .frame(minHeight: 120)
+                .accessibilityLabel("Details, one per line as key=value")
+            if facts == nil {
+                Text("Each line needs a key, then =, then its value.")
+                    .metaText(Theme.live)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: done).keyboardShortcut(.cancelAction)
+                Button("Save") { save(facts) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(facts == nil)
+            }
+        }
+        .padding(14)
+        .frame(width: 360)
+        .onAppear {
+            text = attachment.metadata.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
+        }
+    }
+
+    /// The facts the lines hold; nil while one has no key or no `=`.
+    static func facts(in text: String) -> [String: String]? {
+        var facts: [String: String] = [:]
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard !line.allSatisfy(\.isWhitespace) else { continue }
+            guard let equals = line.firstIndex(of: "=") else { return nil }
+            let key = line[..<equals].trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty else { return nil }
+            facts[key] = line[line.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+        }
+        return facts
+    }
+
+    private func save(_ facts: [String: String]?) {
+        guard let facts else { return }
+        done()
+        guard facts != attachment.metadata else { return }
+        let work = model.work
+        let attachment = attachment
+        Task { _ = await work.setAttachmentMetadata(attachment, to: facts) }
     }
 }

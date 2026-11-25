@@ -109,7 +109,7 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | List attachments, with each one's key-value metadata and the comment it was added with | `work_attachments` (tile lists the metadata; a comment's files show under that comment, not in Attachments) | `work attachments TASK` | `sona_task_attachments` | both |
 | Attach a file | `work_attachment_attach_file` | `work attach TASK PATH [--title --subtitle]` | `sona_task_attach` (`path`) | both |
 | Files on a comment | `work_attachment_attach_file` (`commentId`; the comment box's paperclip) | `work attach TASK PATH --comment COMMENT_ID` | `sona_task_attach` (`comment`) | both |
-| Key-value metadata on an attachment; attaching the same file or link again replaces it, for whoever attached it | display only: the tile lists it | `work attach TASK PATH\|URL --meta KEY=VALUE…` | `sona_task_attach` (`metadata`) | CLI and MCP set it; the app shows it |
+| Key-value metadata on an attachment; attaching the same file or link again replaces it, for whoever attached it | `work_attachment_metadata_set` (an attachment's Edit details…) | `work attach TASK PATH\|URL --meta KEY=VALUE…` | `sona_task_attach` (`metadata`) | both |
 | Attach a link | `work_attachment_attach_link` (Add link form: title, subtitle; the tile shows the subtitle) | `work attach TASK URL [--title --subtitle]` | `sona_task_attach` (`url`) | both |
 | Rename an attachment | `work_attachment_rename` | `work attachment-rename TASK ID --title` | `sona_work_attachment_rename` *(opt-in)* | both |
 | Detach | `work_attachment_detach` | `work detach TASK ID` | `sona_task_detach` *(opt-in)* | both |

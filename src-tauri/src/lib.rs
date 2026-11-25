@@ -2248,6 +2248,7 @@ pub fn run(cli_args: CliArgs) {
             planning::work::work_attachment_attach_link,
             planning::work::work_attachment_detach,
             planning::work::work_attachment_rename,
+            planning::work::work_attachment_metadata_set,
             planning::work::work_labels,
             planning::work::work_label_save,
             planning::work::work_label_delete,

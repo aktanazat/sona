@@ -633,6 +633,33 @@ pub(crate) fn rename(
     find(conn, root, &found.id)
 }
 
+/// An attachment's key-value facts, in place of its own; none clears them.
+/// The user may change any; an agent or Sona only its own.
+pub(crate) fn set_metadata(
+    conn: &Connection,
+    root: &Path,
+    id: &str,
+    metadata: &BTreeMap<String, String>,
+    author: Author<'_>,
+) -> Result<WorkAttachment> {
+    let found = find(conn, root, id)?;
+    if !owns(&author, &found) {
+        return Err(Refusal::NotAttacher.into());
+    }
+    let stored = Naming {
+        title: None,
+        subtitle: None,
+        metadata: Some(metadata),
+        comment_id: None,
+    }
+    .metadata()?;
+    conn.execute(
+        "UPDATE planning_task_attachments SET metadata = ?2 WHERE id = ?1",
+        params![found.id, stored],
+    )?;
+    find(conn, root, &found.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::schema;
@@ -642,7 +669,7 @@ mod tests {
     use super::super::store::Refusal;
     use super::super::types::WorkCommentSubject;
     use super::super::types::{WorkActor, WorkOwner, WorkStatus};
-    use super::{attach_file, attach_link, detach, list, place, stage_bytes, Naming};
+    use super::{attach_file, attach_link, detach, list, place, set_metadata, stage_bytes, Naming};
     use rusqlite::Connection;
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -852,6 +879,51 @@ mod tests {
             list(&conn, root.path(), &task).expect("listed")[0].metadata,
             green
         );
+    }
+
+    #[test]
+    fn the_user_edits_and_clears_an_agents_attachment_facts_and_another_agent_cannot() {
+        let (conn, task) = tracker();
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let red = BTreeMap::from([("status".to_owned(), "red".to_owned())]);
+        let codex = Author {
+            actor: WorkActor::Agent,
+            agent: Some("codex"),
+        };
+        let claude = Author {
+            actor: WorkActor::Agent,
+            agent: Some("claude"),
+        };
+        let made = attach_link(
+            &conn,
+            root.path(),
+            &task,
+            "https://ci.example/run/9",
+            Naming {
+                metadata: Some(&red),
+                ..UNNAMED
+            },
+            claude,
+            AT,
+        )
+        .expect("attached");
+
+        let green = BTreeMap::from([("status".to_owned(), "green".to_owned())]);
+        let refused = set_metadata(&conn, root.path(), &made.id, &green, codex);
+        assert_eq!(
+            refused
+                .expect_err("another agent")
+                .downcast_ref::<Refusal>(),
+            Some(&Refusal::NotAttacher)
+        );
+        let edited = set_metadata(&conn, root.path(), &made.id, &green, ME).expect("edited");
+        assert_eq!(edited.metadata, green);
+        let cleared =
+            set_metadata(&conn, root.path(), &made.id, &BTreeMap::new(), ME).expect("cleared");
+        assert!(cleared.metadata.is_empty());
+        assert!(list(&conn, root.path(), &task).expect("listed")[0]
+            .metadata
+            .is_empty());
     }
 
     #[test]
