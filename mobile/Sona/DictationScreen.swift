@@ -234,6 +234,8 @@ private struct PhoneDictationSettings: View {
     @State private var activeLanguage = DictationPreferences.activeLanguage
     @State private var choosesLanguages = false
     @State private var typingLanguages = KeyboardLanguages.shared().enabled
+    @AppStorage(KeyboardFeelPreferences.englishLayoutKey, store: DictationPreferences.shared)
+    private var englishLayout = EnglishKeyboardLayout.qwerty
     @AppStorage(KeyboardFeelPreferences.numberRowKey, store: DictationPreferences.shared) private var numberRow = false
     @AppStorage(KeyboardFeelPreferences.hapticsKey, store: DictationPreferences.shared) private var keyHaptics = true
     @AppStorage(KeyboardFeelPreferences.soundsKey, store: DictationPreferences.shared) private var keySounds = true
@@ -265,6 +267,12 @@ private struct PhoneDictationSettings: View {
                 .listRowBackground(Theme.surface)
                 Section {
                     ForEach(TypingLanguage.allCases) { language in languageToggle(language) }
+                    if typingLanguages.contains(.english) {
+                        Picker("keyboard.englishLayout", selection: $englishLayout) {
+                            Text(verbatim: "QWERTY").tag(EnglishKeyboardLayout.qwerty)
+                            Text(verbatim: "QWERTZ").tag(EnglishKeyboardLayout.qwertz)
+                        }
+                    }
                 } header: {
                     Text("keyboard.languages")
                 }
