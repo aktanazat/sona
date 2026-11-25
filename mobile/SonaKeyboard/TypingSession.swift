@@ -148,6 +148,14 @@ struct TypingSession {
             let snippet = Correction(typed: keyword, replacement: cased)
             return remember(.corrected(snippet, separator: separator), Edit(deleteCount: keyword.count, insert: cased + separator), on: text)
         }
+        if corrects, let (typed, shown, replacement) = movedSpace(before: text) {
+            let correction = Correction(typed: typed, replacement: replacement)
+            let place = String(text.dropLast(shown.count)) + replacement
+            corrections = Array((corrections + [Corrected(correction: correction, field: field, place: place)])
+                .suffix(Self.correctionMemory))
+            let edit = Edit(deleteCount: shown.count, insert: replacement + separator)
+            return remember(.corrected(correction, separator: separator), edit, on: text)
+        }
         if corrects, let correction = corrector?.correction(before: text, lexicon: lexicon) {
             learn(before: text, as: correction.replacement)
             let place = String(text.dropLast(correction.typed.count)) + correction.replacement
@@ -160,6 +168,25 @@ struct TypingSession {
          * leaves both alone; counting such a word would make a typo known for good. */
         if corrects, corrector?.common != nil { learn(before: text) }
         return remember(separator == " " ? .space : .other, Edit(insert: separator), on: text)
+    }
+
+    /// "ther eis" with the space a letter early, ended by the space after it: the two words
+    /// as typed, as the text shows them now, and as meant. The first word is taken as typed,
+    /// before the correction its own space may have made ("ther" became "the").
+    private func movedSpace(before text: String) -> (typed: String, shown: String, replacement: String)? {
+        guard let corrector, let second = TypingText.word(before: text) else { return nil }
+        let head = text[..<second.startIndex]
+        guard head.hasSuffix(" "), !head.hasSuffix("  "), let first = TypingText.word(before: String(head.dropLast())) else {
+            return nil
+        }
+        let place = String(head.dropLast())
+        let currentField = field
+        let typedFirst = corrections.last.flatMap { $0.place == place && $0.field == currentField ? $0.correction.typed : nil }
+            ?? String(first)
+        guard let replacement = corrector.movedSpace(first: typedFirst, second: String(second), lexicon: lexicon) else {
+            return nil
+        }
+        return (typedFirst + " " + second, first + " " + second, replacement)
     }
 
     /// Right after a correction, backspace puts the typed word back and keeps it from then

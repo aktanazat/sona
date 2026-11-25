@@ -68,6 +68,30 @@ struct KeyboardLearningTests {
         #expect(text == "yes I ")
     }
 
+    @Test("two words typed with the space a letter early or late are put right", arguments: [
+        ("like ther eis", "like there is "), ("and thi sis", "and this is "),
+    ])
+    func movedSpace(typed: String, intended: String) async throws {
+        var session = try await warmSession()
+        var text = ""
+        for word in typed.split(separator: " ") {
+            for character in word { text.apply(session.type(String(character))) }
+            text.apply(session.end(with: " ", before: text, corrects: true))
+        }
+        #expect(text == intended)
+    }
+
+    @Test("two real words stay as typed when a moved space would also make words")
+    func realWordsKeepTheirSpace() async throws {
+        var session = try await warmSession()
+        var text = ""
+        for word in ["to", "day", "we", "go"] {
+            for character in word { text.apply(session.type(String(character))) }
+            text.apply(session.end(with: " ", before: text, corrects: true))
+        }
+        #expect(text == "to day we go ")
+    }
+
     @Test("coming back to a corrected word offers the word as typed, and choosing it keeps it")
     func undoCorrectionLater() throws {
         var session = try session()
@@ -279,6 +303,15 @@ struct EnglishWordListTests {
         ("see you monday", "Monday"), ("in december", "December"), ("from texas", "Texas"),
     ])
     func capitalizesProperNouns(text: String, intended: String) async throws {
+        let corrector = try await corrector()
+        #expect(corrector.correction(before: text, lexicon: TypingLexicon())?.replacement == intended)
+    }
+
+    @Test("a word typed without its apostrophe gets it back", arguments: [
+        ("so im", "I'm"), ("so ive", "I've"), ("we cant", "can't"), ("it wont", "won't"),
+        ("Thats", "That's"), ("whats", "what's"),
+    ])
+    func putsTheApostropheBack(text: String, intended: String) async throws {
         let corrector = try await corrector()
         #expect(corrector.correction(before: text, lexicon: TypingLexicon())?.replacement == intended)
     }
