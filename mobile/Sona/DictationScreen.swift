@@ -196,7 +196,7 @@ struct DictationScreen: View {
                 RecordPill(glyph: .record, height: controlSize)
             }
             .buttonStyle(PressScaleButtonStyle(reduceMotion: reduceMotion))
-            .disabled(!model.canStartDictation || (model.keyboardReturn && !keyboardEnabled))
+            .disabled(!model.canStartDictation)
             .accessibilityLabel(Text("dictation.start"))
             .accessibilityIdentifier("dictation-start")
         case .listening:

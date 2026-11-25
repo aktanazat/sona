@@ -73,7 +73,7 @@ struct KeyboardDraftStore {
 
     /// Check the preview's identity and remove it under the same cross-process lock.
     func take(id: UUID, now: Date = Date()) throws -> String {
-        try coordinated { file in
+        let text = try coordinated { file in
             switch try state(of: file, now: now) {
             case .expired:
                 throw KeyboardDraftError.expired
@@ -85,6 +85,8 @@ struct KeyboardDraftStore {
                 return draft.text
             }
         }
+        KeyboardSignal.post(.draftConsumed)
+        return text
     }
 
     func discard(id: UUID) throws {

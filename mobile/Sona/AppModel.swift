@@ -83,14 +83,13 @@ final class AppModel: NSObject, ObservableObject {
     let calls = PhoneCalls()
     private var spotlight: PhoneNoteSpotlight?
     private var keyboardSignal: KeyboardSignal?
+    private var keyboardDraftSignal: KeyboardSignal?
+    private var keyboardDraftExpiry: Timer?
     private var keyboardTicker: Task<Void, Never>?
     private var draining = false
     private var drainAgain = false
-    private var keyboardRequestID: UUID?
-    private var keyboardRequestDocumentID: UUID?
+    private var keyboardRequest: (id: UUID, documentID: UUID?)?
     private var lastKeyboardRequestID: UUID?
-    private var keyboardDocumentID: UUID?
-    private var keyboardLanguage: TypingLanguage?
     private var pendingURL: URL?
 
     let recorder = PhoneRecorder()
@@ -145,6 +144,12 @@ final class AppModel: NSObject, ObservableObject {
         keyboardSignal = KeyboardSignal(.command) { [weak self] in
             Task { @MainActor in self?.receiveKeyboardCommand() }
         }
+        keyboardDraftSignal = KeyboardSignal(.draftConsumed) { [weak self] in
+            Task { @MainActor in
+                guard let self, self.keyboardDraft != nil else { return }
+                self.refreshKeyboardDraft()
+            }
+        }
         publishKeyboardState()
         callOffers.onOfferAccepted = { [weak self] in
             self?.startRecording(during: nil, afterCall: true)
@@ -198,14 +203,12 @@ final class AppModel: NSObject, ObservableObject {
     var canStartDictation: Bool { consentAccepted && !recorder.isRecording && !startingRecording }
 
     func startDictation() {
-        guard canStartDictation else { return }
+        guard canStartDictation, !dictation.isBusy else { return }
         keyboardSetup = nil
-        if keyboardReturn {
-            guard DictationPreferences.keyboardEnabled else { return }
-            startKeyboardDictation(requestID: UUID(), documentID: keyboardDocumentID, language: keyboardLanguage)
-        } else {
-            dictation.start()
-        }
+        keyboardReturn = false
+        if let pendingURL, DictationLink.fromKeyboard(pendingURL) { self.pendingURL = nil }
+        lastKeyboardRequestID = nil
+        dictation.start()
     }
 
     func handle(_ url: URL) {
@@ -224,12 +227,17 @@ final class AppModel: NSObject, ObservableObject {
             pendingURL = nil
             allowKeyboardMicrophone()
         } else if DictationLink.opens(url) {
-            keyboardDocumentID = DictationLink.keyboardDocument(url)
-            keyboardLanguage = DictationLink.keyboardLanguage(url)
             keyboardReturn = DictationLink.fromKeyboard(url)
             guard !keyboardReturn || DictationPreferences.keyboardEnabled else { return }
             pendingURL = nil
-            startDictation()
+            if keyboardReturn {
+                startKeyboardDictation(
+                    requestID: UUID(), documentID: DictationLink.keyboardDocument(url),
+                    language: DictationLink.keyboardLanguage(url)
+                )
+            } else {
+                startDictation()
+            }
         }
     }
 
@@ -255,8 +263,7 @@ final class AppModel: NSObject, ObservableObject {
             dictation.cancel()
             dictation.endWarmSession()
             withdrawKeyboardDraft()
-            keyboardRequestID = nil
-            keyboardRequestDocumentID = nil
+            keyboardRequest = nil
             lastKeyboardRequestID = nil
         } else if let pendingURL { handle(pendingURL) }
         publishKeyboardState()
@@ -264,11 +271,9 @@ final class AppModel: NSObject, ObservableObject {
 
     private func startKeyboardDictation(requestID: UUID, documentID: UUID?, language: TypingLanguage?) {
         guard canStartDictation, !dictation.isBusy else { return }
-        keyboardRequestID = requestID
-        keyboardRequestDocumentID = documentID
+        keyboardSetup = nil
+        keyboardRequest = (requestID, documentID)
         lastKeyboardRequestID = requestID
-        keyboardDocumentID = documentID
-        keyboardLanguage = language
         dictation.start(keyboard: true, language: language?.rawValue)
     }
 
@@ -285,10 +290,10 @@ final class AppModel: NSObject, ObservableObject {
                     language: command.language.flatMap(TypingLanguage.init(rawValue:))
                 )
             case .stop:
-                guard command.requestID == keyboardRequestID else { return }
+                guard command.requestID == keyboardRequest?.id else { return }
                 if dictation.phase == .authorizing { dictation.cancel() } else { dictation.finish() }
             case .cancel:
-                guard command.requestID == keyboardRequestID else { return }
+                guard command.requestID == keyboardRequest?.id else { return }
                 dictation.cancel()
             }
         } catch { library.error = error.localizedDescription }
@@ -302,15 +307,14 @@ final class AppModel: NSObject, ObservableObject {
         case .listening: phase = .listening
         case .authorizing, .finishing: phase = .finishing
         case .idle:
-            keyboardRequestID = nil
-            keyboardRequestDocumentID = nil
+            keyboardRequest = nil
             phase = dictation.isWarm ? .ready : (dictation.notice == nil ? .off : .failed)
         }
         do {
             try KeyboardSessionStore.shared().publish(KeyboardSessionState(
                 phase: phase, expiresAt: dictation.warmUntil ?? .distantPast,
-                heartbeat: Date(), requestID: keyboardRequestID ?? lastKeyboardRequestID, message: dictation.notice,
-                heard: keyboardRequestID == nil ? nil : KeyboardSessionState.heard(dictation.text)
+                heartbeat: Date(), requestID: keyboardRequest?.id ?? lastKeyboardRequestID, message: dictation.notice,
+                heard: keyboardRequest == nil ? nil : KeyboardSessionState.heard(dictation.text)
             ))
         } catch { library.error = error.localizedDescription }
         microphoneActivity.show(dictation.isWarm ? MicrophoneActivityAttributes.ContentState(
@@ -449,17 +453,41 @@ final class AppModel: NSObject, ObservableObject {
 
     // MARK: - Keyboard draft
 
-    /* The approved draft outlives the dictation screen, so the identity of what the
-     * keyboard can insert is held here rather than in that view's state. */
     func approveForKeyboard(_ text: String) throws {
-        keyboardDraft = try KeyboardDraftStore.shared().save(text: text).id
+        trackKeyboardDraft(try KeyboardDraftStore.shared().save(text: text))
     }
 
     /// Withdraw what the keyboard has not taken yet. Already inserted is the same outcome.
     func withdrawKeyboardDraft() {
         guard let id = keyboardDraft else { return }
-        keyboardDraft = nil
+        trackKeyboardDraft(nil)
         try? KeyboardDraftStore.shared().discard(id: id)
+    }
+
+    func refreshKeyboardDraft() {
+        guard consentAccepted else { return }
+        if case .waiting(let draft)? = try? KeyboardDraftStore.shared().load() {
+            trackKeyboardDraft(draft)
+        } else {
+            trackKeyboardDraft(nil)
+        }
+    }
+
+    private func trackKeyboardDraft(_ draft: KeyboardDraft?) {
+        keyboardDraftExpiry?.invalidate()
+        keyboardDraftExpiry = nil
+        if keyboardDraft != draft?.id { keyboardDraft = draft?.id }
+        guard let draft else { return }
+        let id = draft.id
+        let expiry = draft.createdAt.addingTimeInterval(KeyboardDraftStore.lifetime)
+        let timer = Timer(fire: expiry, interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.keyboardDraft == id else { return }
+                self.refreshKeyboardDraft()
+            }
+        }
+        keyboardDraftExpiry = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     func stopRecording() {
@@ -677,7 +705,7 @@ final class AppModel: NSObject, ObservableObject {
     private func collectDictation(_ capture: DictationCapture) {
         var keyboardStore: KeyboardDraftStore?
         var draftError: String?
-        if keyboardRequestID != nil, !capture.isThought, capture.error == nil, !capture.text.isEmpty {
+        if keyboardRequest != nil, !capture.isThought, capture.error == nil, !capture.text.isEmpty {
             do { keyboardStore = try KeyboardDraftStore.shared() }
             catch { draftError = error.localizedDescription }
         }
@@ -691,13 +719,12 @@ final class AppModel: NSObject, ObservableObject {
         let delivery = library.deliverDictation(
             kind: capture.isThought ? .note : .dictation,
             text: capture.text, date: capture.startedAt, audio: capture.audio,
-            keyboardStore: keyboardStore, documentID: keyboardRequestDocumentID,
+            keyboardStore: keyboardStore, documentID: keyboardRequest?.documentID,
             removeSourceAfterSaving: !capture.isThought
         )
-        if let draft = delivery.draft { keyboardDraft = draft.id }
+        if let draft = delivery.draft { trackKeyboardDraft(draft) }
         if let draftError { library.error = draftError }
-        keyboardRequestID = nil
-        keyboardRequestDocumentID = nil
+        keyboardRequest = nil
         Task {
             defer {
                 if background != .invalid { UIApplication.shared.endBackgroundTask(background) }

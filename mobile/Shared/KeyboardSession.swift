@@ -130,6 +130,7 @@ final class KeyboardSignal {
     enum Channel: String {
         case command = "com.aktanazat.sona.keyboard.command"
         case state = "com.aktanazat.sona.keyboard.state"
+        case draftConsumed = "com.aktanazat.sona.keyboard.draft-consumed"
     }
     private let channel: Channel
     private let receive: () -> Void
