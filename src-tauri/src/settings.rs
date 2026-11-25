@@ -857,6 +857,7 @@ pub enum AutoSubmitKey {
     Enter,
     CtrlEnter,
     CmdEnter,
+    ShiftEnter,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
