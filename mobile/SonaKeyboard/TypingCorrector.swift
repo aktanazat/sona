@@ -149,6 +149,13 @@ final class TypingCorrector {
            typed == "i" || typed.lowercased() == "j" || typed.hasPrefix("i'") || typed.hasPrefix("i’") {
             return Suggestions(typed: typed, correction: "I" + typed.dropFirst(), others: Self.distinct(completions, from: typed))
         }
+        /* A word that lost its apostrophe gets it back, as on the system keyboard. Apple's
+         * checker passes some as words ("cant", "wont") and guesses others wrong ("im" as
+         * "in", "ive" as "ice"). */
+        if language.hasPrefix("en"), !lexicon.contains(word), let fixed = Self.apostrophes[typed.lowercased()] {
+            return Suggestions(typed: typed, correction: Self.matchCase(of: typed, in: fixed),
+                               others: Self.distinct(completions, from: typed))
+        }
         guard guessing, needsCorrection(word, after: text, lexicon: lexicon) else {
             return Suggestions(typed: typed, correction: nil, others: Self.distinct(completions, from: typed))
         }
@@ -168,6 +175,46 @@ final class TypingCorrector {
 
     /// Guesses closer than this to the runner-up are a coin toss, so the word stays as typed.
     static let margin = 0.025
+
+    /// English words people type without their apostrophe. Words that are also common as
+    /// written ("its", "lets", "were", "well", "ill", "id", "wed", "shell") are left out.
+    static let apostrophes: [String: String] = [
+        "im": "I'm", "ive": "I've", "aint": "ain't", "arent": "aren't", "cant": "can't",
+        "couldnt": "couldn't", "couldve": "could've", "didnt": "didn't", "doesnt": "doesn't",
+        "dont": "don't", "hadnt": "hadn't", "hasnt": "hasn't", "havent": "haven't", "hes": "he's",
+        "heres": "here's", "hows": "how's", "isnt": "isn't", "itll": "it'll", "mightve": "might've",
+        "mustnt": "mustn't", "mustve": "must've", "shes": "she's", "shouldnt": "shouldn't",
+        "shouldve": "should've", "thatll": "that'll", "thats": "that's", "theres": "there's",
+        "theyd": "they'd", "theyll": "they'll", "theyre": "they're", "theyve": "they've",
+        "wasnt": "wasn't", "werent": "weren't", "weve": "we've", "whats": "what's",
+        "wheres": "where's", "wholl": "who'll", "whos": "who's", "wont": "won't",
+        "wouldnt": "wouldn't", "wouldve": "would've", "yall": "y'all", "youd": "you'd",
+        "youll": "you'll", "youre": "you're", "youve": "you've",
+    ]
+
+    /// Two words typed with the space one letter early or late: "ther eis" is "there is",
+    /// "thi sis" is "this is". `first` is the first word as typed, before any correction it
+    /// got at its own space. The space moves only when one of the two is not a word and
+    /// moving it makes both common words.
+    func movedSpace(first: String, second: String, lexicon: TypingLexicon) -> String? {
+        guard let common, language.hasPrefix("en"), first.count >= 2, second.count >= 2,
+              (first + second).allSatisfy(\.isLetter),
+              !lexicon.contains(Substring(first)), !lexicon.contains(Substring(second)),
+              isMisspelled(first) || isMisspelled(second)
+        else { return nil }
+        let pairs: [(String, String)] = [
+            (first + second.prefix(1), String(second.dropFirst())),
+            (String(first.dropLast()), String(first.suffix(1)) + second),
+        ]
+        let words = pairs.compactMap { left, right -> (pair: String, rarity: Double)? in
+            guard left.count >= 2, right.count >= 2,
+                  let a = common.rarity(of: left.lowercased()), let b = common.rarity(of: right.lowercased()),
+                  !isMisspelled(left), !isMisspelled(right)
+            else { return nil }
+            return (Self.matchCase(of: first, in: left.lowercased()) + " " + right.lowercased(), max(a, b))
+        }
+        return words.min { $0.rarity < $1.rarity }?.pair
+    }
 
     /* Apple's guesses come in dictionary order, not typing order: for "mettings" it offers
      * "nettings" before "meetings". They can also miss the obvious word ("превет" gets
