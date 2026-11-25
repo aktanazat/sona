@@ -47,6 +47,13 @@ pub struct MeetingFolderList {
     pub revision: u64,
 }
 
+/// A finished meeting's suggested filing destination.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingFolderSuggestion {
+    pub folder_id: MeetingFolderId,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct MeetingFolderCreateRequest {
     pub operation_id: MeetingOperationId,

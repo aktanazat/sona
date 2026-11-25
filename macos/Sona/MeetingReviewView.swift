@@ -14,18 +14,28 @@ struct MeetingReviewView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmingDelete = false
+    @State private var calendarRevision = 0
 
     var body: some View {
         ScrollViewReader { proxy in
             Page(back: PageBack("Meetings") { store.closeReview() }) {
                 if let snapshot = store.snapshot {
+                    if snapshot.session.phase == .reviewReady {
+                        ReviewFolderSuggestion(store: store, session: snapshot.session, calendarRevision: calendarRevision)
+                            .id(snapshot.session.sessionId)
+                    }
                     ConversationContextView(
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision,
                         editable: store.editable,
                         partialRecording: snapshot.session.captureCompleteness == .partial)
                     if store.editable {
                         ContextSuggestionsView(
-                            sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                            sessionId: snapshot.session.sessionId, revision: snapshot.session.revision,
+                            calendarChanged: {
+                                if store.snapshot?.session.sessionId == snapshot.session.sessionId {
+                                    calendarRevision += 1
+                                }
+                            })
                         ReviewPlaceOffer(places: model.live.places,
                             sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     }
@@ -2059,5 +2069,50 @@ struct CatchUpSheet: View {
             parts.append("provisional")
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+private struct ReviewFolderSuggestion: View {
+    let store: MeetingsStore
+    let session: MeetingSessionSnapshot
+    let calendarRevision: Int
+    @State private var suggestion: MeetingFolderSuggestion?
+    @State private var dismissed = false
+
+    private struct Refresh: Equatable {
+        let folders: Int
+        let calendar: Int
+    }
+
+    var body: some View {
+        Group {
+            if !dismissed, let suggestion {
+                Card {
+                    CardRow {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Suggested folder").metaText()
+                            Text(suggestion.name).bodyText()
+                        }
+                    } trailing: {
+                        HStack(spacing: 8) {
+                            Button("Choose folder") {
+                                store.openFiling(session.sessionId, title: session.title,
+                                    suggestedFolderId: suggestion.folderId)
+                            }
+                            .buttonStyle(.secondary)
+                            Button("Dismiss") { dismissed = true }
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+        .task(id: Refresh(folders: store.foldersRevision, calendar: calendarRevision)) {
+            suggestion = nil
+            guard !dismissed else { return }
+            let result = await store.suggestedFolder(for: session.sessionId)
+            guard !Task.isCancelled else { return }
+            suggestion = result
+        }
     }
 }

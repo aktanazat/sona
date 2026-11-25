@@ -21,8 +21,8 @@ use crate::meeting::analytics::MeetingNotesTemplate;
 use crate::meeting::folder_types::{
     MeetingFolder, MeetingFolderCreateRequest, MeetingFolderDefaultsSetRequest,
     MeetingFolderDeleteRequest, MeetingFolderList, MeetingFolderMembershipRequest,
-    MeetingFolderMutationResult, MeetingFolderRenameRequest, MAX_FOLDER_NAME_CHARS,
-    MAX_FOLDER_PROMPTS,
+    MeetingFolderMutationResult, MeetingFolderRenameRequest, MeetingFolderSuggestion,
+    MAX_FOLDER_NAME_CHARS, MAX_FOLDER_PROMPTS,
 };
 use crate::meeting::types::{
     MeetingCommandKind, MeetingFolderId, MeetingOperationId, MeetingSessionId, SavedPromptId,
@@ -63,6 +63,49 @@ impl MeetingStore {
         ids.iter()
             .map(|value| parse_uuid(value).map(MeetingFolderId::from_uuid))
             .collect()
+    }
+
+    pub(crate) fn meeting_folder_suggestion(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Option<MeetingFolderSuggestion>, StoreError> {
+        let connection = self.connection()?;
+        let candidate: Option<(String, String)> = connection
+            .query_row(
+                "WITH current_meeting AS (
+                     SELECT json_extract(c.event_json, '$.seriesKey') AS series_key,
+                            COALESCE(s.started_at_utc_ms, s.created_at_utc_ms) AS started_at
+                       FROM meeting_sessions s
+                       JOIN meeting_calendar_facts c ON c.session_id = s.id
+                      WHERE s.id = ?1 AND s.phase = 'review_ready'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM meeting_folder_members m WHERE m.session_id = s.id
+                        )
+                 ), candidates AS (
+                     SELECT DISTINCT f.folder_id, f.name
+                       FROM current_meeting target
+                       JOIN meeting_calendar_facts c
+                         ON json_extract(c.event_json, '$.seriesKey') = target.series_key
+                       JOIN meeting_sessions s ON s.id = c.session_id
+                       JOIN meeting_folder_members m ON m.session_id = s.id
+                       JOIN meeting_folders f ON f.folder_id = m.folder_id
+                      WHERE trim(target.series_key) != '' AND s.phase = 'review_ready'
+                        AND COALESCE(s.started_at_utc_ms, s.created_at_utc_ms) < target.started_at
+                      LIMIT 2
+                 )
+                 SELECT folder_id, name FROM candidates WHERE (SELECT COUNT(*) FROM candidates) = 1",
+                params![id(session_id)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        candidate
+            .map(|(id, name)| {
+                Ok(MeetingFolderSuggestion {
+                    folder_id: MeetingFolderId::from_uuid(parse_uuid(&id)?),
+                    name,
+                })
+            })
+            .transpose()
     }
 
     /// When one meeting was filed in one folder, or `None` when it is not in

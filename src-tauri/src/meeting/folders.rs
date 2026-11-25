@@ -4,7 +4,7 @@
 use super::folder_types::{
     MeetingFolderCreateRequest, MeetingFolderDefaultsSetRequest, MeetingFolderDeleteRequest,
     MeetingFolderList, MeetingFolderMembershipRequest, MeetingFolderMutationResult,
-    MeetingFolderRenameRequest,
+    MeetingFolderRenameRequest, MeetingFolderSuggestion,
 };
 use super::session::MeetingSessionManager;
 use super::types::{
@@ -103,6 +103,16 @@ impl MeetingSessionManager {
         self.store()
             .await?
             .meeting_folder_ids(session_id)
+            .map_err(map_store_error)
+    }
+
+    pub async fn folder_suggestion(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Option<MeetingFolderSuggestion>, MeetingCommandError> {
+        self.store()
+            .await?
+            .meeting_folder_suggestion(session_id)
             .map_err(map_store_error)
     }
 

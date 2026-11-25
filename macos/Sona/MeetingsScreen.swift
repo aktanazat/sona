@@ -541,7 +541,9 @@ struct MeetingFilingSheet: View {
                             CardLine("No folders yet. Create one below.")
                         } else {
                             ForEach(store.folders) { folder in
-                                ToggleRow(title: folder.name, detail: folder.countLabel, isOn: Binding(
+                                let detail = store.filing?.suggestedFolderId == folder.folderId
+                                    && !ids.contains(folder.folderId) ? "Suggested folder" : folder.countLabel
+                                ToggleRow(title: folder.name, detail: detail, isOn: Binding(
                                     get: { ids.contains(folder.folderId) },
                                     set: { store.setFiled(folder, $0) }))
                                     .disabled(store.folderBusy)

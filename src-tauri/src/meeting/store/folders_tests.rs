@@ -1,6 +1,7 @@
 //! Folders at the store boundary: the migration that adds them, and what a
 //! folder may and may not do to the meetings filed in it.
 
+use super::series_tests::calendar_facts;
 use super::workflow_core_tests::{reviewable_meeting, store};
 use super::*;
 use crate::meeting::folder_types::{
@@ -70,6 +71,88 @@ fn listed(store: &MeetingStore, folder_id: Option<MeetingFolderId>) -> Vec<Meeti
         .into_iter()
         .map(|entry| entry.session_id)
         .collect()
+}
+
+#[test]
+fn suggests_the_one_folder_used_by_earlier_meetings_in_the_same_series() {
+    let (_directory, store) = store();
+    let prior = reviewable_meeting(&store, "Team sync", 1000);
+    let target = reviewable_meeting(&store, "Team sync", 2000);
+    let later = reviewable_meeting(&store, "Team sync", 3000);
+    let unrelated = reviewable_meeting(&store, "Team sync", 500);
+    for meeting in [prior, target, later] {
+        calendar_facts(&store, meeting, "team-sync", "Team sync");
+    }
+    calendar_facts(&store, unrelated, "another-sync", "Team sync");
+    let teams = create(&store, "Team", 0);
+    let team = folder_named(&teams, "Team");
+    let other = create(&store, "Other", teams.folders.revision);
+    let other_folder = folder_named(&other, "Other");
+    let first = file(&store, team, prior, other.folders.revision);
+    let second = file(&store, other_folder, unrelated, first.folders.revision);
+    file(&store, other_folder, later, second.folders.revision);
+
+    assert_eq!(
+        store.meeting_folder_suggestion(target).unwrap(),
+        Some(crate::meeting::folder_types::MeetingFolderSuggestion {
+            folder_id: team,
+            name: "Team".into(),
+        })
+    );
+    assert_eq!(listed(&store, Some(team)), vec![prior]);
+}
+
+#[test]
+fn leaves_the_folder_choice_open_when_prior_meetings_disagree() {
+    let (_directory, store) = store();
+    let first = reviewable_meeting(&store, "Team sync", 1000);
+    let second = reviewable_meeting(&store, "Team sync", 2000);
+    let target = reviewable_meeting(&store, "Team sync", 3000);
+    for meeting in [first, second, target] {
+        calendar_facts(&store, meeting, "team-sync", "Team sync");
+    }
+    let one = create(&store, "Team", 0);
+    let two = create(&store, "Other", one.folders.revision);
+    let result = file(
+        &store,
+        folder_named(&one, "Team"),
+        first,
+        two.folders.revision,
+    );
+    file(
+        &store,
+        folder_named(&two, "Other"),
+        second,
+        result.folders.revision,
+    );
+
+    assert_eq!(store.meeting_folder_suggestion(target).unwrap(), None);
+}
+
+#[test]
+fn does_not_suggest_a_different_folder_for_an_already_filed_meeting() {
+    let (_directory, store) = store();
+    let prior = reviewable_meeting(&store, "Team sync", 1000);
+    let target = reviewable_meeting(&store, "Team sync", 2000);
+    for meeting in [prior, target] {
+        calendar_facts(&store, meeting, "team-sync", "Team sync");
+    }
+    let one = create(&store, "Team", 0);
+    let two = create(&store, "Other", one.folders.revision);
+    let result = file(
+        &store,
+        folder_named(&one, "Team"),
+        prior,
+        two.folders.revision,
+    );
+    file(
+        &store,
+        folder_named(&two, "Other"),
+        target,
+        result.folders.revision,
+    );
+
+    assert_eq!(store.meeting_folder_suggestion(target).unwrap(), None);
 }
 
 fn has_table(connection: &Connection, name: &str) -> bool {

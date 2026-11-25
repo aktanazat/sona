@@ -324,7 +324,7 @@ final class MeetingsStore {
     private(set) var meetingPromptsLoading = false
     private(set) var meetingPromptsError: String?
     /// The revision the next folder write carries.
-    @ObservationIgnored private var foldersRevision = 0
+    private(set) var foldersRevision = 0
 
     // MARK: The open meeting
 
@@ -878,9 +878,13 @@ final class MeetingsStore {
 
     // MARK: - Filing one meeting
 
+    func suggestedFolder(for sessionId: MeetingSessionId) async -> MeetingFolderSuggestion? {
+        try? await core.request("meeting_folder_suggestion", MeetingRequest.session(sessionId))
+    }
+
     /// Open the filing sheet for one meeting and read which folders hold it.
-    func openFiling(_ sessionId: MeetingSessionId, title: String) {
-        filing = MeetingFiling(sessionId: sessionId, title: title)
+    func openFiling(_ sessionId: MeetingSessionId, title: String, suggestedFolderId: MeetingFolderId? = nil) {
+        filing = MeetingFiling(sessionId: sessionId, title: title, suggestedFolderId: suggestedFolderId)
         folderError = nil
         Task {
             await loadFolders()
@@ -2233,6 +2237,7 @@ final class MeetingsStore {
 struct MeetingFiling: Equatable {
     let sessionId: MeetingSessionId
     let title: String
+    let suggestedFolderId: MeetingFolderId?
     var folderIds: Set<MeetingFolderId>?
     var error: String?
 }

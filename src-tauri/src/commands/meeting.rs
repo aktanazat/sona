@@ -393,6 +393,16 @@ pub async fn meeting_folders_for_session(
     manager.folders_for_session(session_id).await
 }
 
+/// A possible filing destination, without changing any folder.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folder_suggestion(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Result<Option<crate::meeting::folder_types::MeetingFolderSuggestion>, MeetingCommandError> {
+    manager.folder_suggestion(session_id).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_pause(
