@@ -1461,7 +1461,7 @@ impl Tracker<'_> {
             FavoriteKind::Note => {
                 notes
                     .iter()
-                    .find(|note| note.id == favorite.target_id)
+                    .find(|note| note.id == favorite.target_id && !note.personal)
                     .map(|note| ExternalFavorite {
                         kind: favorite.kind,
                         id: note.id.clone(),
@@ -1666,6 +1666,7 @@ impl Tracker<'_> {
                             .map(|view| view.name.clone()),
                         SubjectKind::Note => {
                             crate::scratchpad::note_with_connection(conn, &follow.target_id)?
+                                .filter(|note| !note.personal)
                                 .map(|note| note.title)
                         }
                         SubjectKind::Initiative => None,
@@ -1728,6 +1729,12 @@ impl Tracker<'_> {
     ) -> Result<Vec<ExternalNotification>, ExternalError> {
         planning::history(self.history, |conn| {
             let mut found = inbox::filtered(conn, shown, filter, now_ms())?;
+            let personal = crate::scratchpad::personal::personal_ids(conn)?;
+            found.retain(|notice| {
+                !notice.subject.as_ref().is_some_and(|subject| {
+                    subject.kind == SubjectKind::Note && personal.contains(&subject.id)
+                })
+            });
             inbox::name_notes(conn, &mut found)?;
             Ok(found)
         })

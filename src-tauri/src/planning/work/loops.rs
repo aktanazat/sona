@@ -1804,7 +1804,8 @@ fn documents_brief(conn: &Connection, tools: &[String]) -> Result<String> {
     if allows(PROPOSE_NOTE) {
         text += "\n\nNotes you may add to, by id: ";
         text += &listed(
-            "SELECT id, title FROM scratch_notes ORDER BY updated_at_ms DESC LIMIT 15",
+            "SELECT id, title FROM scratch_notes WHERE personal = 0
+             ORDER BY updated_at_ms DESC LIMIT 15",
         )?
         .iter()
         .map(|(id, title)| format!("{id} ({title})"))
