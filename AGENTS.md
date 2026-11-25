@@ -77,6 +77,11 @@ off the bundle-wide single-instance socket and holds an OS lock on its own
 `Data/` directory, so it cannot be mistaken for a second copy of the install
 and cannot be handed the install's forwarded arguments.
 
+A change to something a person sees or does in the Mac app gets a recorded
+test: a video of you driving the app, with each step and its result labeled
+on screen. `.claude/skills/verify/SKILL.md` ("Recording a test of the Mac
+app") has the commands.
+
 **Building and testing the Rust side:**
 
 ```bash
