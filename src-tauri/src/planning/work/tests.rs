@@ -2070,8 +2070,8 @@ fn a_done_parent_cancels_its_accepted_subtasks_with_a_notice_that_undoes_it() {
     .expect("subtasks closed");
     let canceled = desk.item(&started.id).status;
     let left = desk.item(&proposed.id).status;
-    let notices = inbox::notifications(&desk.history, inbox::Shown::default(), desk.now)
-        .expect("the inbox");
+    let notices =
+        inbox::notifications(&desk.history, inbox::Shown::default(), desk.now).expect("the inbox");
     let notice = notices
         .iter()
         .find(|notice| notice.kind == inbox::NotificationKind::Housekeeping)
@@ -2106,8 +2106,13 @@ fn a_closed_parent_s_one_notice_covers_and_undoes_grandchildren_without_status_n
     let charts = typed_item(&mut desk, "Draw the charts");
     let charts = sub_task_of(&mut desk, &charts, &deck.id);
     for id in [&deck.id, &charts.id] {
-        inbox::subscribe(&desk.history, id, inbox::SubscribeReason::Subscribed, desk.now)
-            .expect("following the sub-task");
+        inbox::subscribe(
+            &desk.history,
+            id,
+            inbox::SubscribeReason::Subscribed,
+            desk.now,
+        )
+        .expect("following the sub-task");
     }
 
     let at = desk.tick();
@@ -2130,8 +2135,8 @@ fn a_closed_parent_s_one_notice_covers_and_undoes_grandchildren_without_status_n
         &mut done.effects,
     )
     .expect("sub-tasks closed");
-    let notices = inbox::notifications(&desk.history, inbox::Shown::default(), desk.now)
-        .expect("the inbox");
+    let notices =
+        inbox::notifications(&desk.history, inbox::Shown::default(), desk.now).expect("the inbox");
     let at = desk.tick();
     let undone = super::batches::undo(
         &desk.history,
@@ -2147,7 +2152,10 @@ fn a_closed_parent_s_one_notice_covers_and_undoes_grandchildren_without_status_n
             .iter()
             .map(|notice| (notice.kind, notice.item_id.clone()))
             .collect::<Vec<_>>(),
-        [(inbox::NotificationKind::Housekeeping, Some(launch.id.clone()))]
+        [(
+            inbox::NotificationKind::Housekeeping,
+            Some(launch.id.clone())
+        )]
     );
     assert_eq!(undone.restored, 2);
     assert_eq!(desk.item(&charts.id).status, charts.status);

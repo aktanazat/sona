@@ -25,7 +25,7 @@ use crate::planning::work::versions::{self, DescriptionVersion};
 use crate::query::external::{ExternalError, ExternalErrorCode};
 use crate::query::QUERY_SCHEMA_VERSION;
 use chrono::{Local, NaiveDate, TimeZone};
-use clap::Args;
+use clap::{ArgAction, Args, ValueEnum};
 use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -173,6 +173,13 @@ fn task_priority(value: &str) -> Result<u8, String> {
     })
 }
 
+/// How `work inbox` groups its notices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum InboxGroup {
+    /// One row per task, with its latest change and a count.
+    Task,
+}
+
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct InboxArgs {
     /// Only unread notifications.
@@ -190,7 +197,7 @@ pub struct InboxArgs {
     pub priority: bool,
     /// Only these kinds, comma-separated: status, comment, mention,
     /// assigned, changed, reminder, due, automation, digest, question,
-    /// project, view, note, housekeeping.
+    /// project, view, note, housekeeping, unblocked.
     #[arg(long, value_delimiter = ',', value_parser = notice_kind, value_name = "KINDS")]
     pub kind: Vec<NotificationKind>,
     /// Only notices about tasks in this project, or about the project, by
@@ -201,6 +208,13 @@ pub struct InboxArgs {
     /// urgent, high, medium, low, none.
     #[arg(long, value_delimiter = ',', value_parser = task_priority, value_name = "PRIORITIES")]
     pub task_priority: Vec<u8>,
+    /// Only notices whose task, number, kind, project, view or comment text
+    /// has this.
+    #[arg(long, value_name = "TEXT")]
+    pub search: Option<String>,
+    /// One row per task, with its latest change and a count: task.
+    #[arg(long, value_enum, value_name = "GROUP")]
+    pub group: Option<InboxGroup>,
 }
 
 /// Tasks to subscribe to, or one project, saved view or note to follow.
@@ -240,6 +254,9 @@ pub struct InboxSettingsArgs {
     /// When banners keep quiet, HH:MM-HH:MM on this Mac's clock, or off.
     #[arg(long, value_name = "HOURS")]
     pub quiet_hours: Option<String>,
+    /// The unread count on the Dock icon: on or off.
+    #[arg(long, action = ArgAction::Set, value_name = "ON_OFF")]
+    pub dock_badge: Option<bool>,
     /// Print what would change and write nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -249,7 +266,10 @@ pub struct InboxSettingsArgs {
 
 impl InboxSettingsArgs {
     pub(super) const fn changes_something(&self) -> bool {
-        self.kinds.is_some() || self.banners.is_some() || self.quiet_hours.is_some()
+        self.kinds.is_some()
+            || self.banners.is_some()
+            || self.quiet_hours.is_some()
+            || self.dock_badge.is_some()
     }
 }
 
@@ -529,6 +549,20 @@ pub struct ExternalWorkInbox {
     /// Unread notifications that are awake and not archived.
     pub unread: usize,
     pub notifications: Vec<ExternalNotification>,
+    /// With `--group task`: one row per task, and `notifications` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<ExternalInboxRow>>,
+}
+
+/// A task's notices as one row, with its newest notice as the lead.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalInboxRow {
+    pub lead: ExternalNotification,
+    /// Every notice the row stands for, newest first.
+    pub notice_ids: Vec<String>,
+    /// "Linked 5 tasks, added 3 comments"; empty when the lead says it all.
+    pub summary: String,
+    pub unread: bool,
 }
 
 /// Which kinds reach the inbox and show a banner, and the quiet hours; for
@@ -542,6 +576,8 @@ pub struct ExternalInboxSettings {
     pub kinds: Vec<KindSetting>,
     /// HH:MM-HH:MM on this Mac's clock; none when banners never keep quiet.
     pub quiet_hours: Option<String>,
+    /// Whether the unread count shows on the Dock icon.
+    pub dock_badge: bool,
 }
 
 /// A stored digest as an agent may read it: no task the board hides, and
@@ -778,6 +814,18 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
         }
         WorkAnswer::Inbox(inbox) => {
             let _ = writeln!(text, "{} unread.", inbox.unread);
+            for row in inbox.rows.iter().flatten() {
+                let _ = writeln!(
+                    text,
+                    "{}{} {}  {} ({} notices)  {}",
+                    if row.unread { "*" } else { " " },
+                    if row.lead.priority { "!" } else { " " },
+                    row.lead.id,
+                    row.lead.about(),
+                    row.notice_ids.len(),
+                    row.summary
+                );
+            }
             for notice in &inbox.notifications {
                 let what = match (&notice.field, &notice.automation) {
                     (Some(field), _) => format!("{:?} {field}", notice.kind),
@@ -786,9 +834,9 @@ pub(super) fn text(answer: &WorkAnswer, text: &mut String) {
                             || notice.kind == NotificationKind::Housekeeping =>
                     {
                         format!(
-                        "{:?} {}",
-                        notice.kind,
-                        notice.to.as_deref().unwrap_or_default()
+                            "{:?} {}",
+                            notice.kind,
+                            notice.to.as_deref().unwrap_or_default()
                         )
                     }
                     (None, _) => format!("{:?}", notice.kind),
@@ -1458,17 +1506,15 @@ impl Tracker<'_> {
                         .unwrap_or_else(|| format!("Cycle {}", cycle.number)),
                     handle: None,
                 }),
-            FavoriteKind::Note => {
-                notes
-                    .iter()
-                    .find(|note| note.id == favorite.target_id && !note.personal)
-                    .map(|note| ExternalFavorite {
-                        kind: favorite.kind,
-                        id: note.id.clone(),
-                        name: note.title.clone(),
-                        handle: None,
-                    })
-            }
+            FavoriteKind::Note => notes
+                .iter()
+                .find(|note| note.id == favorite.target_id && !note.personal)
+                .map(|note| ExternalFavorite {
+                    kind: favorite.kind,
+                    id: note.id.clone(),
+                    name: note.title.clone(),
+                    handle: None,
+                }),
         };
         let favorites = saved
             .top()
@@ -1747,6 +1793,38 @@ impl Tracker<'_> {
         })
     }
 
+    fn rows(
+        &self,
+        board: &Board,
+        shown: Shown,
+        filter: &InboxFilter,
+    ) -> Result<Vec<ExternalInboxRow>, ExternalError> {
+        planning::history(self.history, |conn| {
+            let mut found = inbox::rows_of(conn, shown, filter, now_ms())?;
+            let personal = crate::scratchpad::personal::personal_ids(conn)?;
+            found.retain(|row| {
+                !row.lead.subject.as_ref().is_some_and(|subject| {
+                    subject.kind == SubjectKind::Note && personal.contains(&subject.id)
+                })
+            });
+            Ok(found)
+        })
+        .map_err(|message| refusal(self.history, message))
+        .map(|found| {
+            found
+                .into_iter()
+                .filter_map(|row| {
+                    Some(ExternalInboxRow {
+                        lead: Self::notice(board, row.lead)?,
+                        notice_ids: row.notice_ids,
+                        summary: row.summary,
+                        unread: row.unread,
+                    })
+                })
+                .collect()
+        })
+    }
+
     pub(super) async fn inbox(&self, args: &InboxArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
         let unread = self
@@ -1769,24 +1847,29 @@ impl Tracker<'_> {
             ),
             None => None,
         };
-        let notifications = self.notices(
-            &board,
-            Shown {
-                unread_only: args.unread,
-                snoozed: args.snoozed,
-                archived: args.archived,
-                priority_only: args.priority,
-            },
-            &InboxFilter {
-                kinds: args.kind.clone(),
-                project_id,
-                task_priorities: args.task_priority.clone(),
-            },
-        )?;
+        let shown = Shown {
+            unread_only: args.unread,
+            snoozed: args.snoozed,
+            archived: args.archived,
+            priority_only: args.priority,
+            by_task: args.group == Some(InboxGroup::Task),
+        };
+        let filter = InboxFilter {
+            kinds: args.kind.clone(),
+            project_id,
+            task_priorities: args.task_priority.clone(),
+            search: args.search.clone(),
+        };
+        let (notifications, rows) = if shown.by_task {
+            (Vec::new(), Some(self.rows(&board, shown, &filter)?))
+        } else {
+            (self.notices(&board, shown, &filter)?, None)
+        };
         Ok(WorkAnswer::Inbox(ExternalWorkInbox {
             schema_version: QUERY_SCHEMA_VERSION,
             unread,
             notifications,
+            rows,
         }))
     }
 
@@ -1801,6 +1884,7 @@ impl Tracker<'_> {
             operation_id,
             kinds: settings.kinds,
             quiet_hours: settings.quiet_hours.map(QuietHours::text),
+            dock_badge: settings.dock_badge,
         })
     }
 
@@ -1843,6 +1927,7 @@ impl Tracker<'_> {
             inbox: kinds(&args.kinds, false)?,
             banners: kinds(&args.banners, true)?,
             quiet_hours,
+            dock_badge: args.dock_badge,
         };
         let operation_id = args
             .write
@@ -1890,6 +1975,7 @@ impl Tracker<'_> {
                 snoozed: true,
                 archived: true,
                 priority_only: false,
+                by_task: false,
             },
             &InboxFilter::default(),
         )?;

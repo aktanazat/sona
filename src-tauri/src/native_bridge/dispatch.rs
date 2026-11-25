@@ -7529,6 +7529,7 @@ pub(super) async fn call(
                 snoozed: snoozed.unwrap_or(false),
                 archived: archived.unwrap_or(false),
                 priority_only: priority_only.unwrap_or(false),
+                by_task: false,
             };
             let handle = app.clone();
             off_main_thread(move || {
@@ -7683,6 +7684,20 @@ pub(super) async fn call(
                     ids,
                     &mark,
                     until_ms,
+                ))
+            })
+            .await?
+        }
+        "work_inbox_mark_task" => {
+            let mut args = Args::parse(params)?;
+            let operation_id: String = args.take("operationId")?;
+            let task_id: String = args.take("taskId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::inbox::mark_task_read(
+                    &handle,
+                    &operation_id,
+                    &task_id,
                 ))
             })
             .await?

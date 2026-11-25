@@ -464,6 +464,7 @@ fn said(notice: &Notification) -> String {
         },
         NotificationKind::Note => "edited it".to_owned(),
         NotificationKind::Housekeeping => notice.to.clone().unwrap_or_default(),
+        NotificationKind::Unblocked => "unblocked it".to_owned(),
     }
 }
 

@@ -304,6 +304,7 @@ fn what(notice: &Notification) -> String {
         NotificationKind::Assigned => "assigned".to_owned(),
         NotificationKind::Comment => "commented".to_owned(),
         NotificationKind::Status => "status".to_owned(),
+        NotificationKind::Unblocked => "unblocked".to_owned(),
         NotificationKind::Changed if other_end(notice).is_some() => if notice.to.is_some() {
             "linked"
         } else {
@@ -407,7 +408,9 @@ fn summary(parts: &[Part], status: Option<&str>) -> String {
                 Some(_) => "marked it a duplicate".to_owned(),
                 None => "changed its status".to_owned(),
             }),
-            "archived" | "restored" | "snoozed" => said.push(format!("{} it", part.what)),
+            "archived" | "restored" | "snoozed" | "unblocked" => {
+                said.push(format!("{} it", part.what))
+            }
             field => fields.push(field_name(field)),
         }
     }
@@ -539,6 +542,16 @@ fn finish(row: Building, context: &Context) -> Option<InboxRow> {
 /// Rows for `notices` (newest first, as `notifications` returns them): the
 /// ones that need the user first, then newest first.
 pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRow> {
+    build(notices, context, false)
+}
+
+/// Rows as `rows`, but one per task: a task's notices read as one row, whichever
+/// agent filed them and however far apart they are.
+pub(crate) fn tasks(notices: Vec<Notification>, context: &Context) -> Vec<InboxRow> {
+    build(notices, context, true)
+}
+
+fn build(notices: Vec<Notification>, context: &Context, by_task: bool) -> Vec<InboxRow> {
     let agent = |notice: &Notification| notice.agent.clone().unwrap_or_default();
     let mut oldest_first = notices;
     oldest_first.reverse();
@@ -595,7 +608,7 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
             built[row].last_at_ms = at_ms;
             continue;
         }
-        let joins = notice.actor == WorkActor::Agent
+        let joins = (by_task || notice.actor == WorkActor::Agent)
             && matches!(
                 notice.kind,
                 NotificationKind::Changed
@@ -622,9 +635,16 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
             mirrors.push(notice);
             continue;
         }
-        let key = (task.clone(), agent(&notice));
+        let key = (
+            task.clone(),
+            if by_task {
+                String::new()
+            } else {
+                agent(&notice)
+            },
+        );
         let row = match bursts.get(&key) {
-            Some(row) if at_ms - built[*row].last_at_ms <= BURST_MS => *row,
+            Some(row) if by_task || at_ms - built[*row].last_at_ms <= BURST_MS => *row,
             _ => {
                 built.push(Building {
                     notices: Vec::new(),
@@ -670,8 +690,12 @@ pub(crate) fn rows(notices: Vec<Notification>, context: &Context) -> Vec<InboxRo
 
 /// The unread rows among `notices`. Built from read and unread notices
 /// alike, so reading part of a burst does not split what is left of it.
-pub(crate) fn waiting(notices: Vec<Notification>, context: &Context) -> Vec<InboxRow> {
-    let mut rows = rows(notices, context);
+pub(crate) fn waiting(
+    notices: Vec<Notification>,
+    context: &Context,
+    by_task: bool,
+) -> Vec<InboxRow> {
+    let mut rows = build(notices, context, by_task);
     rows.retain(|row| row.unread);
     rows
 }
@@ -777,6 +801,7 @@ mod tests {
                     at: i64| {
             let id = format!("notice-{:04}", notices.len());
             notices.push(Notification {
+                excerpt: None,
                 id: id.clone(),
                 item_id: task,
                 kind,
@@ -1168,7 +1193,7 @@ mod tests {
             agent_notice("b", START + 6 * MINUTE, true, None),
             agent_notice("a", START, false, None),
         ];
-        let built = waiting(notices, &context);
+        let built = waiting(notices, &context, false);
         assert_eq!(built.len(), 1);
         assert_eq!(built[0].notice_ids.len(), 3);
     }
@@ -1184,7 +1209,7 @@ mod tests {
             ..agent_notice("echo", START, false, Some("related:task-050"))
         };
         let source = agent_notice("source", START, true, Some("related:task-001"));
-        let built = waiting(vec![echo, source], &context);
+        let built = waiting(vec![echo, source], &context, false);
         assert_eq!(built.len(), 1);
         assert!(built[0].unread);
         assert_eq!(built[0].notice_ids, ["source", "echo"]);

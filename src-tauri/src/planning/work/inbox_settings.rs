@@ -19,6 +19,12 @@ use tauri::{AppHandle, Manager};
 /// How long after it arrives a notice may still show its banner.
 pub(crate) const BANNER_WINDOW_MS: i64 = 10 * 60 * 1000;
 
+/// One row: whether the Dock icon shows how many notices wait. No row means on.
+pub(crate) const DOCK_BADGE_MIGRATION: &str = "CREATE TABLE planning_inbox_dock (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    badge INTEGER NOT NULL CHECK(badge IN (0, 1))
+);";
+
 const fn banner_by_default(kind: NotificationKind) -> bool {
     matches!(
         kind,
@@ -86,6 +92,7 @@ pub(crate) struct InboxSettings {
     /// Every kind, in [`NotificationKind::ALL`]'s order.
     pub(crate) kinds: Vec<KindSetting>,
     pub(crate) quiet_hours: Option<QuietHours>,
+    pub(crate) dock_badge: bool,
 }
 
 /// What to change; a field left out keeps its value. `inbox` and `banners`
@@ -98,6 +105,7 @@ pub(crate) struct InboxSettingsChange {
     pub(crate) banners: Option<Vec<NotificationKind>>,
     #[serde(default, deserialize_with = "super::types::nullable")]
     pub(crate) quiet_hours: Option<Option<QuietHours>>,
+    pub(crate) dock_badge: Option<bool>,
 }
 
 fn stored(conn: &Connection, kind: NotificationKind) -> Result<Option<(bool, bool)>> {
@@ -126,6 +134,17 @@ pub(crate) fn posts(conn: &Connection, kind: NotificationKind) -> Result<bool> {
 pub(crate) fn banners(conn: &Connection, kind: NotificationKind) -> Result<bool> {
     let setting = setting(conn, kind)?;
     Ok(setting.inbox && setting.banner)
+}
+
+fn dock_badge(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT badge FROM planning_inbox_dock WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(true))
 }
 
 fn quiet_hours(conn: &Connection) -> Result<Option<QuietHours>> {
@@ -162,6 +181,7 @@ pub(crate) fn read(conn: &Connection) -> Result<InboxSettings> {
             .map(|kind| setting(conn, kind))
             .collect::<Result<_>>()?,
         quiet_hours: quiet_hours(conn)?,
+        dock_badge: dock_badge(conn)?,
     })
 }
 
@@ -200,6 +220,13 @@ pub(crate) fn save(conn: &Connection, change: &InboxSettingsChange) -> Result<In
             conn.execute("DELETE FROM planning_inbox_quiet", [])?;
         }
         None => {}
+    }
+    if let Some(on) = change.dock_badge {
+        conn.execute(
+            "INSERT INTO planning_inbox_dock (id, badge) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET badge = excluded.badge",
+            params![on],
+        )?;
     }
     read(conn)
 }
