@@ -1,7 +1,8 @@
 use super::preferences::{read, ExternalSettings};
 use super::{Tracker, WorkAnswer, WriteArgs};
 use crate::cloud_sync::{
-    meeting_shares_in, meeting_status_in, overview_in, read_share_bundle, CloudRuntimeError,
+    meeting_shares_in, meeting_status_in, note_shares_in, overview_in, read_share_bundle,
+    CloudRuntimeError,
 };
 use crate::commands::cloud_sync::service_status;
 use crate::meeting::cloud_bundle::CloudMeetingBundleV1;
@@ -9,14 +10,15 @@ use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::{MeetingListFilter, MeetingSessionId};
 use crate::query::external::{
-    kept_local, meeting_refusal, session_id, store, visible_meeting, ExternalError,
-    ExternalErrorCode, ExternalScope, READ_SCOPES, WRITE_SCOPES,
+    kept_local, meeting_refusal, missing_note, note_id, personal_documents, session_id, store,
+    visible_meeting, ExternalError, ExternalErrorCode, ExternalScope, READ_SCOPES, WRITE_SCOPES,
 };
 use crate::query::{QueryError, QUERY_SCHEMA_VERSION};
 use crate::settings::CloudSyncSettings;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,7 +30,7 @@ const SYNC_LIST_LIMIT: usize = 100;
 pub enum CloudVerb {
     /// Where cloud sync stands: on or off, waiting uploads, the service, and
     /// each recent meeting's sync state; with --meeting, one meeting's state
-    /// and its shares.
+    /// and its shares; with --note, one note's shares.
     Sync(SyncArgs),
     /// Import a meeting someone shared as a .sona file.
     MeetingImport(MeetingImportArgs),
@@ -39,6 +41,9 @@ pub struct SyncArgs {
     /// One meeting's sync state and shares, by its id.
     #[arg(long, value_name = "MEETING_ID")]
     pub meeting: Option<String>,
+    /// One note's shares, by its id.
+    #[arg(long, value_name = "NOTE_ID", conflicts_with = "meeting")]
+    pub note: Option<String>,
 }
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -161,6 +166,22 @@ async fn sync_meeting(
     Ok(json!({ "meeting": status, "shares": shares }))
 }
 
+/// A note's shares, as the note's Share sheet lists them. A personal
+/// document answers as if it were not there.
+async fn sync_note(
+    meetings: &Arc<MeetingSessionManager>,
+    personal: &HashSet<String>,
+    note: &str,
+) -> Result<Value, ExternalError> {
+    let id = note_id(note)?;
+    if personal.contains(&id) {
+        return Err(missing_note(&id));
+    }
+    let store = store(meetings).await?;
+    let shares = note_shares_in(&store, Some(&id)).map_err(|error| sync_failed(&error))?;
+    Ok(json!({ "note_id": id, "shares": shares }))
+}
+
 fn already_here(store: &MeetingStore, session: MeetingSessionId) -> Result<bool, ExternalError> {
     visible_meeting(store, session)?;
     match store.session_snapshot(session) {
@@ -174,15 +195,25 @@ impl Tracker<'_> {
     pub(super) async fn cloud(&self, verb: &CloudVerb) -> Result<WorkAnswer, ExternalError> {
         let settings = crate::settings::get_settings(self.app).cloud_sync;
         match verb {
-            CloudVerb::Sync(SyncArgs { meeting: None }) => Ok(read(
+            CloudVerb::Sync(SyncArgs {
+                meeting: None,
+                note: None,
+            }) => Ok(read(
                 "sync",
                 &sync_overview(self.meetings, &settings, crate::portable::is_portable()).await?,
             )),
             CloudVerb::Sync(SyncArgs {
                 meeting: Some(meeting),
+                ..
             }) => Ok(read(
                 "sync",
                 &sync_meeting(self.meetings, settings.paused, meeting).await?,
+            )),
+            CloudVerb::Sync(SyncArgs {
+                note: Some(note), ..
+            }) => Ok(read(
+                "sync",
+                &sync_note(self.meetings, &personal_documents(self.history)?, note).await?,
             )),
             CloudVerb::MeetingImport(args) => self.meeting_import(args).await,
         }
@@ -249,11 +280,12 @@ impl Tracker<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{already_here, sync_meeting, sync_overview};
+    use super::{already_here, sync_meeting, sync_note, sync_overview};
     use crate::meeting::detection::machine::CalendarEventSummary;
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
     use crate::meeting::session::{MeetingSessionManager, NoCaptureSources};
     use crate::meeting::store::workflow_core_tests::reviewable_meeting;
+    use crate::meeting::store::{CloudShareContentKind, CloudShareInput};
     use crate::meeting::types::{MeetingOperationId, MeetingSessionId};
     use crate::query::external::ExternalErrorCode;
     use crate::secrets::{MemorySecretBackend, SecretManager};
@@ -346,6 +378,53 @@ mod tests {
             assert_eq!(kept_import.error, ExternalErrorCode::NotFound);
             assert!(already_here(&store, shared).unwrap());
             assert!(!already_here(&store, unknown).unwrap());
+        });
+    }
+
+    #[test]
+    fn a_notes_shares_read_back_unless_it_is_a_personal_document() {
+        tauri::async_runtime::block_on(async {
+            let directory = TempDir::new().unwrap();
+            let secrets = Arc::new(SecretManager::with_backend(Arc::new(
+                MemorySecretBackend::new(),
+            )));
+            let meetings = Arc::new(
+                MeetingSessionManager::with_parts(
+                    None,
+                    Some(directory.path().join("meetings")),
+                    secrets,
+                    Arc::new(NoCaptureSources),
+                )
+                .reading_only(),
+            );
+            let store = meetings.store().await.unwrap();
+            let shared = uuid::Uuid::new_v4().to_string();
+            let personal = uuid::Uuid::new_v4().to_string();
+            for (share_id, note) in [
+                ("sharedNoteShare123", &shared),
+                ("personalNoteShare1", &personal),
+            ] {
+                store
+                    .create_cloud_share(CloudShareInput {
+                        share_id: share_id.to_owned(),
+                        object_id: format!("note_{note}"),
+                        source_session_id: None,
+                        expires_at_utc_ms: NOW * 2,
+                        content_kind: CloudShareContentKind::BrowserMarkdown,
+                        encrypted_link_material: "test-local-link-material".to_owned(),
+                        outbox_id: None,
+                    })
+                    .unwrap();
+            }
+            let hidden = std::collections::HashSet::from([personal.clone()]);
+
+            let listed = sync_note(&meetings, &hidden, &shared).await.unwrap();
+            assert_eq!(listed["shares"][0]["share_id"], "sharedNoteShare123");
+            assert_eq!(listed["shares"].as_array().unwrap().len(), 1);
+            assert!(listed["shares"][0].get("encrypted_link_material").is_none());
+
+            let refused = sync_note(&meetings, &hidden, &personal).await.unwrap_err();
+            assert_eq!(refused.error, ExternalErrorCode::NotFound);
         });
     }
 }

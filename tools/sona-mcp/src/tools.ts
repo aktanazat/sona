@@ -8951,9 +8951,15 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_sync",
     title: "Read where Sona's cloud sync stands",
     description:
-      "Cloud sync on this Mac: whether it is on or paused, uploads and deletions waiting, the last error, the sync service and its endpoint, and each recent meeting's sync state. With meeting_id, that meeting's sync state and its shares (kind, expiry, whether revoked). Never a key, token or share link. Meetings kept on this Mac are left out, and meeting_id naming one answers not_found. A problem the running app has hit and not yet recorded shows only in its window.",
-    inputSchema: { type: "object", properties: { meeting_id: MEETING_ID }, additionalProperties: false },
-    argv: (input) => ["work", "sync", ...assigned("--meeting", text(input, "meeting_id")), "--json"],
+      "Cloud sync on this Mac: whether it is on or paused, uploads and deletions waiting, the last error, the sync service and its endpoint, and each recent meeting's sync state. With meeting_id, that meeting's sync state and its shares (kind, expiry, whether revoked). With note_id instead, that note's shares the same way. Never a key, token or share link. Meetings kept on this Mac and personal documents are left out, and an id naming one answers not_found. A problem the running app has hit and not yet recorded shows only in its window.",
+    inputSchema: { type: "object", properties: { meeting_id: MEETING_ID, note_id: NOTE_ID }, additionalProperties: false },
+    argv: (input) => [
+      "work",
+      "sync",
+      ...assigned("--meeting", text(input, "meeting_id")),
+      ...assigned("--note", text(input, "note_id")),
+      "--json",
+    ],
   },
   {
     name: "sona_meeting_import",

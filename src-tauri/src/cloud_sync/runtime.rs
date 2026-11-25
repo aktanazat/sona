@@ -91,6 +91,7 @@ mod live_rooms;
 
 #[path = "note_shares.rs"]
 mod note_shares;
+pub(crate) use note_shares::note_shares_in;
 
 #[path = "phone_thought_manifest.rs"]
 mod phone_thought_manifest;

@@ -100,11 +100,7 @@ impl CloudSyncRuntime {
             .cloud_store()
             .await
             .map_err(|_| CloudRuntimeError::SetupRequired)?;
-        let object_id = request.note_id.as_deref().map(note_object_id).transpose()?;
-        let records = store
-            .cloud_note_shares(object_id.as_deref())
-            .map_err(map_store_error)?;
-        share_summaries(&store, records)
+        note_shares_in(&store, request.note_id.as_deref())
     }
 
     /// Recover a previously created link from encrypted local storage, without
@@ -146,6 +142,19 @@ impl CloudSyncRuntime {
 fn note_object_id(note_id: &str) -> Result<String, CloudRuntimeError> {
     let id = Uuid::parse_str(note_id).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
     Ok(format!("note_{id}"))
+}
+
+/// Every share of one note, or of every note without one, with where each
+/// stands.
+pub(crate) fn note_shares_in(
+    store: &MeetingStore,
+    note_id: Option<&str>,
+) -> Result<Vec<CloudShareSummary>, CloudRuntimeError> {
+    let object_id = note_id.map(note_object_id).transpose()?;
+    let records = store
+        .cloud_note_shares(object_id.as_deref())
+        .map_err(map_store_error)?;
+    share_summaries(store, records)
 }
 
 pub(super) fn share_summaries(

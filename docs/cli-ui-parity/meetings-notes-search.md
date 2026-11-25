@@ -201,7 +201,7 @@ Clipboard-only, Finder-only and navigation-only actions are marked `ui-only-runt
 | meeting share Revoke | CloudSyncView.swift:443; CloudSyncStore.swift:475 | cloud_share_revoke | MISSING | missing (CS) |
 | import a shared file | CloudSyncStore.swift:450 | cloud_share_import_file | MISSING | missing (CS + MS) |
 | note share button | ScratchpadView.swift:439 → Shell.swift:135-145 | none (opens sheet) | n/a | ui-only-runtime (sheet) |
-| note share list / Refresh | CloudNoteShareView.swift:85; :143 | cloud_note_share_list | MISSING | missing (CS + NS) |
+| note share list / Refresh | CloudNoteShareView.swift:85; :143 | cloud_note_share_list | `work sync --note ID` | covered |
 | note share create / browser link | CloudNoteShareView.swift:156, :172 | cloud_note_share_create / cloud_browser_share_link | MISSING | missing (CS + NS) |
 | note share Revoke and confirm | CloudNoteShareView.swift:109, :133; :186 | cloud_share_revoke | MISSING | missing (CS) |
 
