@@ -1792,6 +1792,16 @@ function meetingLibraryTools(): ToolDefinition[] {
       meetingOnly,
     ),
     meetingRead(
+      "sona_meeting_live_doc",
+      "Read the doc Sona kept from a meeting",
+      "Read the doc a meeting kept once its recording stopped, the one the meeting page shows: each point with its id, text, heading, whether it is checked off, whether the user wrote or changed it, and when it was first said. Empty when the meeting had no doc.",
+      "live-doc",
+      { meeting_id: MEETING_ID },
+      ["meeting_id"],
+      none,
+      meetingOnly,
+    ),
+    meetingRead(
       "sona_said_search",
       "Search what the user said in meetings",
       "Find the lines the user said across meetings that contain query, newest first, each with its meeting and moment.",

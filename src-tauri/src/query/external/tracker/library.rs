@@ -15,6 +15,7 @@ use crate::meeting::folder_types::{
     MAX_FOLDER_PROMPTS,
 };
 use crate::meeting::heard_plan_types::{HeardPlan, HeardPlanEdit};
+use crate::meeting::live_doc_types::MeetingLiveDocPoint;
 use crate::meeting::prompt_types::PromptTarget;
 use crate::meeting::session::{
     MeetingActionItemDoneRequest, MeetingMutationRequest, MeetingNoteCreateRequest,
@@ -391,6 +392,9 @@ pub enum LibraryVerb {
     SnapshotDelete(SnapshotArgs),
     /// The plans to meet heard in a meeting.
     HeardPlans(MeetingRef),
+    /// The doc a meeting kept once its recording stopped: each point, done
+    /// or not, under its heading.
+    LiveDoc(MeetingRef),
     /// Correct a heard plan's title, time, people or place.
     HeardPlanEdit(HeardPlanEditArgs),
     /// Answer "Not now" to a heard plan: it stays and stops asking.
@@ -417,6 +421,7 @@ impl LibraryVerb {
             | Self::MeetingNotes(_)
             | Self::Snapshots(_)
             | Self::HeardPlans(_)
+            | Self::LiveDoc(_)
             | Self::Said(_)
             | Self::ScreenText(_)
             | Self::MeetingSearch(_) => READ_SCOPES,
@@ -543,6 +548,13 @@ pub struct ExternalHeardPlans {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ExternalLiveDoc {
+    pub schema_version: u32,
+    pub meeting_id: Uuid,
+    pub points: Vec<MeetingLiveDocPoint>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ExternalSaid {
     pub schema_version: u32,
     pub query: String,
@@ -625,6 +637,7 @@ pub enum ExternalLibraryAnswer {
     Notes(ExternalMeetingNotes),
     Snapshots(ExternalSnapshots),
     HeardPlans(ExternalHeardPlans),
+    LiveDoc(ExternalLiveDoc),
     Said(ExternalSaid),
     ScreenText(ExternalScreenText),
     Search(ExternalMeetingSearch),
@@ -1821,6 +1834,21 @@ pub(super) async fn heard_plans(
     })
 }
 
+pub(super) async fn live_doc(
+    meetings: &Arc<MeetingSessionManager>,
+    args: &MeetingRef,
+) -> Result<ExternalLiveDoc, ExternalError> {
+    let (store, review) = meeting(meetings, &args.meeting).await?;
+    let session = review.session.session_id;
+    Ok(ExternalLiveDoc {
+        schema_version: QUERY_SCHEMA_VERSION,
+        meeting_id: session.uuid(),
+        points: store
+            .live_doc_points(session)
+            .map_err(|error| meeting_refusal(session, error))?,
+    })
+}
+
 pub(super) async fn heard_plan_edit(
     meetings: &Arc<MeetingSessionManager>,
     args: &HeardPlanEditArgs,
@@ -2182,6 +2210,9 @@ impl Tracker<'_> {
             LibraryVerb::HeardPlans(args) => {
                 ExternalLibraryAnswer::HeardPlans(heard_plans(meetings, args).await?)
             }
+            LibraryVerb::LiveDoc(args) => {
+                ExternalLibraryAnswer::LiveDoc(live_doc(meetings, args).await?)
+            }
             LibraryVerb::HeardPlanEdit(args) => {
                 ExternalLibraryAnswer::Change(heard_plan_edit(meetings, args, &gate).await?)
             }
@@ -2300,6 +2331,24 @@ pub(super) fn text(answer: &ExternalLibraryAnswer, text: &mut String) {
                 );
             }
         }
+        ExternalLibraryAnswer::LiveDoc(doc) => {
+            if doc.points.is_empty() {
+                text.push_str("No doc kept for this meeting.\n");
+            }
+            let mut heading = None;
+            for point in &doc.points {
+                if point.section.is_some() && point.section != heading {
+                    heading.clone_from(&point.section);
+                    let _ = writeln!(text, "{}", heading.as_deref().unwrap_or_default());
+                }
+                let _ = writeln!(
+                    text,
+                    "  [{}] {}",
+                    if point.done { "x" } else { " " },
+                    point.text
+                );
+            }
+        }
         ExternalLibraryAnswer::Said(found) => {
             if found.moments.is_empty() {
                 text.push_str("Nobody said that.\n");
@@ -2380,11 +2429,12 @@ pub(super) fn text(answer: &ExternalLibraryAnswer, text: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        csv, delete, export, folder_membership, folder_new, meeting_operation, receipt_replayed,
-        rename, trash, trash_change, Change, ExportArgs, ExportFormat, FileArgs,
-        FolderMembershipArgs, FolderNewArgs, MeetingChangeArgs, RenameArgs, TrashArgs,
+        csv, delete, export, folder_membership, folder_new, live_doc, meeting_operation,
+        receipt_replayed, rename, trash, trash_change, Change, ExportArgs, ExportFormat, FileArgs,
+        FolderMembershipArgs, FolderNewArgs, MeetingChangeArgs, MeetingRef, RenameArgs, TrashArgs,
     };
     use crate::meeting::detection::machine::CalendarEventSummary;
+    use crate::meeting::live_doc_types::MeetingLiveDocPoint;
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
     use crate::meeting::session::{
         MeetingMutationRequest, MeetingSessionManager, MeetingTitleSetRequest, NoCaptureSources,
@@ -2637,6 +2687,47 @@ mod tests {
             let contents = exported.contents.unwrap();
             assert!(contents.contains("Pricing sync"));
             assert!(!contents.contains("Board prep"));
+        });
+    }
+
+    #[test]
+    fn a_meeting_doc_reads_back_unless_the_meeting_is_kept_on_this_mac() {
+        tauri::async_runtime::block_on(async {
+            let corpus = corpus().await;
+            let store = corpus.meetings.store().await.unwrap();
+            let point = MeetingLiveDocPoint {
+                id: "p1".to_owned(),
+                text: "Beta ships Monday".to_owned(),
+                edited: false,
+                spoken: false,
+                done: true,
+                section: Some("Launch".to_owned()),
+                start_offset_ns: Some(1),
+            };
+            for meeting in [corpus.pricing, corpus.kept] {
+                store
+                    .save_live_doc_points(meeting, std::slice::from_ref(&point))
+                    .unwrap();
+            }
+            let doc = live_doc(
+                &corpus.meetings,
+                &MeetingRef {
+                    meeting: corpus.pricing.uuid().to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(doc.points, vec![point]);
+
+            let refused = live_doc(
+                &corpus.meetings,
+                &MeetingRef {
+                    meeting: corpus.kept.uuid().to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refused.error, ExternalErrorCode::NotFound);
         });
     }
 
