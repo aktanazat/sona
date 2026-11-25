@@ -55,10 +55,12 @@ pub enum NotificationKind {
     Note,
     /// What Sona closed or archived by itself; `to` holds the summary.
     Housekeeping,
+    /// A followed task's last open blocker finished; `to` is the status it finished in.
+    Unblocked,
 }
 
 impl NotificationKind {
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::Status,
         Self::Comment,
         Self::Mention,
@@ -73,6 +75,7 @@ impl NotificationKind {
         Self::View,
         Self::Note,
         Self::Housekeeping,
+        Self::Unblocked,
     ];
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -104,6 +107,7 @@ crate::planning::types::sql_enum!(NotificationKind {
     View => "view",
     Note => "note",
     Housekeeping => "housekeeping",
+    Unblocked => "unblocked",
 });
 
 /// Notices without a task, kinds for a field change, Sona's own posts
@@ -361,6 +365,76 @@ CREATE TRIGGER planning_notifications_view_delete AFTER DELETE ON planning_views
     DELETE FROM planning_notifications WHERE subject_kind = 'view' AND subject_id = old.id;
 END;";
 
+/// Adds the unblocked kind to the notices table; every other row and trigger is kept as it was.
+pub(crate) const UNBLOCKED_NOTICES_MIGRATION: &str =
+    "DROP TRIGGER IF EXISTS planning_task_lifecycle_delete;
+DROP TRIGGER IF EXISTS planning_notifications_run_delete;
+DROP TRIGGER IF EXISTS planning_notifications_project_delete;
+DROP TRIGGER IF EXISTS planning_notifications_initiative_delete;
+DROP TRIGGER IF EXISTS planning_notifications_view_delete;
+DROP TRIGGER IF EXISTS planning_notifications_note_delete;
+CREATE TABLE planning_notifications_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT,
+    kind TEXT NOT NULL CHECK(kind IN ('status', 'comment', 'mention', 'assigned', 'changed',
+        'reminder', 'due', 'automation', 'digest', 'question', 'project', 'view', 'note',
+        'housekeeping', 'unblocked')),
+    actor TEXT NOT NULL CHECK(actor IN ('sona', 'agent')),
+    agent TEXT CHECK(agent IS NULL OR length(trim(agent)) > 0),
+    activity_id TEXT,
+    comment_id TEXT,
+    field TEXT,
+    run_id TEXT,
+    event_key TEXT UNIQUE,
+    from_value TEXT,
+    to_value TEXT,
+    digest TEXT,
+    subject_kind TEXT CHECK(subject_kind IN ('project', 'initiative', 'note', 'view')),
+    subject_id TEXT,
+    created_at_ms INTEGER NOT NULL,
+    read_at_ms INTEGER,
+    snoozed_until_ms INTEGER,
+    archived_at_ms INTEGER,
+    CHECK((subject_kind IS NULL) = (subject_id IS NULL)),
+    CHECK((kind = 'digest') = (digest IS NOT NULL)),
+    CHECK(task_id IS NOT NULL OR run_id IS NOT NULL OR subject_id IS NOT NULL
+        OR kind IN ('digest', 'housekeeping'))
+);
+INSERT INTO planning_notifications_next (rowid, id, task_id, kind, actor, agent, activity_id,
+        comment_id, field, run_id, event_key, from_value, to_value, digest, subject_kind,
+        subject_id, created_at_ms, read_at_ms, snoozed_until_ms, archived_at_ms)
+    SELECT rowid, id, task_id, kind, actor, agent, activity_id, comment_id, field, run_id,
+        event_key, from_value, to_value, digest, subject_kind, subject_id, created_at_ms,
+        read_at_ms, snoozed_until_ms, archived_at_ms
+    FROM planning_notifications;
+DROP TABLE planning_notifications;
+ALTER TABLE planning_notifications_next RENAME TO planning_notifications;
+CREATE INDEX planning_notifications_created ON planning_notifications(created_at_ms);
+CREATE INDEX planning_notifications_task ON planning_notifications(task_id);
+CREATE INDEX planning_notifications_subject ON planning_notifications(subject_kind, subject_id);
+CREATE TRIGGER planning_task_lifecycle_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_versions WHERE task_id = old.id;
+    DELETE FROM planning_task_subscriptions WHERE task_id = old.id;
+    DELETE FROM planning_notifications WHERE task_id = old.id;
+    DELETE FROM planning_favorites WHERE kind = 'task' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_run_delete AFTER DELETE ON planning_loop_runs BEGIN
+    DELETE FROM planning_notifications WHERE run_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_project_delete AFTER DELETE ON planning_projects BEGIN
+    DELETE FROM planning_follows WHERE kind = 'project' AND target_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'project' AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_initiative_delete AFTER DELETE ON planning_initiatives
+BEGIN
+    DELETE FROM planning_notifications WHERE subject_kind = 'initiative'
+        AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_view_delete AFTER DELETE ON planning_views BEGIN
+    DELETE FROM planning_follows WHERE kind = 'view' AND target_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'view' AND subject_id = old.id;
+END;";
+
 /// What a notice is about when it is not a task.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -424,6 +498,8 @@ pub(crate) struct Notification {
     /// The agent, when one named itself.
     pub(crate) agent: Option<String>,
     pub(crate) comment_id: Option<String>,
+    /// The start of the comment a comment or mention notice is about.
+    pub(crate) excerpt: Option<String>,
     /// For a field change, the history kind of what changed, or `reminder`.
     pub(crate) field: Option<String>,
     pub(crate) automation: Option<NoticeAutomation>,
@@ -475,6 +551,8 @@ pub(crate) struct Shown {
     pub(crate) archived: bool,
     /// Only the ones that need the user.
     pub(crate) priority_only: bool,
+    /// One row per task, its notices folded together; see [`rows::tasks`].
+    pub(crate) by_task: bool,
 }
 
 /// Narrows a list: any of these kinds, about a task in this project or the
@@ -488,6 +566,9 @@ pub(crate) struct InboxFilter {
     pub(crate) project_id: Option<String>,
     #[serde(default)]
     pub(crate) task_priorities: Vec<u8>,
+    /// Text to find in a task's title or number, a notice's kind, its subject's
+    /// name or its comment. Case and surrounding spaces do not matter.
+    pub(crate) search: Option<String>,
 }
 
 pub(crate) fn subscribed(conn: &Connection, task_id: &str) -> Result<bool> {
@@ -598,7 +679,7 @@ pub(super) fn notify(conn: &Connection, notice: &Notice<'_>, now_ms: i64) -> Res
     let (subject_kind, subject_id) = notice
         .subject
         .map_or((None, None), |(kind, id)| (Some(kind.as_str()), Some(id)));
-    Ok(conn.execute(
+    let posted = conn.execute(
         "INSERT INTO planning_notifications (id, task_id, kind, actor, agent, activity_id,
             comment_id, field, run_id, event_key, from_value, to_value, digest, subject_kind,
             subject_id, created_at_ms)
@@ -622,7 +703,16 @@ pub(super) fn notify(conn: &Connection, notice: &Notice<'_>, now_ms: i64) -> Res
             subject_id,
             now_ms
         ],
-    )? > 0)
+    )? > 0;
+    if let Some(task_id) = notice.task_id.filter(|_| posted) {
+        // A notice about a task wakes the ones about it that were snoozed to a time.
+        conn.execute(
+            "UPDATE planning_notifications SET snoozed_until_ms = NULL
+             WHERE task_id = ?1 AND snoozed_until_ms > ?2 AND archived_at_ms IS NULL",
+            params![task_id, now_ms],
+        )?;
+    }
+    Ok(posted)
 }
 
 /// Where the notices stand, for [`forget_since`].
@@ -682,6 +772,42 @@ pub(crate) struct Entry<'a> {
     pub(crate) mirror_of: Option<&'a str>,
 }
 
+/// Posts an unblocked notice for each followed task that `finished` was the
+/// last open blocker of. Only a blocker that finished counts.
+fn unblocked(
+    conn: &Connection,
+    finished: &str,
+    actor: WorkActor,
+    to: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    if !matches!(to, Some("done" | "canceled")) {
+        return Ok(());
+    }
+    let mut statement = conn.prepare(
+        "SELECT b.id FROM planning_task_relations r
+            JOIN planning_tasks b ON b.id = r.to_id
+         WHERE r.from_id = ?1 AND r.kind = 'blocks'
+           AND b.status NOT IN ('done', 'canceled', 'duplicate') AND b.archived_at_ms IS NULL
+           AND EXISTS (SELECT 1 FROM planning_task_subscriptions s WHERE s.task_id = b.id)
+           AND NOT EXISTS (SELECT 1 FROM planning_task_relations o
+                JOIN planning_tasks ob ON ob.id = o.from_id
+             WHERE o.to_id = b.id AND o.kind = 'blocks' AND o.from_id <> ?1
+               AND ob.status NOT IN ('done', 'canceled', 'duplicate') AND ob.archived_at_ms IS NULL)",
+    )?;
+    let blocked = statement
+        .query_map([finished], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in blocked {
+        let notice = Notice {
+            to,
+            ..Notice::new(Some(&id), NotificationKind::Unblocked, actor)
+        };
+        notify(conn, &notice, now_ms)?;
+    }
+    Ok(())
+}
+
 /// Subscribes and notifies for one history entry as it is written.
 pub(crate) fn on_activity(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> Result<()> {
     let Entry {
@@ -704,6 +830,9 @@ pub(crate) fn on_activity(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> 
         to,
         ..Notice::new(Some(task_id), kind, actor)
     };
+    if matches!(kind, WorkActivityKind::Status) && actor != WorkActor::Me {
+        unblocked(conn, task_id, actor, to, now_ms)?;
+    }
     match kind {
         WorkActivityKind::Created => {
             let owned = owned_by_user(conn, task_id)?;
@@ -1147,12 +1276,27 @@ const COLUMNS: &str = "x.id, x.task_id, x.kind, x.actor, coalesce(a.agent, x.age
         WHEN 'project' THEN (SELECT title FROM planning_projects WHERE id = x.subject_id)
         WHEN 'initiative' THEN (SELECT name FROM planning_initiatives WHERE id = x.subject_id)
         WHEN 'view' THEN (SELECT name FROM planning_views WHERE id = x.subject_id)
-    END";
+    END,
+    (SELECT body FROM planning_task_comments c WHERE c.id = x.comment_id)";
 
 const FROM: &str = "planning_notifications x
     LEFT JOIN planning_activity_agents a ON a.activity_id = x.activity_id
     LEFT JOIN planning_loop_runs r ON r.id = x.run_id
     LEFT JOIN planning_loops l ON l.id = r.loop_id";
+
+const EXCERPT_CHARS: usize = 160;
+
+/// The start of a comment's body, flattened to one line.
+fn excerpt(body: &str) -> Option<String> {
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    Some(match flat.char_indices().nth(EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}…", flat[..cut].trim_end()),
+        None => flat,
+    })
+}
 
 fn read(row: &Row<'_>) -> rusqlite::Result<Notification> {
     let run_id: Option<String> = row.get(7)?;
@@ -1203,6 +1347,9 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Notification> {
         archived_at_ms: row.get(16)?,
         digest,
         subject,
+        excerpt: row
+            .get::<_, Option<String>>(21)?
+            .and_then(|body| excerpt(&body)),
         priority: kind.priority(),
         earlier: Vec::new(),
     })
@@ -1285,6 +1432,11 @@ pub(crate) fn filtered(
     } else {
         Vec::new()
     };
+    let search = filter
+        .search
+        .as_deref()
+        .map(|text| text.trim().to_lowercase())
+        .filter(|text| !text.is_empty());
     let mut statement = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM {FROM}
             LEFT JOIN planning_tasks t ON t.id = x.task_id
@@ -1295,6 +1447,14 @@ pub(crate) fn filtered(
                 OR (x.subject_kind = 'project' AND x.subject_id = ?5))
            AND (?6 IS NULL OR t.priority IN (SELECT value FROM json_each(?6)))
            AND (?7 IS NULL OR x.kind IN (SELECT value FROM json_each(?7)))
+           AND (?8 IS NULL OR instr(lower(coalesce(t.title, '')), ?8) > 0
+                OR instr('#' || t.number, ?8) > 0
+                OR instr(x.kind, ?8) > 0
+                OR x.subject_id IN (SELECT id FROM planning_projects WHERE instr(lower(title), ?8) > 0
+                    UNION ALL SELECT id FROM planning_initiatives WHERE instr(lower(name), ?8) > 0
+                    UNION ALL SELECT id FROM planning_views WHERE instr(lower(name), ?8) > 0)
+                OR EXISTS (SELECT 1 FROM planning_task_comments c
+                    WHERE c.id = x.comment_id AND instr(lower(c.body), ?8) > 0))
          ORDER BY x.created_at_ms DESC, x.rowid DESC"
     ))?;
     let rows = statement.query_map(
@@ -1305,7 +1465,8 @@ pub(crate) fn filtered(
             json_list(&filter.kinds)?,
             filter.project_id,
             json_list(&filter.task_priorities)?,
-            json_list(&priority)?
+            json_list(&priority)?,
+            search
         ],
         read,
     )?;
@@ -1420,6 +1581,41 @@ pub(crate) fn mark_as(
     run_history(app, |history| marked(history, change, ids, how))
 }
 
+/// Marks the notices about a task read: opening the task reads its news.
+fn read_task(conn: &Connection, task_id: &str, now_ms: i64) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE planning_notifications SET read_at_ms = ?2
+         WHERE task_id = ?1 AND read_at_ms IS NULL",
+        params![task_id, now_ms],
+    )?)
+}
+
+fn task_marked(history: &mut Connection, change: Change<'_>, task_id: &str) -> Result<Done<usize>> {
+    store::mutate(
+        history,
+        change.operation_id,
+        "work_inbox_mark_task",
+        &task_id,
+        change.at_ms,
+        |tx| {
+            Ok(Done {
+                value: read_task(tx, task_id, change.at_ms)?,
+                effects: Effects::default(),
+            })
+        },
+    )
+}
+
+/// Reads every notice about a task, as the task is opened. Returns how many were unread.
+pub(crate) fn mark_task_read(
+    app: &AppHandle,
+    operation_id: &str,
+    task_id: &str,
+) -> Result<usize, String> {
+    let change = Change::now(operation_id, WorkActor::Me);
+    run_history(app, |history| task_marked(history, change, task_id))
+}
+
 fn subscribing(
     history: &mut Connection,
     change: Change<'_>,
@@ -1481,6 +1677,33 @@ fn reading<T>(app: &AppHandle, work: impl FnOnce(&Connection) -> Result<T>) -> R
     crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| work(conn))
 }
 
+/// The rows a list shows. They are built over read notices too, then
+/// narrowed: an unread-only view must not split a burst at the notices
+/// already read.
+pub(crate) fn rows_of(
+    conn: &Connection,
+    shown: Shown,
+    filter: &InboxFilter,
+    now: i64,
+) -> Result<Vec<rows::InboxRow>> {
+    let context = rows::context(conn)?;
+    let mut all = filtered(
+        conn,
+        Shown {
+            unread_only: false,
+            ..shown
+        },
+        filter,
+        now,
+    )?;
+    name_notes(conn, &mut all)?;
+    Ok(match (shown.unread_only, shown.by_task) {
+        (true, by_task) => rows::waiting(all, &context, by_task),
+        (false, true) => rows::tasks(all, &context),
+        (false, false) => rows::rows(all, &context),
+    })
+}
+
 pub(crate) fn work_inbox(
     app: AppHandle,
     shown: Shown,
@@ -1490,20 +1713,8 @@ pub(crate) fn work_inbox(
     reading(&app, |conn| {
         let now = now_ms();
         let context = rows::context(conn)?;
-        let waiting = rows::waiting(notifications(conn, Shown::default(), now)?, &context);
-        // Rows are built over read notices too, then narrowed: an unread-only
-        // view must not split a burst at the notices already read.
-        let any = Shown {
-            unread_only: false,
-            ..shown
-        };
-        let mut all = filtered(conn, any, &filter, now)?;
-        name_notes(conn, &mut all)?;
-        let rows = if shown.unread_only {
-            rows::waiting(all, &context)
-        } else {
-            rows::rows(all, &context)
-        };
+        let waiting = rows::waiting(notifications(conn, Shown::default(), now)?, &context, false);
+        let rows = rows_of(conn, shown, &filter, now)?;
         let mut shown = filtered(conn, shown, &filter, now)?;
         name_notes(conn, &mut shown)?;
         Ok(Inbox {

@@ -28,11 +28,14 @@ extension AppModel {
     var inboxShown: [WorkNotification] {
         let focus = workFocus
         let filter = focus.inboxFilter
-        let tasks = filter.readsTasks
-            ? Dictionary((work.items ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }) : [:]
+        let query = focus.inboxSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        let items = Dictionary((work.items ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let projects = Dictionary(work.projects.map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first })
         let shown = (focus.inboxSnoozed ? work.snoozedNotices : work.inbox).filter { notice in
-            (!focus.inboxPriorityOnly || notice.priority)
-                && filter.matches(notice, task: notice.itemId.flatMap { tasks[$0] })
+            let task = notice.itemId.flatMap { items[$0] }
+            return (!focus.inboxPriorityOnly || notice.priority)
+                && filter.matches(notice, task: task)
+                && (query.isEmpty || inboxMatches(notice, query, task: task, project: task?.projectId.flatMap { projects[$0] }))
         }
         return shown.filter(\.priority) + shown.filter { !$0.priority }
     }
@@ -80,6 +83,42 @@ extension AppModel {
     /// ⌥U: marks every notice the inbox shows read.
     func markShownRead() {
         work.mark(inboxShown.filter { $0.readAtMs == nil }.map(\.id), .read)
+    }
+
+    /// One row per task: each task's notices in the order the list shows them, latest first.
+    func inboxGroups(_ notices: [WorkNotification]) -> [[WorkNotification]] {
+        var order: [String] = []
+        var groups: [String: [WorkNotification]] = [:]
+        for notice in notices {
+            let key = notice.itemId ?? notice.id
+            if groups[key] == nil { order.append(key) }
+            groups[key, default: []].append(notice)
+        }
+        return order.compactMap { groups[$0] }
+    }
+
+    /// What J, K and Return reach: each group's lead, and the rest once its row is open.
+    var inboxVisible: [WorkNotification] {
+        let shown = inboxShown
+        let expanded = workFocus.inboxExpanded
+        return (inboxGroups(shown.filter(\.priority)) + inboxGroups(shown.filter { !$0.priority }))
+            .flatMap { group in expanded.contains(group[0].itemId ?? group[0].id) ? group : [group[0]] }
+    }
+
+    func toggleInboxGroup(_ key: String) {
+        let focus = workFocus
+        if focus.inboxExpanded.contains(key) { focus.inboxExpanded.remove(key) } else { focus.inboxExpanded.insert(key) }
+    }
+
+    func toggleInboxSelected(_ id: String) {
+        let focus = workFocus
+        if focus.inboxSelected.contains(id) { focus.inboxSelected.remove(id) } else { focus.inboxSelected.insert(id) }
+    }
+
+    private func inboxMatches(_ notice: WorkNotification, _ query: String, task: WorkItemRow?, project: String?) -> Bool {
+        let texts = [notice.kind.label, notice.what, notice.excerpt, task?.title, project,
+                     task.map { TaskPriority($0.priority).label }, task.map { "#\($0.number)" }]
+        return texts.contains { $0?.lowercased().contains(query) == true }
     }
 }
 
@@ -151,9 +190,6 @@ struct InboxFilter: Equatable {
     var unreadOnly = false
 
     var isEmpty: Bool { self == InboxFilter() }
-
-    /// Whether matching needs the tasks behind the notices.
-    var readsTasks: Bool { projectId != nil || !taskPriorities.isEmpty }
 
     func matches(_ notice: WorkNotification, task: WorkItemRow?) -> Bool {
         if unreadOnly, notice.readAtMs != nil { return false }
@@ -231,8 +267,8 @@ private struct InboxList: View {
         let store = model.work
         let focus = model.workFocus
         let shown = model.inboxShown
-        let urgent = shown.filter(\.priority)
-        let other = shown.filter { !$0.priority }
+        let urgent = model.inboxGroups(shown.filter(\.priority))
+        let other = model.inboxGroups(shown.filter { !$0.priority })
         let narrowed = focus.inboxPriorityOnly || !focus.inboxFilter.isEmpty
         VStack(spacing: 0) {
             WorkBar {
@@ -243,6 +279,16 @@ private struct InboxList: View {
                     help: "Show only what needs you: mentions, assignments, agents' questions, reminders and work due today",
                     isOn: Binding(get: { focus.inboxPriorityOnly }, set: { focus.inboxPriorityOnly = $0 }))
                 InboxFilterMenu()
+                Button {
+                    focus.inboxSearching.toggle()
+                    if !focus.inboxSearching { focus.inboxSearch = "" }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(IconButton(on: focus.inboxSearching))
+                .keyboardShortcut("f", modifiers: .command)
+                .help("Search  ⌘F")
+                .accessibilityLabel("Search notices")
                 Button("Clear read") { model.clearReadNotices() }
                     .buttonStyle(QuietButton(compact: true))
                     .disabled(!shown.contains { $0.readAtMs != nil })
@@ -252,6 +298,18 @@ private struct InboxList: View {
                     .disabled(!shown.contains { $0.readAtMs == nil })
                     .help("Mark all read  ⌥U")
             }
+            if focus.inboxSearching {
+                InboxSearchField(prompt: "Search notices")
+            }
+            if !focus.inboxSelected.isEmpty {
+                InboxBulkBar()
+            }
+            Button("Select all") { focus.inboxSelected = Set(shown.map(\.id)) }
+                .keyboardShortcut("a", modifiers: .command)
+                .disabled(focus.inboxSearching)
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityHidden(true)
             if shown.isEmpty, narrowed {
                 TaskEmpty(line: "No notices match.") {
                     Button("Show all") {
@@ -272,16 +330,14 @@ private struct InboxList: View {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             if !urgent.isEmpty {
                                 InboxSectionTitle(title: "Priority")
-                                ForEach(urgent) { notice in
-                                    InboxRow(notice: notice, highlighted: focus.inboxHighlighted == notice.id)
-                                        .id(notice.id)
+                                ForEach(urgent.indices, id: \.self) { index in
+                                    InboxGroupRows(group: urgent[index])
                                 }
                             }
                             if !other.isEmpty {
                                 InboxSectionTitle(title: "Other")
-                                ForEach(other) { notice in
-                                    InboxRow(notice: notice, highlighted: focus.inboxHighlighted == notice.id)
-                                        .id(notice.id)
+                                ForEach(other.indices, id: \.self) { index in
+                                    InboxGroupRows(group: other[index])
                                 }
                             }
                         }
@@ -306,6 +362,83 @@ private struct InboxList: View {
         .onChange(of: shown.compactMap(\.itemId), initial: true) { _, ids in
             focus.show(ids)
         }
+        .onChange(of: shown.map(\.id)) { _, ids in
+            focus.inboxSelected.formIntersection(ids)
+        }
+    }
+}
+
+/// One task's notices in the inbox: the latest leads, the rest show when the row opens.
+private struct InboxGroupRows: View {
+    let group: [WorkNotification]
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let focus = model.workFocus
+        let lead = group[0]
+        let expanded = focus.inboxExpanded.contains(lead.itemId ?? lead.id)
+        InboxRow(notice: lead, highlighted: focus.inboxHighlighted == lead.id, count: group.count, expanded: expanded)
+            .id(lead.id)
+        if expanded {
+            ForEach(group.dropFirst()) { notice in
+                InboxRow(notice: notice, highlighted: focus.inboxHighlighted == notice.id, indented: true)
+                    .id(notice.id)
+            }
+        }
+    }
+}
+
+/// The ⌘F search row for the inbox and triage. Esc clears the text, then closes the row.
+struct InboxSearchField: View {
+    @Environment(AppModel.self) private var model
+    let prompt: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let focus = model.workFocus
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.inkTertiary)
+            TextField(prompt, text: Binding(get: { focus.inboxSearch }, set: { focus.inboxSearch = $0 }))
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .onKeyPress(.escape) {
+                    if focus.inboxSearch.isEmpty { focus.inboxSearching = false } else { focus.inboxSearch = "" }
+                    return .handled
+                }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 6)
+        .onAppear { focused = true }
+    }
+}
+
+/// Marks, snoozes or archives the notices picked with ⇧-click, ⇧J, ⇧K or ⌘A.
+private struct InboxBulkBar: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let focus = model.workFocus
+        let ids = Array(focus.inboxSelected)
+        HStack(spacing: 10) {
+            Text("\(ids.count) selected").metaText()
+            Spacer(minLength: 12)
+            Button("Mark read") { model.work.mark(ids, .read); focus.inboxSelected = [] }
+            Menu("Snooze") {
+                ForEach(InboxSnooze.allCases, id: \.self) { choice in
+                    if let until = choice.until {
+                        Button(choice.title) { model.work.mark(ids, .snooze, until: until); focus.inboxSelected = [] }
+                    }
+                }
+            }
+            .menuStyle(.button)
+            Button("Archive") { model.work.mark(ids, .archive); focus.inboxSelected = [] }
+            Button("Clear") { focus.inboxSelected = [] }
+        }
+        .buttonStyle(QuietButton(compact: true))
+        .padding(.horizontal, 24)
+        .padding(.vertical, 6)
     }
 }
 
@@ -325,8 +458,12 @@ private struct InboxSectionTitle: View {
 private struct InboxRow: View {
     let notice: WorkNotification
     let highlighted: Bool
+    var count = 1
+    var expanded = false
+    var indented = false
     @Environment(AppModel.self) private var model
     @State private var hovering = false
+    private var selected: Bool { model.workFocus.inboxSelected.contains(notice.id) }
 
     var body: some View {
         let store = model.work
@@ -334,9 +471,25 @@ private struct InboxRow: View {
         let deleted = row == nil ? notice.itemId.flatMap { store.binned[$0]?.item } : nil
         let unread = notice.readAtMs == nil
         HStack(spacing: 10) {
-            Circle()
-                .fill(unread ? Theme.accentFill : Color.clear)
-                .frame(width: 7, height: 7)
+            if count > 1 {
+                Button { model.toggleInboxGroup(notice.itemId ?? notice.id) } label: {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.inkTertiary)
+                .frame(width: 14)
+                .accessibilityLabel(expanded ? "Collapse" : "Expand")
+            }
+            if selected {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.accentFill)
+                    .frame(width: 7)
+            } else {
+                Circle()
+                    .fill(unread ? Theme.accentFill : Color.clear)
+                    .frame(width: 7, height: 7)
+            }
             if let row {
                 TaskStatusIcon(status: row.status)
             } else if deleted != nil {
@@ -371,12 +524,14 @@ private struct InboxRow: View {
                     if deleted != nil {
                         Text("In Recently deleted").metaText()
                     }
+                    if count > 1 { Text("\(count)").metaText() }
                 }
                 HStack(spacing: 4) {
                     if let icon {
                         Image(systemName: icon).font(.system(size: 10))
                     }
-                    Text("\(notice.who) \(notice.what)").lineLimit(1)
+                    let line = "\(notice.who) \(notice.what)"
+                    Text(notice.excerpt.map { "\(line): “\($0)”" } ?? line).lineLimit(1)
                 }
                 .metaText(notice.failed ? Theme.live : Theme.inkSecondary)
             }
@@ -387,15 +542,23 @@ private struct InboxRow: View {
             Text(time).metaText().monospacedDigit()
         }
         .padding(.horizontal, 16)
+        .padding(.leading, indented ? 24 : 0)
         .frame(height: 52)
         .background(
             RoundedRectangle(cornerRadius: Theme.radiusRow)
-                .fill(highlighted ? Theme.washSelected : hovering ? Theme.wash : Color.clear)
+                .fill(highlighted || selected ? Theme.washSelected : hovering ? Theme.wash : Color.clear)
                 .padding(.horizontal, 8))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture { model.openNotice(notice) }
+        .onTapGesture {
+            if NSEvent.modifierFlags.contains(.shift) {
+                model.toggleInboxSelected(notice.id)
+            } else {
+                model.openNotice(notice)
+            }
+        }
         .allowsWindowActivationEvents()
+        .help(notice.excerpt ?? "")
         .contextMenu { menu(store) }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -509,11 +672,20 @@ private struct InboxRow: View {
 enum InboxKeys {
     static func handle(_ event: NSEvent, key: String, flags: NSEvent.ModifierFlags, _ model: AppModel) -> Bool {
         let focus = model.workFocus
-        let notices = model.inboxShown
+        let notices = model.inboxVisible
         let index = focus.inboxHighlighted.flatMap { id in notices.firstIndex { $0.id == id } }
         let notice = index.map { notices[$0] }
         if flags == .option, key == "u" {
             model.markShownRead()
+            return true
+        }
+        if flags == .shift, key == "j" || key == "k" {
+            guard !notices.isEmpty else { return true }
+            let delta = key == "j" ? 1 : -1
+            let next = index.map { min(max($0 + delta, 0), notices.count - 1) } ?? (delta > 0 ? 0 : notices.count - 1)
+            if let notice { focus.inboxSelected.insert(notice.id) }
+            focus.inboxSelected.insert(notices[next].id)
+            focus.inboxHighlighted = notices[next].id
             return true
         }
         if flags == .shift, event.keyCode == 51 {
@@ -536,6 +708,10 @@ enum InboxKeys {
             let rest = notices.filter { $0.id != notice.id }
             focus.inboxHighlighted = rest.isEmpty ? nil : rest[min(index, rest.count - 1)].id
             model.work.mark([notice.id], mark, until: until)
+            return true
+        }
+        if event.keyCode == 53, !focus.inboxSelected.isEmpty {
+            focus.inboxSelected = []
             return true
         }
         if event.keyCode == 53 {

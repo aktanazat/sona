@@ -1791,6 +1791,65 @@ fn the_inbox_hears_what_others_change_on_the_users_tasks_and_not_the_user() {
 }
 
 #[test]
+fn a_followed_task_hears_once_its_last_open_blocker_is_done() {
+    fn by_agent(operation_id: &str, at_ms: i64) -> Change<'_> {
+        Change {
+            operation_id,
+            actor: WorkActor::Agent,
+            at_ms,
+        }
+    }
+    let mut desk = desk(&[]);
+    let mut made = Vec::new();
+    for title in ["Sign the lease", "Move in", "Paint the walls", "Buy the paint"] {
+        let at = desk.tick();
+        let item = create(&mut desk.history, None, by_me(&operation(), at), &typed(title))
+            .expect("a task")
+            .value;
+        made.push(item);
+    }
+    let [lease, move_in, paint, buy] = made.as_slice() else {
+        unreachable!("four tasks were made");
+    };
+    let at = desk.tick();
+    for (from, to) in [(lease, move_in), (lease, paint), (buy, paint)] {
+        items::add_relation(
+            &desk.history,
+            &from.id,
+            &to.id,
+            WorkRelationKind::Blocks,
+            WorkActor::Me,
+            at,
+        )
+        .expect("a blocker");
+    }
+    for id in [&move_in.id, &paint.id] {
+        inbox::subscribe(&desk.history, id, inbox::SubscribeReason::Subscribed, at)
+            .expect("following it");
+    }
+
+    let at = desk.tick();
+    update(
+        &mut desk.history,
+        None,
+        by_agent(&operation(), at),
+        &lease.id,
+        lease.revision,
+        &status(WorkStatus::Done),
+    )
+    .expect("an agent signs the lease");
+
+    let now = desk.tick();
+    let unblocked = inbox::notifications(&desk.history, inbox::Shown::default(), now)
+        .expect("the inbox")
+        .into_iter()
+        .filter(|notice| notice.kind == inbox::NotificationKind::Unblocked)
+        .map(|notice| notice.item_id)
+        .collect::<Vec<_>>();
+    assert_eq!(unblocked, [Some(move_in.id.clone())]);
+}
+
+#[test]
 fn the_inbox_hears_each_field_an_agent_changes_on_a_followed_task_and_not_the_users() {
     let mut desk = desk(&[]);
     let at = desk.tick();

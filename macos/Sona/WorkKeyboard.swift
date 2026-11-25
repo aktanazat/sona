@@ -423,6 +423,13 @@ final class WorkFocus {
     /// The inbox shows only the notices that need the user.
     var inboxPriorityOnly = false
     var inboxFilter = InboxFilter()
+    /// The text the inbox searches its notices for, whether its search row is
+    /// open, and the rows selected by ⇧-click, ⇧J, ⇧K or ⌘A.
+    var inboxSearch = ""
+    var inboxSearching = false
+    var inboxSelected: Set<String> = []
+    /// The tasks whose notices the inbox shows in full, not as one row.
+    var inboxExpanded: Set<String> = []
     /// The archive row J/K or the pointer are on, for # to restore.
     var archiveHighlighted: String?
     private(set) var selection: Set<String> = []
