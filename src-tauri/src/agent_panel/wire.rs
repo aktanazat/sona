@@ -5,6 +5,7 @@ use super::protocol::{
 use crate::chat_screenshot::ChatScreenshot;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -150,6 +151,8 @@ pub struct AgentPanelProposalPreviewV1 {
     pub summary: String,
     pub rationale: String,
     pub actions: Vec<SonaSettingChangeV1>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub microphone_names: BTreeMap<String, String>,
     pub follow_up_question: Option<String>,
     pub source_settings_revision: u64,
     pub confirmation: SonaConfirmationClassV1,

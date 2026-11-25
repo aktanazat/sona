@@ -2152,3 +2152,11 @@ input never resets that selection or writes another settings revision. Only an
 explicit configuration change clears it. An unavailable preferred-input policy
 at Always-on startup leaves the manager closed and available for settings; capture
 still refuses until an allowed input exists.
+
+The agent proposal accepts ordered favourites and exclusions only for IDs in its
+snapshot. A list replaces the connected entries at their prior positions and
+keeps saved disconnected entries. Favourites activate preferred selection unless
+the same proposal specifies an explicit choice. Selecting and excluding the same
+input refuses the entire offer. A reviewed proposal applies the microphone fields
+as one write; Undo restores the mode, lists and both explicit choices at the
+recorded revision. The local review card shows device names, not snapshot IDs.
