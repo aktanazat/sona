@@ -52,6 +52,8 @@ final class KeyboardViewController: UIInputViewController {
     private var ownEditInFlight = false
     private var editedField: UUID?
     private var lastReloadedDocumentID: UUID?
+    /// Counts applied reloads, so a slower read that finishes after a newer one is dropped.
+    private var reloads = 0
     /// Counts the keyboard showing and hiding, which may bring it to another field.
     private var shownCount = 0
     private let haptic = UIImpactFeedbackGenerator(style: .light)
@@ -225,7 +227,7 @@ final class KeyboardViewController: UIInputViewController {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
-                self?.reload()
+                await self?.reloadOffMain()
             }
         }
     }
@@ -663,12 +665,36 @@ final class KeyboardViewController: UIInputViewController {
         session.snippets = Dictionary(tools.snippets.map { ($0.trigger.lowercased(), $0.expansion) }) { _, newer in newer }
     }
 
+    /// What the app last left for the keyboard: its dictation session and a draft.
+    private typealias Stored = (session: KeyboardSessionState, draft: KeyboardDraftState)
+
+    private nonisolated static func readStored() throws -> Stored {
+        (try KeyboardSessionStore.shared().state(), try KeyboardDraftStore.shared().load())
+    }
+
     private func reload() {
         guard visible else { return }
+        reload(hasFullAccess ? Result { try Self.readStored() } : nil)
+    }
+
+    /// The ticker's reload. Its two coordinated reads held the main thread for about 3 ms
+    /// each second on the simulator, so they run off it; a reload that lands meanwhile is
+    /// newer, and this one is dropped.
+    private func reloadOffMain() async {
+        guard visible, hasFullAccess else { return reload() }
+        let reloadsBefore = reloads
+        let stored = await Task.detached(priority: .userInitiated) { Result { try Self.readStored() } }.value
+        guard reloads == reloadsBefore else { return }
+        reload(stored)
+    }
+
+    private func reload(_ stored: Result<Stored, Error>?) {
+        guard visible else { return }
+        reloads += 1
         lastReloadedDocumentID = documentID
         state.hasFullAccess = hasFullAccess
         state.startURL = DictationLink.keyboardURL(documentID: lastReloadedDocumentID, language: typing.language)
-        guard hasFullAccess else {
+        guard hasFullAccess, let stored else {
             state.draft = nil
             state.session = KeyboardSessionState()
             state.notice = nil
@@ -677,7 +703,8 @@ final class KeyboardViewController: UIInputViewController {
         }
         state.needsSetup = !DictationPreferences.keyboardEnabled || !DictationPreferences.keyboardMicrophoneAllowed
         do {
-            state.session = try KeyboardSessionStore.shared().state()
+            let (session, draft) = try stored.get()
+            state.session = session
             if let requestedAt {
                 if state.session.requestID == requestedID {
                     self.requestedAt = nil
@@ -695,7 +722,7 @@ final class KeyboardViewController: UIInputViewController {
                state.session.phase == .listening || state.session.phase == .finishing {
                 state.route = .appSession
             }
-            switch try KeyboardDraftStore.shared().load() {
+            switch draft {
             case .waiting(let draft):
                 state.draft = draft
                 // Never send a delayed result to a different text field or app.
