@@ -674,6 +674,13 @@ impl SecretManager {
         })
     }
 
+    /// Whether `cloud_sync_keys` would reach the native store now, answered
+    /// without a store read: a sync step checks this before each request with
+    /// the keys its access already holds.
+    pub(crate) fn cloud_sync_keys_reachable(&self) -> bool {
+        !self.migration_is_pending() && self.disabled_error().is_none()
+    }
+
     /// Replace only the cloud vault root for controlled recovery. Native-store
     /// availability is checked before the replacement value is encoded.
     pub(crate) async fn replace_cloud_vault_root(

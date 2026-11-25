@@ -523,7 +523,7 @@ impl CloudSyncRuntime {
             let Some(access) = self.active_access().await? else {
                 return Ok(());
             };
-            if !self.request_permitted(&access.state).await {
+            if !self.request_permitted(&access.state) {
                 return Ok(());
             }
             let now = adjusted_now_ms(access.state.clock_offset_ms);

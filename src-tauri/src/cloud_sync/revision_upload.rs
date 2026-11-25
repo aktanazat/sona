@@ -166,7 +166,6 @@ pub(super) async fn upload(
     let credentials = credentials(access).map_err(retry)?;
     runtime
         .require_request_permission(&access.state)
-        .await
         .map_err(retry)?;
     let created = access
         .client
@@ -190,7 +189,6 @@ pub(super) async fn upload(
                 }
                 runtime
                     .require_request_permission(&access.state)
-                    .await
                     .map_err(retry)?;
                 let response = access
                     .client
@@ -213,7 +211,6 @@ pub(super) async fn upload(
         }
         runtime
             .require_request_permission(&access.state)
-            .await
             .map_err(retry)?;
         access
             .client

@@ -287,7 +287,7 @@ impl CloudSyncRuntime {
         let mut high_water = None;
         let mut after = None;
         loop {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let page = access
                 .client
                 .snapshot(
@@ -369,7 +369,7 @@ impl CloudSyncRuntime {
         revision_id: &str,
         sequence: u64,
     ) -> Result<(), CloudRuntimeError> {
-        self.require_request_permission(&access.state).await?;
+        self.require_request_permission(&access.state)?;
         let response = access
             .client
             .object_manifest(&credentials(access)?, object_id, revision_id)
