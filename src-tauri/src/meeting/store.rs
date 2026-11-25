@@ -4722,25 +4722,34 @@ impl MeetingStore {
             needle => Some(like_contains(needle)),
         };
         let mut statement = connection.prepare(&format!(
-            "SELECT m.id, m.title, m.phase, m.created_at_utc_ms, m.processing_status,
-                    (SELECT SUM(w.end_offset_ns - w.start_offset_ns)
-                       FROM meeting_capture_windows w
-                      WHERE w.session_id = m.id AND w.end_offset_ns IS NOT NULL),
-                    json_extract(({READABLE_ARTIFACT_CONTENT}), '$.ledger.headline'),
-                    json_extract(({READABLE_ARTIFACT_CONTENT}), '$.summary.text'),
-                    m.current_transcript_revision_id IS NOT NULL,
-                    json_extract(({READABLE_ARTIFACT_CONTENT}), '$.ledger.threads'),
-                    m.preflight_json
-             FROM meeting_sessions m
-             WHERE m.phase != 'deleting'
-               AND (?1 IS NULL OR m.created_at_utc_ms < ?1)
-               AND (?3 IS NULL OR m.created_at_utc_ms >= ?3)
-               AND (?4 IS NULL OR m.title LIKE ?4 ESCAPE '\\')
-               AND (?5 IS NULL OR EXISTS (
-                    SELECT 1 FROM meeting_folder_members f
-                     WHERE f.session_id = m.id AND f.folder_id = ?5))
-               AND ({status})
-             ORDER BY m.created_at_utc_ms DESC LIMIT ?2",
+            "WITH page AS MATERIALIZED (
+                SELECT m.id, m.title, m.phase, m.created_at_utc_ms, m.processing_status,
+                       (SELECT SUM(w.end_offset_ns - w.start_offset_ns)
+                          FROM meeting_capture_windows w
+                         WHERE w.session_id = m.id AND w.end_offset_ns IS NOT NULL)
+                           AS recorded_duration_ns,
+                       ({READABLE_ARTIFACT_CONTENT}) AS readable,
+                       m.current_transcript_revision_id IS NOT NULL AS has_transcript,
+                       m.preflight_json
+                FROM meeting_sessions m
+                WHERE m.phase != 'deleting'
+                  AND (?1 IS NULL OR m.created_at_utc_ms < ?1)
+                  AND (?3 IS NULL OR m.created_at_utc_ms >= ?3)
+                  AND (?4 IS NULL OR m.title LIKE ?4 ESCAPE '\\')
+                  AND (?5 IS NULL OR EXISTS (
+                       SELECT 1 FROM meeting_folder_members f
+                        WHERE f.session_id = m.id AND f.folder_id = ?5))
+                  AND ({status})
+                ORDER BY m.created_at_utc_ms DESC LIMIT ?2
+             )
+             SELECT id, title, phase, created_at_utc_ms, processing_status,
+                    recorded_duration_ns,
+                    json_extract(readable, '$.ledger.headline'),
+                    json_extract(readable, '$.summary.text'),
+                    has_transcript,
+                    json_extract(readable, '$.ledger.threads'),
+                    preflight_json
+             FROM page ORDER BY created_at_utc_ms DESC",
             status = status_predicate(filter.status),
         ))?;
         let rows = statement.query_map(
@@ -5466,6 +5475,17 @@ impl MeetingStore {
                 Ok(())
             },
         )
+    }
+
+    /// The session's source tracks: the one part of
+    /// [`Self::review_snapshot`] processing reads, without the transcript,
+    /// notes and artifacts it would also load.
+    pub(crate) fn source_tracks(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<MeetingTrackSnapshot>, StoreError> {
+        let connection = self.reader()?;
+        track_snapshots(&connection, session_id)
     }
 
     pub fn review_snapshot(

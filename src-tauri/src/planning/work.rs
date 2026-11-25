@@ -903,6 +903,7 @@ fn list(
     let mut reader = MeetingReader::new(meetings, user_name);
     let mut rows = Vec::new();
     let mut suggestions = BTreeMap::new();
+    let open = sync::OpenTitles::of(&all);
     for item in &all {
         if !wanted(item, query, owners.as_ref(), due.as_deref(), now_ms)
             || raised.as_ref().is_some_and(|ids| !ids.contains(&item.id))
@@ -923,7 +924,7 @@ fn list(
         {
             continue;
         }
-        let suggested = sync::suggestions(history, &mut reader, &all, item)?;
+        let suggested = sync::suggestions(history, &mut reader, &open, item)?;
         if !suggested.is_empty() {
             suggestions.insert(item.id.clone(), suggested);
         }
@@ -957,11 +958,16 @@ fn detail(
 ) -> StorageResult<WorkItemDetail> {
     let id = store::uuid(id)?;
     let item = items::item(history, &id)?;
-    let all = items::items(history, false)?;
+    let all = if item.status == WorkStatus::Triage {
+        items::items(history, false)?
+    } else {
+        Vec::new()
+    };
     let projects = project_choices(history)?;
     let context = RowContext::read(history, meetings, &projects)?;
     let mut reader = MeetingReader::new(meetings, user_name);
-    let suggestions = sync::suggestions(history, &mut reader, &all, &item)?;
+    let open = sync::OpenTitles::of(&all);
+    let suggestions = sync::suggestions(history, &mut reader, &open, &item)?;
     let mut evidence = store::task_evidence(history, &id)?;
     for link in &mut evidence {
         match meetings {

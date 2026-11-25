@@ -151,21 +151,30 @@ impl MeetingStore {
     /// corpus of hundreds of meetings is thousands of dot products, and an
     /// approximate index would add a second thing to keep true about a cache
     /// whose whole value is that it can be thrown away.
+    ///
+    /// The index key is checked once per meeting, in a `MATERIALIZED` CTE: as
+    /// a join term SQLite evaluates it for every chunk row, re-sorting the
+    /// meeting's artifact revisions each time.
     pub(crate) fn query_semantic_chunk_vectors(
         &self,
         model_revision: &str,
         before_utc_ms: Option<i64>,
     ) -> Result<Vec<SemanticChunkVector>, StoreError> {
-        let connection = self.connection()?;
+        let connection = self.reader()?;
         let mut statement = connection.prepare(&format!(
-            "SELECT c.chunk_id, c.session_id, m.created_at_utc_ms, c.embedding
-               FROM meeting_semantic_chunks c
-               JOIN meeting_sessions m ON m.id = c.session_id
-               JOIN meeting_semantic_index_state index_state ON index_state.session_id = m.id
-              WHERE c.model_revision = ?1
-                AND m.phase != 'deleting'
-                AND index_state.indexed_key = ({key})
-                AND (?2 IS NULL OR m.created_at_utc_ms <= ?2)",
+            "WITH fresh AS MATERIALIZED (
+                    SELECT m.id AS session_id, m.created_at_utc_ms AS created_at_utc_ms
+                      FROM meeting_sessions m
+                      JOIN meeting_semantic_index_state index_state
+                        ON index_state.session_id = m.id
+                     WHERE m.phase != 'deleting'
+                       AND index_state.indexed_key = ({key})
+                       AND (?2 IS NULL OR m.created_at_utc_ms <= ?2)
+             )
+             SELECT c.chunk_id, c.session_id, fresh.created_at_utc_ms, c.embedding
+               FROM fresh
+               JOIN meeting_semantic_chunks c ON c.session_id = fresh.session_id
+              WHERE c.model_revision = ?1",
             key = semantic_index_key_sql(),
         ))?;
         let rows = statement.query_map(params![model_revision, before_utc_ms], |row| {

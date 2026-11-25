@@ -495,6 +495,7 @@ fn sort_new(
     let all = items::items(history, false)?;
     let task_meetings = triage_hints::task_meetings(history)?;
     let mut reader = MeetingReader::new(meetings, user_name);
+    let open = sync::OpenTitles::of(&all);
     let change = Change::now("", WorkActor::Sona);
     let mut changed = Vec::new();
     for id in created {
@@ -511,7 +512,7 @@ fn sort_new(
         let suggestions = if fields.is_empty() {
             Vec::new()
         } else {
-            sync::suggestions(history, &mut reader, &all, item)?
+            sync::suggestions(history, &mut reader, &open, item)?
         };
         let fills = fillings(item, &rules, &from, &suggestions, fields);
         if fills.is_empty() {

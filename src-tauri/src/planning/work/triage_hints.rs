@@ -809,7 +809,8 @@ async fn offered(
         let item = items::item(history, task_id)?;
         let all = items::items(history, false)?;
         let mut reader = MeetingReader::new(meeting_conn, user_name.as_deref());
-        let suggestion = sync::suggestions(history, &mut reader, &all, &item)?
+        let open = sync::OpenTitles::of(&all);
+        let suggestion = sync::suggestions(history, &mut reader, &open, &item)?
             .into_iter()
             .find(|suggestion| suggestion.id == suggestion_id);
         Ok(suggestion.map(|suggestion| (item, suggestion)))
