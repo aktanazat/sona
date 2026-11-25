@@ -12,7 +12,10 @@
     "src-tauri/src/shortcut/handy_keys.rs",
     "src-tauri/src/identity_adoption.rs",
     "src-tauri/src/upstream_import.rs",
-    "src-tauri/src/autostart.rs"
+    "src-tauri/src/autostart.rs",
+    "mobile/SonaKeyboard/NextWords/en-words.txt",
+    "mobile/SonaKeyboard/NextWords/en.tsv",
+    "mobile/SonaKeyboard/emoji.tsv"
   ],
   "allowedLinePatterns": [
     "handy-computer",

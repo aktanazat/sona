@@ -40,6 +40,9 @@ bun run check:onboarding  # macos/: onboarding
 bun run check:library     # macos/: Library
 bun run check:recorder    # macos/: recorder
 bun run check:theme       # macos/: theme, text and control contrast
+bun run check:meeting-notes  # macos/: meeting notes
+bun run check:meeting-live   # macos/: meeting status payloads; builds every app source, a few minutes
+bun run check:work-views     # macos/: saved task views
 (cd cloudflare/sona-companion && bun run test)  # cloudflare/sona-companion/ and share-site/viewer.js
 ```
 

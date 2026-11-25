@@ -18,16 +18,18 @@ final class LibraryTests: XCTestCase {
     }
 
     /// The core reports a history file it cannot open as encrypted with a
-    /// reason. The Library must say it cannot be read: neither that it is
+    /// reason. Privacy must say it cannot be read: neither that it is
     /// encrypted at rest nor that it is stored unencrypted.
     func testLockedHistoryReadsAsUnreadable() throws {
         for reason in ["key_rejected", "key_unavailable", "encryption_unavailable"] {
-            let line = try storage(encrypted: true, reason: reason).line
-            XCTAssertTrue(line.hasSuffix("so history cannot be read."), line)
+            let status = try storage(encrypted: true, reason: reason)
+            XCTAssertEqual(status.word, "Locked")
+            XCTAssertTrue(status.sentence?.hasSuffix("so history cannot be read.") == true, status.sentence ?? "")
         }
-        XCTAssertEqual(try storage(encrypted: true, reason: nil).line, "Encrypted at rest")
-        let plain = try storage(encrypted: false, reason: "key_unavailable").line
-        XCTAssertTrue(plain.hasSuffix("so history is stored unencrypted."), plain)
+        XCTAssertEqual(try storage(encrypted: true, reason: nil).word, "Encrypted at rest")
+        let plain = try storage(encrypted: false, reason: "key_unavailable")
+        XCTAssertEqual(plain.word, "Not encrypted")
+        XCTAssertTrue(plain.sentence?.hasSuffix("so history is stored unencrypted.") == true, plain.sentence ?? "")
     }
 
     /// Imports bring dictations from earlier years. Their day heading names
