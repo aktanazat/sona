@@ -168,6 +168,12 @@ fn retain_no_speech_samples(retained: &mut Vec<f32>, samples: &[f32]) {
 /// the lane has samples the loop never sleeps at all.
 const LANE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// How long an idle consumer, one with no dictation or meeting, waits on its
+/// commands between discards of an always-on stream's samples. A command ends
+/// the wait at once; a Start then claims at most this much audio from before
+/// it, about one VAD frame.
+const IDLE_LANE_INTERVAL: Duration = Duration::from_millis(30);
+
 /// How long the consumer sleeps while waiting for the device callback to
 /// acknowledge a stop. The real wait is one buffer period (~10 ms built-in,
 /// ~100 ms on Bluetooth), so this only bounds the rounding error on stop.
@@ -1958,6 +1964,8 @@ fn run_consumer(inputs: ConsumerInputs) {
     // An overrun a meeting command cleared while a dictation was riding the
     // meeting's lane. The dictation still lost that audio, so its stop says so.
     let mut dictation_overrun: Option<CaptureOverrun> = None;
+    // The command that ended an idle wait, handled before any still queued.
+    let mut woken_by: Option<Cmd> = None;
 
     // Poll rather than block: the lane has no blocking primitive by design, and
     // commands must keep flowing even when a disconnected device stops producing
@@ -1968,7 +1976,7 @@ fn run_consumer(inputs: ConsumerInputs) {
         // this iteration. Draining first would discard one buffer period
         // (~10 ms built-in, up to ~100 ms on Bluetooth) at every start.
         loop {
-            let cmd = match cmd_rx.try_recv() {
+            let cmd = match woken_by.take().map_or_else(|| cmd_rx.try_recv(), Ok) {
                 Ok(cmd) => cmd,
                 Err(mpsc::TryRecvError::Empty) => break,
                 // The recorder was dropped without close(); nothing can ever
@@ -2406,7 +2414,15 @@ fn run_consumer(inputs: ConsumerInputs) {
         };
 
         if drained == 0 {
-            std::thread::sleep(LANE_POLL_INTERVAL);
+            if recording || active_meeting.is_some() {
+                std::thread::sleep(LANE_POLL_INTERVAL);
+            } else {
+                match cmd_rx.recv_timeout(IDLE_LANE_INTERVAL) {
+                    Ok(cmd) => woken_by = Some(cmd),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
             continue;
         }
 
