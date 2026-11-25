@@ -244,7 +244,7 @@ struct DetailAttachments: View {
         .help("Attach files or a link. Drop files on the page or paste with ⌘V.")
         .accessibilityLabel("Attach")
         .popover(isPresented: $addingLink, arrowEdge: .bottom) {
-            AddLinkForm(itemId: row.id) { addingLink = false }
+            AddLinkForm(itemId: row.id, finishes: row.status.isOpen) { addingLink = false }
         }
     }
 
@@ -572,6 +572,8 @@ private struct AttachmentThumbnail: View {
 
 private struct AddLinkForm: View {
     let itemId: String
+    /// Offers to mark the task done with the link kept as the evidence.
+    var finishes = false
     let done: () -> Void
     @Environment(AppModel.self) private var model
     @State private var url = ""
@@ -608,6 +610,11 @@ private struct AddLinkForm: View {
             HStack {
                 Spacer()
                 Button("Cancel", action: done).keyboardShortcut(.cancelAction)
+                if finishes {
+                    Button("Add and mark done") { save(finishing: true) }
+                        .disabled(link == nil)
+                        .help("Keep the link as evidence and mark the task done")
+                }
                 Button("Add", action: add)
                     .keyboardShortcut(.defaultAction)
                     .disabled(link == nil)
@@ -626,12 +633,20 @@ private struct AddLinkForm: View {
     }
 
     private func add() {
+        save(finishing: false)
+    }
+
+    private func save(finishing: Bool) {
         guard let link = WorkAttachmentSource.linkText(url) else { return }
         let named = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let note = subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let model = model
         let itemId = itemId
-        Task { await model.attach([.link(link, title: named.isEmpty ? nil : named, subtitle: note.isEmpty ? nil : note)], to: itemId) }
+        Task {
+            await model.attach([.link(link, title: named.isEmpty ? nil : named, subtitle: note.isEmpty ? nil : note)], to: itemId)
+            guard finishing, model.work.mutationError == nil else { return }
+            model.changeWork { model.work.update([itemId], WorkPatch(status: .done)) }
+        }
         done()
     }
 }
