@@ -303,6 +303,7 @@ mod tests {
             SubmitRequest::Configured(AutoSubmitKey::Enter),
             SubmitRequest::Configured(AutoSubmitKey::CtrlEnter),
             SubmitRequest::Configured(AutoSubmitKey::CmdEnter),
+            SubmitRequest::Configured(AutoSubmitKey::ShiftEnter),
             SubmitRequest::SpokenEnter {
                 target: KeyboardFocus {
                     pid: Some(100),

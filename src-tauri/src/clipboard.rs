@@ -862,6 +862,20 @@ fn dispatch_return_key(enigo: &mut Enigo, key_type: AutoSubmitKey) -> Result<(),
                 .key(Key::Meta, Direction::Release)
                 .map_err(|e| format!("Failed to release Meta/Cmd key: {}", e))?;
         }
+        AutoSubmitKey::ShiftEnter => {
+            enigo
+                .key(Key::Shift, Direction::Press)
+                .map_err(|e| format!("Failed to press Shift key: {}", e))?;
+            enigo
+                .key(Key::Return, Direction::Press)
+                .map_err(|e| format!("Failed to press Return key: {}", e))?;
+            enigo
+                .key(Key::Return, Direction::Release)
+                .map_err(|e| format!("Failed to release Return key: {}", e))?;
+            enigo
+                .key(Key::Shift, Direction::Release)
+                .map_err(|e| format!("Failed to release Shift key: {}", e))?;
+        }
     }
 
     Ok(())
