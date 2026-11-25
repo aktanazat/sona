@@ -1392,3 +1392,7 @@ private struct DraftPanel: View {
 @objc private protocol OptionalDocumentIdentifier {
     var documentIdentifier: UUID? { get }
 }
+
+private final class ClickingInputView: UIInputView, UIInputViewAudioFeedback {
+    var enableInputClicksWhenVisible: Bool { true }
+}
