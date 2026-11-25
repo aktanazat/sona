@@ -1938,6 +1938,7 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_folder_remove_meeting,
             commands::meeting::meeting_folder_set_defaults,
             commands::meeting::meeting_folders_for_session,
+            commands::meeting::meeting_folder_suggestion,
             commands::meeting::meeting_pause,
             commands::meeting::meeting_resume,
             commands::meeting::meeting_stop,

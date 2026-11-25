@@ -9,6 +9,7 @@ struct ContextSuggestionsView: View {
     let revision: Int
     /// Shows the running capture's words at an offset, on the live screen.
     var showLive: ((Int64) -> Void)?
+    var calendarChanged: (() -> Void)?
     @Environment(AppModel.self) private var model
     @State private var suggestions: [FilingSuggestion] = []
     @State private var failure: String?
@@ -62,6 +63,7 @@ struct ContextSuggestionsView: View {
                         sessionId: sessionId, suggestionId: suggestion.id, accept: accept, change: change))
                 failure = nil
                 if accept, case .meeting = suggestion.target { model.live.recallNow(sessionId) }
+                if accept, case .event = suggestion.target { calendarChanged?() }
             } catch {
                 failure = error.localizedDescription
             }

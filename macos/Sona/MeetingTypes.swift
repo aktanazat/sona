@@ -1664,6 +1664,11 @@ struct MeetingFolderList: Decodable {
     let revision: Int
 }
 
+struct MeetingFolderSuggestion: Decodable {
+    let folderId: MeetingFolderId
+    let name: String
+}
+
 struct MeetingFolderMutationResult: Decodable {
     let receipt: MeetingOperationReceipt
     let folders: MeetingFolderList

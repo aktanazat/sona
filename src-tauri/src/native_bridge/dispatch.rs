@@ -3016,6 +3016,13 @@ pub(super) async fn call(
                     .await,
             )
         }
+        "meeting_folder_suggestion" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::meeting::meeting_folder_suggestion(app.state(), session_id).await,
+            )
+        }
         "meeting_pause" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
