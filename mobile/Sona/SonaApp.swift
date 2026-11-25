@@ -1,5 +1,6 @@
 import AppIntents
 import SwiftUI
+import UIKit
 
 @main
 struct SonaApp: App {
@@ -45,6 +46,9 @@ struct SonaApp: App {
                 AgentChatScreen(model: model, chat: model.chat)
             }
             .onOpenURL { model.handle($0) }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)) { _ in
+                Task { await model.recoverRecordings() }
+            }
             .onChange(of: scenePhase) { _, phase in if phase == .active { model.importKeyboardDictations() } }
         }
     }

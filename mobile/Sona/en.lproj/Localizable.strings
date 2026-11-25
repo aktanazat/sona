@@ -6,6 +6,9 @@
 "status.waiting" = "Waiting for network";
 "status.saved" = "Saved to your Mac";
 "status.notSaved" = "Recording not saved";
+"status.bookmarkNotSaved" = "Bookmark not saved";
+"title.recoveredRecording" = "Recovered recording";
+"library.recordingStillSaving" = "Try again when the recording finishes saving.";
 "status.microphoneOff" = "Microphone off in Settings";
 "status.microphoneUnavailable" = "Microphone did not start";
 "status.interrupted" = "Another app took the microphone";

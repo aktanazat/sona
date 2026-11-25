@@ -94,6 +94,8 @@ final class AppModel: NSObject, ObservableObject {
     private var pendingURL: URL?
 
     let recorder = PhoneRecorder()
+    private var recoveringRecordings = false
+    private var savingCaptureIDs: Set<UUID> = []
     let dictation = PhoneDictation()
     let callOffers = CallOfferService()
     private let microphoneActivity = MicrophoneLiveActivity()
@@ -156,6 +158,7 @@ final class AppModel: NSObject, ObservableObject {
          * one more attempt before it is reported as still here. */
         importKeyboardDictations()
         Task {
+            await recoverRecordings()
             await queue.retryParked()
             await drain()
             await refreshBoard()
@@ -171,7 +174,10 @@ final class AppModel: NSObject, ObservableObject {
         UserDefaults.standard.set(AppModel.consentVersion, forKey: AppModel.consentKey)
         consentAccepted = true
         /* The one notification prompt in the app, asked where its purpose is stated. */
-        Task { await callOffers.requestNotifications() }
+        Task {
+            await callOffers.requestNotifications()
+            await recoverRecordings()
+        }
         if let pendingURL { handle(pendingURL) }
     }
 
@@ -485,27 +491,105 @@ final class AppModel: NSObject, ObservableObject {
          * nothing else keeps Sona running until the recording is queued. */
         let saving = UIApplication.shared.beginBackgroundTask(withName: "Save recording")
         Task {
-            let kept = await enqueue(
-                audio: finished.audio,
-                recordedAtUtcMs: finished.recordedAtUtcMs,
-                title: chosenTitle.isEmpty ? AppModel.title(
-                    prefix: wasAfterCall
-                        ? NSLocalizedString("title.afterCall", comment: "")
-                        : NSLocalizedString("title.phone", comment: ""),
-                    utcMs: finished.recordedAtUtcMs
-                ) : chosenTitle,
-                notes: notes,
-                calendarEvent: event,
-                bookmarkOffsetsMs: finished.bookmarkOffsetsMs,
-                placeReading: place
-            )
+            let kept: Bool
+            do {
+                kept = try await keepCapture(
+                    finished.journal, audio: finished.audio,
+                    title: chosenTitle.isEmpty ? AppModel.title(
+                        prefix: wasAfterCall
+                            ? NSLocalizedString("title.afterCall", comment: "")
+                            : NSLocalizedString("title.phone", comment: ""),
+                        utcMs: finished.journal.recordedAtUtcMs
+                    ) : chosenTitle,
+                    notes: notes, calendarEvent: event, placeReading: place
+                )
+            } catch {
+                library.error = error.localizedDescription
+                kept = false
+            }
+            if !kept, !recorder.isRecording, recorder.mostRecentCaptureID == finished.journal.id, recorder.notice == nil {
+                recorder.notice = .notSaved
+            }
             if saving != .invalid { UIApplication.shared.endBackgroundTask(saving) }
             await drain()
-            if kept && !recorder.isRecording && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
+            if kept && !recorder.isRecording && recorder.mostRecentCaptureID == finished.journal.id
+                && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
                 meetingTitle = ""
                 meetingNotes = ""
             }
         }
+    }
+
+    func recoverRecordings() async {
+        guard consentAccepted, UIApplication.shared.isProtectedDataAvailable, !recoveringRecordings else { return }
+        recoveringRecordings = true
+        defer { recoveringRecordings = false }
+        let root = recorder.captureRoot
+        var queuedRecovery = false
+        do {
+            let folders = try await Task.detached { try PhoneCaptureJournal.pending(under: root) }.value
+            for folder in folders {
+                guard let id = UUID(uuidString: folder.lastPathComponent),
+                      !recorder.capturesStartedThisRun.contains(id)
+                else { continue }
+                do {
+                    let journal = try await Task.detached { try PhoneCaptureJournal.load(from: folder) }.value
+                    let title = AppModel.title(prefix: NSLocalizedString("title.recoveredRecording", comment: ""),
+                                               utcMs: journal.recordedAtUtcMs)
+                    if try await keepCapture(journal, audio: nil, title: title) { queuedRecovery = true }
+                } catch { library.error = error.localizedDescription }
+            }
+        } catch { library.error = error.localizedDescription }
+        if queuedRecovery { await drain() }
+    }
+
+    private func keepCapture(
+        _ journal: PhoneCaptureJournal, audio: CapturedAudio?, title: String, notes: String = "",
+        calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
+        placeReading: DeviceRecordingManifest.PlaceReading? = nil
+    ) async throws -> Bool {
+        savingCaptureIDs.insert(journal.id)
+        defer { savingCaptureIDs.remove(journal.id) }
+        let root = recorder.captureRoot
+        let directory = journal.directory(under: root)
+        let captured: CapturedAudio?
+        if let audio, audio.byteLength > 0 {
+            captured = audio
+        } else {
+            captured = try await Task.detached { try journal.recoverAudio(under: root) }.value
+        }
+        guard let captured else {
+            try Self.removePendingCapture(at: directory)
+            return false
+        }
+        let date = Date(timeIntervalSince1970: Double(journal.recordedAtUtcMs) / 1000)
+        let note = try await library.keepRecording(id: journal.id, title: title, notes: notes, date: date, audio: captured)
+        _ = try await queue.enqueue(
+            audio: captured, recordedAtUtcMs: journal.recordedAtUtcMs, title: note.title, notes: note.text,
+            calendarEvent: calendarEvent, bookmarkOffsetsMs: journal.bookmarkOffsetsMs.filter { $0 <= captured.durationMs },
+            placeReading: placeReading, captureDirectory: directory
+        )
+        return true
+    }
+
+    func deleteLocalNote(_ note: PhoneNote) {
+        guard !savingCaptureIDs.contains(note.id) else {
+            library.error = NSLocalizedString("library.recordingStillSaving", comment: "")
+            return
+        }
+        do {
+            if note.kind == .meeting {
+                try Self.removePendingCapture(at: recorder.captureRoot.appending(path: note.id.uuidString))
+            }
+            try library.delete(note)
+        } catch {
+            library.error = error.localizedDescription
+        }
+    }
+
+    private static func removePendingCapture(at directory: URL) throws {
+        do { try FileManager.default.removeItem(at: directory) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {}
     }
 
     @discardableResult

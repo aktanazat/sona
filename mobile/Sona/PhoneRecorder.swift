@@ -12,6 +12,7 @@ enum RecorderNotice {
     case interrupted
     case activityClosed
     case notSaved
+    case bookmarkNotSaved
 
     var key: LocalizedStringKey {
         switch self {
@@ -20,6 +21,7 @@ enum RecorderNotice {
         case .interrupted: return "status.interrupted"
         case .activityClosed: return "status.activityClosed"
         case .notSaved: return "status.notSaved"
+        case .bookmarkNotSaved: return "status.bookmarkNotSaved"
         }
     }
 }
@@ -59,9 +61,8 @@ final class InputLevelMeter: ObservableObject {
 
 /// The phone's microphone capture.
 ///
-/// Nothing here starts without `start()` being called from a tap, and every capture is
-/// finalised on disk before the caller sees it, so an interruption costs the tail of a
-/// recording and never the whole of it.
+/// Capture starts only on request. The protected PCM file stays discoverable
+/// until the outbox takes ownership, even if the recording process ends first.
 @MainActor
 final class PhoneRecorder: ObservableObject {
     @Published private(set) var isRecording = false
@@ -71,15 +72,21 @@ final class PhoneRecorder: ObservableObject {
     /// Moments bookmarked in the running recording, in milliseconds from its start.
     @Published private(set) var bookmarks: [Int64] = []
     let meter = InputLevelMeter()
+    let captureRoot: URL
 
     private let engine = AVAudioEngine()
     private var resampler: PCMResampler?
     private var startedAt: Date?
+    private var capture: PhoneCaptureJournal?
+    private(set) var capturesStartedThisRun: Set<UUID> = []
+    private(set) var mostRecentCaptureID: UUID?
     private var ticker: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
     private var activity: Activity<RecordingActivityAttributes>?
 
-    init() {
+    init(captureRoot: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appending(path: "unfinished-recordings", directoryHint: .isDirectory)) {
+        self.captureRoot = captureRoot
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(),
@@ -120,11 +127,13 @@ final class PhoneRecorder: ObservableObject {
     func start(requiringActivity: Bool = false) throws {
         guard !isRecording else { return }
         let startedAt = Date()
+        let capture = PhoneCaptureJournal(id: UUID(), recordedAtUtcMs: Int64(startedAt.timeIntervalSince1970 * 1000))
         let activity = try? Activity.request(
             attributes: RecordingActivityAttributes(startedAt: startedAt),
             content: activityContent(bookmarks: 0)
         )
         if requiringActivity && activity == nil { throw LiveActivityRefused() }
+        var hasTap = false
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.record, mode: .default, options: MicrophoneChoice.categoryOptions)
@@ -132,9 +141,9 @@ final class PhoneRecorder: ObservableObject {
             try MicrophoneChoice.apply(to: session)
             let input = engine.inputNode
             let format = input.inputFormat(forBus: 0)
-            let url = FileManager.default.temporaryDirectory
-                .appending(path: "capture-\(UUID().uuidString).pcm")
-            let resampler = try PCMResampler(url: url, inputFormat: format)
+            try capture.begin(under: captureRoot)
+            capturesStartedThisRun.insert(capture.id)
+            let resampler = try PCMResampler(url: capture.audioURL(under: captureRoot), inputFormat: format, existingFile: true)
             self.resampler = resampler
             /* The tap runs on a render thread and is the only writer until `stop()` removes
              * it, which is also what drains the last callback before `finish()` reads. */
@@ -147,13 +156,20 @@ final class PhoneRecorder: ObservableObject {
                     meter.push(level)
                 }
             }
+            hasTap = true
             engine.prepare()
             try engine.start()
         } catch {
+            if hasTap { engine.inputNode.removeTap(onBus: 0) }
+            engine.stop()
+            resampler = nil
+            try? AVAudioSession.sharedInstance().setActive(false, options: [])
             if let activity { Task { await activity.end(nil, dismissalPolicy: .immediate) } }
             throw error
         }
         self.startedAt = startedAt
+        mostRecentCaptureID = capture.id
+        self.capture = capture
         elapsed = 0
         bookmarks = []
         isRecording = true
@@ -209,15 +225,18 @@ final class PhoneRecorder: ObservableObject {
 
     /// Bookmark this moment of the running recording.
     func bookmark() {
-        guard isRecording, let startedAt else { return }
-        bookmarks.append(Int64(max(0, Date().timeIntervalSince(startedAt)) * 1000))
+        guard isRecording, let startedAt, var capture else { return }
+        capture.bookmarkOffsetsMs.append(Int64(max(0, Date().timeIntervalSince(startedAt) * 1000)))
+        do { try capture.save(under: captureRoot) }
+        catch { notice = .bookmarkNotSaved; return }
+        self.capture = capture
+        bookmarks = capture.bookmarkOffsetsMs
         updateActivity()
     }
 
-    /// Stop and hand over the finished bytes with the wall-clock start of the capture and
-    /// what was bookmarked in it.
-    func stop() -> (audio: CapturedAudio, recordedAtUtcMs: Int64, bookmarkOffsetsMs: [Int64])? {
-        guard isRecording, let resampler, let startedAt else { return nil }
+    /// Stop the writer before handing its journal to the library and outbox.
+    func stop() -> (journal: PhoneCaptureJournal, audio: CapturedAudio?)? {
+        guard isRecording, let resampler, let capture else { return nil }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         ticker?.cancel()
@@ -226,14 +245,14 @@ final class PhoneRecorder: ObservableObject {
         meter.reset()
         self.resampler = nil
         self.startedAt = nil
+        self.capture = nil
         if let activity {
             self.activity = nil
             Task { await activity.end(nil, dismissalPolicy: .immediate) }
         }
         RecordingControlState.set(false)
         try? AVAudioSession.sharedInstance().setActive(false, options: [])
-        guard let audio = try? resampler.finish(), audio.byteLength > 0 else { return nil }
-        return (audio, Int64(startedAt.timeIntervalSince1970 * 1000), bookmarks)
+        return (capture, try? resampler.finish())
     }
 
     /// A call or another app taking the input ends the capture rather than pausing it:
