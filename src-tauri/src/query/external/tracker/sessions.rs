@@ -417,9 +417,20 @@ impl Tracker<'_> {
         }
         let set_doer = matches!(agents::autonomy(self.app), WorkAutonomy::Apply);
         let operation_id = args.write.fresh_operation_id();
+        // The command line runs in the agent's own folder, the one its changes are in.
+        let folder = std::env::current_dir()
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_owned));
         if args.dry_run {
             let session = self.rehearse(|tx| {
-                let id = sessions::start(tx, &row.item.id, &agent, set_doer, now_ms())?;
+                let id = sessions::start(
+                    tx,
+                    &row.item.id,
+                    &agent,
+                    set_doer,
+                    folder.as_deref(),
+                    now_ms(),
+                )?;
                 sessions::session(tx, &id, now_ms())
             })?;
             return Ok(Self::session_answer(
@@ -432,8 +443,15 @@ impl Tracker<'_> {
             ));
         }
         let replayed = self.ran(&operation_id)?;
-        let session = sessions::start_as(self.app, &agent, &operation_id, &row.item.id, set_doer)
-            .map_err(|message| self.write_refusal(message, &operation_id, "The task"))?;
+        let session = sessions::start_as(
+            self.app,
+            &agent,
+            &operation_id,
+            &row.item.id,
+            set_doer,
+            folder.as_deref(),
+        )
+        .map_err(|message| self.write_refusal(message, &operation_id, "The task"))?;
         Ok(Self::session_answer(
             SessionAction::Started,
             false,

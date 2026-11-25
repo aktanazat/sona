@@ -3,6 +3,7 @@ use crate::agent_hook_wire::{
     HookResponse, PolicyProjection, RuntimePaths, SessionBinding, WriteMode, MAX_REQUEST_BYTES,
     PROTOCOL_GENERATION, REQUEST_TTL_MS, SCHEMA_VERSION,
 };
+use crate::planning::work::sessions::{Watched, WatchedStep};
 use crate::settings::{
     AgentBridgeAgent, AgentBridgePermissionDecision, AgentBridgePermissionRule, AgentBridgeSettings,
 };
@@ -322,6 +323,9 @@ pub struct AgentBridgeCore {
     /// Sessions a prompt started on a task since the worker last asked: the
     /// agent, the session and the task the prompt named.
     started: Vec<(AgentBridgeAgent, String, String)>,
+    /// What sessions on a task did since the worker last asked, for the
+    /// task's own record of each session.
+    steps: Vec<(AgentBridgeAgent, WatchedStep)>,
 }
 
 impl AgentBridgeCore {
@@ -341,6 +345,7 @@ impl AgentBridgeCore {
             revision: 0,
             next_id: 0,
             started: Vec::new(),
+            steps: Vec::new(),
         })
     }
 
@@ -560,6 +565,11 @@ impl AgentBridgeCore {
     /// See [`AgentBridgeCore::started`].
     pub fn take_started(&mut self) -> Vec<(AgentBridgeAgent, String, String)> {
         std::mem::take(&mut self.started)
+    }
+
+    /// See [`AgentBridgeCore::steps`].
+    pub(crate) fn take_steps(&mut self) -> Vec<(AgentBridgeAgent, WatchedStep)> {
+        std::mem::take(&mut self.steps)
     }
 
     pub fn requests(&self) -> Vec<AgentBridgeObservedRequest> {
@@ -1226,6 +1236,31 @@ impl AgentBridgeCore {
                 .or_else(|| request.event.tool.as_ref().and_then(claimed_task))
             {
                 session.task = Some(task);
+            }
+            let step = match kind {
+                _ if started.is_some() => Some(Watched::Started),
+                AgentBridgeRequestKind::PreToolUse | AgentBridgeRequestKind::PermissionRequest => {
+                    request.event.tool.as_ref().map(|tool| Watched::Tool {
+                        name: tool.name.clone(),
+                        input: tool.input.as_ref().map(tool_input_preview),
+                    })
+                }
+                AgentBridgeRequestKind::Stop => Some(Watched::Turn {
+                    message: request.event.message.as_deref().map(visible_preview),
+                }),
+                _ => None,
+            };
+            if let (Some(task), Some(step)) = (session.task.clone(), step) {
+                self.steps.push((
+                    agent,
+                    WatchedStep {
+                        session_id: session_id.clone(),
+                        task,
+                        folder: request.event.workspace_root.clone(),
+                        event_id: request.invocation_id.clone(),
+                        step,
+                    },
+                ));
             }
             if let Some(task) = started {
                 self.started.push((agent, session_id.clone(), task));
@@ -2036,7 +2071,7 @@ impl AgentBridgeManager {
                 if !settings.master_enabled {
                     break;
                 }
-                let (status, requests, started, wait) = {
+                let (status, requests, started, steps, wait) = {
                     let mut core = lock_recover(&core);
                     let now = now_ms();
                     let wait = match core.tick(&settings, now) {
@@ -2047,6 +2082,7 @@ impl AgentBridgeManager {
                         core.status(&settings),
                         core.requests(),
                         core.take_started(),
+                        core.take_steps(),
                         wait,
                     )
                 };
@@ -2070,6 +2106,13 @@ impl AgentBridgeManager {
                         &task,
                     );
                 }
+                crate::planning::work::agents::watch_sessions(
+                    &app,
+                    steps
+                        .into_iter()
+                        .map(|(agent, step)| (doer_name(agent), step))
+                        .collect(),
+                );
                 let active_request_ids = requests
                     .iter()
                     .map(|request| request.id.clone())
@@ -4572,6 +4615,84 @@ mod tests {
         );
         core.tick(&settings, 1_003)?;
         assert!(core.take_started().is_empty());
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A session on a task leaves the task a record of what it did: that it
+    /// started, each tool it asked for, and each turn it finished, in the
+    /// folder it works in. A session on no task leaves nothing.
+    #[test]
+    fn a_session_on_a_task_reports_its_steps_for_the_task() -> Result<(), Box<dyn Error>> {
+        let root = test_root("watched-steps")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let app_id = opaque_hash(&[b"app-watched-steps"]);
+        let binding = binding(&root)?;
+        let settings = enabled_settings(binding.project_hash.clone());
+        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
+        core.start(&settings, 1_000)?;
+        let bash = Some(CanonicalTool {
+            name: "Bash".to_string(),
+            use_id: None,
+            input: Some(json!({ "command": "cargo test" })),
+        });
+        persist_event(
+            &paths,
+            &app_id,
+            binding.clone(),
+            event(CanonicalEventKind::PermissionRequest, &root, bash.clone()),
+            b"before the task",
+            1_001,
+        )?;
+        core.tick(&settings, 1_002)?;
+        assert!(core.take_steps().is_empty());
+        let mut prompt = event(CanonicalEventKind::UserPromptSubmit, &root, None);
+        prompt.prompt = Some(format!(
+            "{} S-12: Book the offsite venue",
+            crate::planning::work::agents::PROMPT_MARK
+        ));
+        let mut stop = event(CanonicalEventKind::Stop, &root, None);
+        stop.message = Some("Booked the hall for Friday.".to_owned());
+        let steps: [(CanonicalEvent, &[u8]); 3] = [
+            (prompt, b"prompt"),
+            (event(CanonicalEventKind::PermissionRequest, &root, bash), b"bash"),
+            (stop, b"stop"),
+        ];
+        for (at, (step, raw)) in (1_003..).step_by(2).zip(steps) {
+            persist_event(&paths, &app_id, binding.clone(), step, raw, at)?;
+            core.tick(&settings, at + 1)?;
+        }
+        let folder = root.to_str().map(ToOwned::to_owned);
+        let taken: Vec<(AgentBridgeAgent, String, Option<String>, Watched)> = core
+            .take_steps()
+            .into_iter()
+            .map(|(agent, step)| (agent, step.task, step.folder, step.step))
+            .collect();
+        let task = || "S-12".to_owned();
+        assert_eq!(
+            taken,
+            [
+                (AgentBridgeAgent::Claude, task(), folder.clone(), Watched::Started),
+                (
+                    AgentBridgeAgent::Claude,
+                    task(),
+                    folder.clone(),
+                    Watched::Tool {
+                        name: "Bash".to_owned(),
+                        input: Some("cargo test".to_owned()),
+                    },
+                ),
+                (
+                    AgentBridgeAgent::Claude,
+                    task(),
+                    folder,
+                    Watched::Turn {
+                        message: Some("Booked the hall for Friday.".to_owned()),
+                    },
+                ),
+            ]
+        );
         core.stop();
         fs::remove_dir_all(root)?;
         Ok(())

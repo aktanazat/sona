@@ -1754,7 +1754,7 @@ fn claim(conn: &mut Connection, now: i64) -> Result<Option<Claimed>> {
         params![run_id, now],
     )?;
     if let Some(task) = &task_id {
-        if let Ok(session_id) = sessions::start(&tx, task, LOOP_AGENT, false, now) {
+        if let Ok(session_id) = sessions::start(&tx, task, LOOP_AGENT, false, None, now) {
             tx.execute(
                 "UPDATE planning_loop_runs SET session_id = ?2 WHERE id = ?1",
                 params![run_id, session_id],
