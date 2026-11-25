@@ -447,6 +447,7 @@ fn a_person_is_found_by_an_alias_and_a_shared_part_of_a_name_is_refused() {
 
 /// An agent reading a long list a page at a time, passing each page's
 /// next_cursor back, gets every task once, in the order one long page has.
+/// An estimate total covers the same matching tasks on every page.
 #[test]
 fn paging_with_the_cursor_reads_every_task_once_in_order() {
     let shapes = [
@@ -469,6 +470,12 @@ fn paging_with_the_cursor_reads_every_task_once_in_order() {
                 created_at_ms: at,
                 updated_at_ms: at,
                 sort_order,
+                estimate: match number {
+                    1 => Some(3),
+                    6 => Some(8),
+                    7 => Some(0),
+                    _ => None,
+                },
                 ..task()
             })
         })
@@ -484,11 +491,27 @@ fn paging_with_the_cursor_reads_every_task_once_in_order() {
         let numbers = |listed: &super::ExternalWorkPage| -> Vec<i64> {
             listed.entries.tasks.iter().map(|task| task.number).collect()
         };
-        let whole = numbers(&page(rows.clone(), &paging(100, None), &board).expect("one page"));
+        let all = page(rows.clone(), &paging(100, None), &board, None).expect("one page");
+        assert!(serde_json::to_value(&all)
+            .expect("the list reply")
+            .get("estimate_total")
+            .is_none());
+        let whole = numbers(&all);
         let mut paged = Vec::new();
         let mut after = None;
         for _ in 0..rows.len() {
-            let listed = page(rows.clone(), &paging(2, after), &board).expect("a page");
+            let listed = page(
+                rows.clone(),
+                &paging(2, after),
+                &board,
+                Some(super::WorkSum::Estimate),
+            )
+            .expect("a page");
+            assert_eq!(
+                serde_json::to_value(&listed).expect("the list reply")["estimate_total"],
+                11,
+                "{order:?}"
+            );
             paged.extend(numbers(&listed));
             match listed.next_cursor {
                 Some(text) => after = Some(cursor(&text).expect("the cursor reads back")),

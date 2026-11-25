@@ -209,6 +209,10 @@ handshake, so Sona shows which agent made it.
 
 `sona_work_list` with `ready:true` returns Todo tasks nothing open blocks, and
 `due` narrows any list to due windows such as `overdue,today` or `next:14`.
+For a regular list, `sum: "estimate"` (`sona work list --sum estimate`) returns
+`estimate_total` across all matching tasks you can read, not just this page.
+Tasks without an estimate add zero.
+
 `filter` is a list of conditions that must all hold, passed to `--filter` as
 one JSON argument: `[{"field":"label","op":"includes_all","values":["bug","ui"]}]`.
 Fields are `status`, `priority`, `owner`, `project`, `milestone`, `label`,

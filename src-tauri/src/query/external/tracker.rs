@@ -550,6 +550,9 @@ pub struct ListArgs {
     pub view: Option<String>,
     #[command(flatten)]
     pub page: PageArgs,
+    /// Sum points across every matching task, not just the current page.
+    #[arg(long, value_enum)]
+    pub sum: Option<WorkSum>,
     /// Only tasks that came from these: meeting, dictation, agent, person.
     #[arg(long, value_enum, value_delimiter = ',', value_name = "SOURCE")]
     pub source: Vec<SourceArg>,
@@ -565,6 +568,11 @@ pub struct ListArgs {
     /// understand.
     #[arg(long = "where", value_name = "WORDS")]
     pub where_words: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum WorkSum {
+    Estimate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -2411,6 +2419,8 @@ pub struct ExternalWorkPage {
     pub entries: PageTasks,
     /// Matching tasks before `--limit`.
     pub total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_total: Option<u64>,
     pub has_more: bool,
     /// Pass as --cursor for the next page; none on the last.
     pub next_cursor: Option<String>,
@@ -3541,7 +3551,7 @@ impl Tracker<'_> {
             let cutoff = now_ms() - STALE_AFTER_MS;
             rows.retain(|row| row.item.status.is_open() && row.item.updated_at_ms < cutoff);
         }
-        let mut listed = page(rows, &args.page, &board)?;
+        let mut listed = page(rows, &args.page, &board, args.sum)?;
         listed.read_as = read_as;
         Ok(WorkAnswer::Page(listed))
     }
@@ -3557,7 +3567,7 @@ impl Tracker<'_> {
         )?;
         let mut rows = self.listed(&board.fence, query).await?.items;
         rows.retain(|row| row.blocked_by_open_count == 0);
-        Ok(WorkAnswer::Page(page(rows, &args.page, &board)?))
+        Ok(WorkAnswer::Page(page(rows, &args.page, &board, None)?))
     }
 
     async fn mine(&self, args: &MineArgs) -> Result<WorkAnswer, ExternalError> {
@@ -5046,6 +5056,7 @@ fn page(
     mut rows: Vec<WorkItemRow>,
     paging: &PageArgs,
     board: &Board,
+    sum: Option<WorkSum>,
 ) -> Result<ExternalWorkPage, ExternalError> {
     let order = paging.order()?;
     rows.sort_by_cached_key(|row| place(row, order));
@@ -5064,6 +5075,13 @@ fn page(
             fields: paging.fields.clone(),
         },
         total: rows.len(),
+        estimate_total: sum.map(|sum| match sum {
+            WorkSum::Estimate => rows
+                .iter()
+                .filter_map(|row| row.item.estimate)
+                .map(u64::from)
+                .sum(),
+        }),
         has_more,
         next_cursor: shown
             .last()
@@ -6579,6 +6597,9 @@ impl WorkAnswer {
                 }
                 for task in &page.entries.tasks {
                     task_line(&mut text, task, &today);
+                }
+                if let Some(points) = page.estimate_total {
+                    let _ = writeln!(text, "Matching estimate points: {points}");
                 }
                 if page.has_more {
                     let _ = writeln!(

@@ -2739,6 +2739,11 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             'The filter in plain words, such as "high priority bugs due this week that are mine". The answer\'s read_as gives each condition the words were read as (the same shape filter takes) and not_understood the words that did not narrow the list; check it before trusting the list. Not with ready.',
         },
+        sum: {
+          type: "string",
+          enum: ["estimate"],
+          description: "Return estimate_total across all matching tasks, before pagination. Not with ready.",
+        },
         limit: LIMIT,
         order_by: {
           type: "string",
@@ -2759,29 +2764,37 @@ export const TOOLS: readonly ToolDefinition[] = [
       },
       additionalProperties: false,
     },
-    argv: (input) => [
-      "work",
-      flag(input, "ready") ? "ready" : "list",
-      ...scopeFlags(input),
-      ...assigned("--status", text(input, "status")),
-      ...assigned("--view", text(input, "view")),
-      ...(flag(input, "archived") ? ["--archived"] : []),
-      ...(flag(input, "snoozed") ? ["--snoozed"] : []),
-      ...(flag(input, "ready") ? [] : assigned("--source", text(input, "source"))),
-      ...(flag(input, "ready") || !flag(input, "stale") ? [] : ["--stale"]),
-      ...(flag(input, "ready") ? [] : assigned("--delegate", text(input, "delegate"))),
-      ...(flag(input, "ready") ? [] : assigned("--parent", text(input, "parent"))),
-      ...(flag(input, "ready") ? [] : assigned("--cycle-scope", text(input, "cycle_scope"))),
-      ...(flag(input, "ready") ? [] : assigned("--for", text(input, "for"))),
-      ...(flag(input, "ready") ? [] : assigned("--completed", text(input, "completed"))),
-      ...conditions(input),
-      ...(flag(input, "ready") ? [] : assigned("--where", text(input, "where"))),
-      ...assigned("--limit", count(input, "limit")),
-      ...assigned("--order-by", text(input, "order_by")),
-      ...assigned("--cursor", text(input, "cursor")),
-      ...assigned("--fields", text(input, "fields")),
-      "--json",
-    ],
+    argv: (input) => {
+      const ready = flag(input, "ready");
+      const sum = text(input, "sum");
+      if (sum !== null && ready) {
+        throw new SonaInputError("sum is available for list, not ready.");
+      }
+      return [
+        "work",
+        ready ? "ready" : "list",
+        ...scopeFlags(input),
+        ...assigned("--status", text(input, "status")),
+        ...assigned("--view", text(input, "view")),
+        ...(flag(input, "archived") ? ["--archived"] : []),
+        ...(flag(input, "snoozed") ? ["--snoozed"] : []),
+        ...(ready ? [] : assigned("--source", text(input, "source"))),
+        ...(ready || !flag(input, "stale") ? [] : ["--stale"]),
+        ...(ready ? [] : assigned("--delegate", text(input, "delegate"))),
+        ...(ready ? [] : assigned("--parent", text(input, "parent"))),
+        ...(ready ? [] : assigned("--cycle-scope", text(input, "cycle_scope"))),
+        ...(ready ? [] : assigned("--for", text(input, "for"))),
+        ...(ready ? [] : assigned("--completed", text(input, "completed"))),
+        ...conditions(input),
+        ...(ready ? [] : assigned("--where", text(input, "where"))),
+        ...assigned("--sum", sum),
+        ...assigned("--limit", count(input, "limit")),
+        ...assigned("--order-by", text(input, "order_by")),
+        ...assigned("--cursor", text(input, "cursor")),
+        ...assigned("--fields", text(input, "fields")),
+        "--json",
+      ];
+    },
   },
   {
     name: "sona_work_get",
