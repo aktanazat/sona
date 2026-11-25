@@ -538,6 +538,8 @@ struct MarkdownBody: View {
         Text(attributed(text))
     }
 
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
     private static func attributed(_ text: String) -> AttributedString {
         var string = (try? AttributedString(
             markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -549,7 +551,7 @@ struct MarkdownBody: View {
             let end = string.characters.index(start, offsetBy: plain.distance(from: range.lowerBound, to: range.upperBound))
             if string[start..<end].link == nil { string[start..<end].link = url }
         }
-        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+        if let detector = linkDetector {
             for match in detector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
                 guard let range = Range(match.range, in: plain) else { continue }
                 link(range, to: match.url)
