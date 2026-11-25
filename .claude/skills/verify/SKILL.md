@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Smoke-test a change against a real running Sona core before committing or calling a change done in this repo. Builds the debug core, runs it as a throwaway portable copy, drives it over the native shell socket and checks the headless corpus verbs.
+description: Smoke-test a change against a real running Sona core before committing or calling a change done in this repo, and record a labeled video when testing the Mac app by hand. Builds the debug core, runs it as a throwaway portable copy, drives it over the native shell socket and checks the headless corpus verbs.
 ---
 
 # Verify
@@ -49,9 +49,47 @@ socket in `driveCore`.
 ## Not covered
 
 - Frontend (`src/`): also run `bun run build` (typecheck and static export).
-- The SwiftUI shell (`macos/`): needs Xcode and the team's signing.
+- The SwiftUI shell (`macos/`): needs Xcode and the team's signing. Test it
+  by hand and record the test (below).
 - Anything that reads the encrypted corpus or other keychain-backed state.
 - Rust unit tests: `bun run test:backend`.
+
+## Recording a test of the Mac app
+
+A change to something a person sees or does in the Mac app (dictation, the
+recorder, meeting notes, onboarding) gets a video of the test, with each step
+labeled on screen as it happens. The video is the test: start recording,
+then drive the app through each step yourself.
+
+```bash
+R=.claude/skills/verify/record.ts
+bun $R screens                # one still per display; pick the agents' display
+bun $R start --title "Dictation pastes into Notes" --screen 4
+SESSION=<the path start printed>
+bun $R note "$SESSION" --setup "Portable profile, Notes open"
+bun $R note "$SESSION" --test "It should paste the dictated text"
+bun $R note "$SESSION" --check "Text appears in the note" --result passed
+bun $R stop "$SESSION"
+```
+
+`start` returns once the first frame is captured and records under
+`/private/var/tmp/sona-evidence/` unless `--out` says otherwise. `stop` ends
+the capture, burns the labels in, and writes `evidence.mp4`, `report.md` and
+one frame per check in `frames/`. It needs ffmpeg, Xcode's `swift`, and
+Screen Recording permission for the app running the agent.
+
+- Run Sona on a display set aside for agents
+  (`agent-display launch --app <app> --display Agents`) and record that
+  screen, never the one the developer is working on.
+- A label marks when you checked, not whether it passed. Look at the screen
+  before choosing `passed`, and open each frame in `frames/` before sharing.
+- A step you cannot run is `--result untested`, with the reason in the label.
+- Fill in the Caveats section of `report.md`. For a fix, name the old
+  failure and link its evidence.
+- Nothing secret on screen: passwords, keys, private notes. If a step needs
+  them, mark it `untested`.
+- Attach `evidence.mp4` to the PR through the GitHub comment box and paste
+  the report table; `gh` cannot upload video.
 
 ## Rules
 
