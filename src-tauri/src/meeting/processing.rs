@@ -2080,11 +2080,8 @@ impl MeetingProcessingService {
                 language: &plan.language,
             })
             .map_err(RunFailure::from)?;
-        let review = store
-            .review_snapshot(session_id)
-            .map_err(RunFailure::from)?;
+        let tracks = store.source_tracks(session_id).map_err(RunFailure::from)?;
         let origin = store.meeting_origin(session_id).map_err(RunFailure::from)?;
-        let tracks = review.tracks;
         self.enter_stage(session_id, progress, ProcessingStage::Speech);
         let abandoned = AtomicBool::new(false);
         thread::scope(|scope| {
@@ -2731,14 +2728,22 @@ impl MeetingProcessingService {
         let transient_embedding = diarized.embedding;
         let has_transient_embedding = transient_embedding.is_some();
         if !defer_microphone {
-            let segments = store
-                .transcript_segments_overlapping(
-                    transcript_revision_id,
-                    window.track_id,
-                    window.start_offset_ns,
-                    window.end_offset_ns,
-                )
-                .map_err(|_| ProcessingFailure::EngineFailure)?;
+            // Only Sortformer's lane passes `collect_window_evidence` false, and
+            // `diarize_lane` assigns every one of its segments again from the
+            // whole timeline once the pass ends, so its windows read and write
+            // no assignments of their own.
+            let segments = if collect_window_evidence {
+                store
+                    .transcript_segments_overlapping(
+                        transcript_revision_id,
+                        window.track_id,
+                        window.start_offset_ns,
+                        window.end_offset_ns,
+                    )
+                    .map_err(|_| ProcessingFailure::EngineFailure)?
+            } else {
+                Vec::new()
+            };
             if !segments.is_empty()
                 || source_kind != SourceKind::Microphone
                 || !collect_identity_evidence
@@ -3773,9 +3778,8 @@ impl MeetingProcessingService {
             super::learning::apply_series_priming(&mut asr_plan, &blob);
         }
         let tracks = store
-            .review_snapshot(session_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?
-            .tracks;
+            .source_tracks(session_id)
+            .map_err(|_| ProcessingFailure::EngineFailure)?;
         let mut cursors = live.cursors();
         let mut appended = 0_usize;
         for track in &tracks {
