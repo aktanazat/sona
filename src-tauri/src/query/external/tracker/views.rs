@@ -482,6 +482,9 @@ pub(super) fn page_text(text: &mut String, page: &ExternalWorkPage, today: &Toda
         }
         None => tree_lines(text, &page.entries.tasks, today, 0),
     }
+    if let Some(points) = page.estimate_total {
+        let _ = writeln!(text, "Matching estimate points: {points}");
+    }
     if let Some(facets) = &page.facets {
         for (field, counts) in facets {
             let counted: Vec<String> = counts

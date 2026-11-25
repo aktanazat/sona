@@ -681,6 +681,14 @@ pub struct ListArgs {
     /// milestone, estimate, delegate.
     #[arg(long, value_enum, value_delimiter = ',', value_name = "FIELD")]
     pub facets: Vec<views::FacetArg>,
+    /// Sum points across every matching task, not just the current page.
+    #[arg(long, value_enum)]
+    pub sum: Option<WorkSum>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum WorkSum {
+    Estimate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -2797,6 +2805,9 @@ pub struct ExternalWorkPage {
     pub entries: PageTasks,
     /// Matching tasks before `--limit`.
     pub total: usize,
+    /// Points across every matching task, when `--sum` asks for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_total: Option<u64>,
     pub has_more: bool,
     /// Pass as --cursor for the next page; none on the last.
     pub next_cursor: Option<String>,
@@ -4037,7 +4048,7 @@ impl Tracker<'_> {
             HashMap::new()
         };
         let facets = views::facets(&rows, &args.facets, &board, &milestones);
-        let mut listed = page(rows, &args.page, order, &board)?;
+        let mut listed = page(rows, &args.page, order, &board, args.sum)?;
         listed.read_as = read_as;
         listed.facets = facets;
         let sub_group_by = args
@@ -4077,7 +4088,7 @@ impl Tracker<'_> {
         let mut rows = self.listed(&board.fence, query).await?.items;
         rows.retain(|row| row.blocked_by_open_count == 0);
         let order = args.page.row_order(None)?;
-        Ok(WorkAnswer::Page(page(rows, &args.page, order, &board)?))
+        Ok(WorkAnswer::Page(page(rows, &args.page, order, &board, None)?))
     }
 
     async fn mine(&self, args: &MineArgs) -> Result<WorkAnswer, ExternalError> {
@@ -5655,6 +5666,7 @@ fn page(
     paging: &PageArgs,
     order: RowOrder,
     board: &Board,
+    sum: Option<WorkSum>,
 ) -> Result<ExternalWorkPage, ExternalError> {
     rows.sort_by_cached_key(|row| place(row, order));
     let start = paging.cursor.map_or(0, |cursor| {
@@ -5672,6 +5684,13 @@ fn page(
             fields: paging.fields.clone(),
         },
         total: rows.len(),
+        estimate_total: sum.map(|sum| match sum {
+            WorkSum::Estimate => rows
+                .iter()
+                .filter_map(|row| row.item.estimate)
+                .map(u64::from)
+                .sum(),
+        }),
         has_more,
         next_cursor: shown.last().filter(|_| has_more).map(|row| {
             Cursor {

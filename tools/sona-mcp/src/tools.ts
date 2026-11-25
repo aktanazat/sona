@@ -3026,6 +3026,11 @@ export const TOOLS: readonly ToolDefinition[] = [
           description:
             'The filter in plain words, such as "high priority bugs due this week that are mine". The answer\'s read_as gives each condition the words were read as (the same shape filter takes) and not_understood the words that did not narrow the list; check it before trusting the list. Not with ready.',
         },
+        sum: {
+          type: "string",
+          enum: ["estimate"],
+          description: "Return estimate_total across all matching tasks, before pagination. Not with ready.",
+        },
         limit: LIMIT,
         order_by: {
           type: "string",
@@ -3103,6 +3108,7 @@ export const TOOLS: readonly ToolDefinition[] = [
       ...(flag(input, "ready") ? [] : assigned("--sub-group-by", text(input, "sub_group_by"))),
       ...(flag(input, "ready") || !flag(input, "nested") ? [] : ["--tree"]),
       ...(flag(input, "ready") ? [] : assigned("--facets", text(input, "facets"))),
+      ...(flag(input, "ready") ? [] : assigned("--sum", text(input, "sum"))),
       ...assigned("--cursor", text(input, "cursor")),
       ...assigned("--fields", text(input, "fields")),
       "--json",
