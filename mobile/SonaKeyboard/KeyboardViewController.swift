@@ -767,6 +767,15 @@ final class KeyboardViewController: UIInputViewController {
         self.microphone = microphone
     }
 
+    /// A keyboard over its memory limit is ended by the system, so under pressure the page
+    /// is let go unless it is listening. The next appear or Dictate sets it up again.
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        guard let microphone, dictation.phase == .idle else { return }
+        microphone.detach()
+        self.microphone = nil
+    }
+
     /// Sona's own draft errors say what happened; anything else from the shared storage
     /// is one plain sentence, never the system's wording.
     private func show(_ error: Error) {
