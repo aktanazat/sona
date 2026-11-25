@@ -49,7 +49,10 @@ struct SonaApp: App {
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)) { _ in
                 Task { await model.recoverRecordings() }
             }
-            .onChange(of: scenePhase) { _, phase in if phase == .active { model.importKeyboardDictations() } }
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                model.setUploadRetryActive(phase == .active)
+                if phase == .active { model.importKeyboardDictations() }
+            }
         }
     }
 }
