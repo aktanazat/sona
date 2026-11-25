@@ -77,7 +77,10 @@ pub(super) fn handle_shortcut_event(
         ShortcutIntent::Cancel => {
             let audio_manager = app.state::<Arc<AudioRecordingManager>>();
             if is_pressed && audio_manager.is_recording() {
-                crate::utils::cancel_current_operation(app);
+                crate::utils::cancel_current_operation(
+                    app,
+                    crate::transcription_coordinator::CancelRequest::Ask,
+                );
             }
         }
         ShortcutIntent::Send => {

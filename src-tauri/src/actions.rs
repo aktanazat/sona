@@ -397,8 +397,14 @@ pub fn start_transcription(
 }
 
 /// Finish the recording started with this exact run plan.
-pub fn stop_transcription(app: &AppHandle, binding_id: &str, shortcut_str: &str, run: RunPlan) {
-    TranscribeAction { run }.stop(app, binding_id, shortcut_str);
+pub fn stop_transcription(
+    app: &AppHandle,
+    binding_id: &str,
+    shortcut_str: &str,
+    run: RunPlan,
+    focus_before_warning: Option<delivery::KeyboardFocus>,
+) {
+    TranscribeAction { run }.stop(app, binding_id, shortcut_str, focus_before_warning);
 }
 
 /// Field name for structured output JSON schema
@@ -2247,7 +2253,13 @@ impl TranscribeAction {
         started
     }
 
-    fn stop(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
+    fn stop(
+        &self,
+        app: &AppHandle,
+        binding_id: &str,
+        _shortcut_str: &str,
+        focus_before_warning: Option<delivery::KeyboardFocus>,
+    ) {
         // Prevent a slow microphone from emitting a ready event or start chime
         // after the user has already requested stop.
         app.state::<Arc<AudioRecordingManager>>()
@@ -2303,11 +2315,13 @@ impl TranscribeAction {
             context_plan.effective_policy()
         );
         let cancel_generation = rm.cancel_generation();
-        let stopped_at = if run.asr().spoken_send_enabled {
-            delivery::KeyboardFocus::for_spoken_send()
-        } else {
-            delivery::KeyboardFocus::now()
-        };
+        let stopped_at = focus_before_warning.unwrap_or_else(|| {
+            if run.asr().spoken_send_enabled {
+                delivery::KeyboardFocus::for_spoken_send()
+            } else {
+                delivery::KeyboardFocus::now()
+            }
+        });
         #[cfg(target_os = "macos")]
         delivery::copy_clipboard_aside(self.run.delivery());
 

@@ -309,6 +309,7 @@ mod tests {
                     pid: Some(100),
                     element: Some(7),
                     editable: true,
+                    ..KeyboardFocus::default()
                 },
                 run_id: 3,
             },

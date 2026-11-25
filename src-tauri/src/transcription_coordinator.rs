@@ -1,7 +1,8 @@
 use crate::actions;
+use crate::delivery::KeyboardFocus;
 use crate::modes::{RunPlan, TranscriptionIntent};
 use crate::tray::{set_tray_state, TrayIconState};
-use crate::utils::hide_recording_overlay;
+use crate::utils::{cancel_capture, hide_recording_overlay};
 use log::{debug, error, warn};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -16,6 +17,33 @@ use duration::{DurationAction, MeetingSuggestion, RecordingDeadline};
 pub struct DictationDurationWarningEvent {
     /// None clears the warning when the recording leaves its active stage.
     pub remaining_seconds: Option<u32>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, specta::Type, tauri_specta::Event)]
+pub struct DictationCancelWarningEvent {
+    pub prompt_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationCancelChoice {
+    Keep,
+    Cancel,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelPolicy {
+    Immediate,
+    ConfirmLongRecording,
+}
+
+pub(crate) enum CancelRequest {
+    Ask,
+    Immediate,
+    Answer {
+        prompt_id: u64,
+        choice: DictationCancelChoice,
+    },
 }
 
 pub(crate) const DICTATION_MEETING_SUGGESTION_EVENT: &str = "dictation-meeting-suggestion";
@@ -152,11 +180,16 @@ enum Command {
     },
     #[cfg(target_os = "macos")]
     InterruptMouseShortcut,
-    Cancel,
+    Cancel(CancelRequest),
     /// The pipeline of this run delivered its result or gave up.
     ProcessingFinished {
         run_id: u64,
     },
+}
+
+struct CancelPrompt {
+    id: u64,
+    focus_before_warning: KeyboardFocus,
 }
 
 enum Stage {
@@ -170,6 +203,7 @@ enum Stage {
         latched: bool,
         duration: RecordingDeadline,
         suggestion: MeetingSuggestion,
+        cancel_prompt: Option<CancelPrompt>,
     },
     /// The pipeline of `run_id` owns the capture. Only that run's finish ends
     /// the wait; a cancel abandons it.
@@ -197,11 +231,16 @@ enum Effect {
         intent: TranscriptionIntent,
         shortcut_label: String,
         run_plan: Box<RunPlan>,
+        cancel_prompt: Option<CancelPrompt>,
     },
     /// The pipeline this machine waited for is done: the overlay and the tray
     /// go idle, and only then does a press remembered meanwhile record.
     Settled(Option<StartRequest>),
     DurationWarning,
+    CancelWarning(Option<u64>),
+    CancelCapture {
+        cancel_pending: bool,
+    },
     /// A tap latched the recording open: no key holds it any more.
     Latched,
     MeetingSuggestion {
@@ -264,6 +303,7 @@ struct CoordinatorState {
     last_mouse_press: Option<Instant>,
     pending_release: Option<PendingRelease>,
     pending_press: Option<PendingPress>,
+    last_cancel_prompt: u64,
 }
 
 impl CoordinatorState {
@@ -274,6 +314,7 @@ impl CoordinatorState {
             last_mouse_press: None,
             pending_release: None,
             pending_press: None,
+            last_cancel_prompt: 0,
         }
     }
 
@@ -534,6 +575,60 @@ impl CoordinatorState {
         self.stage = Stage::Idle;
     }
 
+    fn request_cancel(
+        &mut self,
+        request: CancelRequest,
+        policy: CancelPolicy,
+        now: Instant,
+        read_focus: impl FnOnce() -> KeyboardFocus,
+    ) -> Option<Effect> {
+        match request {
+            CancelRequest::Answer { prompt_id, choice } => {
+                let Stage::Recording { cancel_prompt, .. } = &mut self.stage else {
+                    return None;
+                };
+                if cancel_prompt.as_ref().map(|prompt| prompt.id) != Some(prompt_id) {
+                    return None;
+                }
+                if matches!(choice, DictationCancelChoice::Keep) {
+                    *cancel_prompt = None;
+                    return Some(Effect::CancelWarning(None));
+                }
+            }
+            CancelRequest::Ask if policy == CancelPolicy::ConfirmLongRecording => {
+                match &mut self.stage {
+                    Stage::Recording {
+                        duration,
+                        cancel_prompt,
+                        ..
+                    } if duration.needs_cancel_confirmation(now) => {
+                        if cancel_prompt.is_some() {
+                            return None;
+                        }
+                        self.last_cancel_prompt += 1;
+                        let id = self.last_cancel_prompt;
+                        *cancel_prompt = Some(CancelPrompt {
+                            id,
+                            focus_before_warning: read_focus().requiring_confirmation(),
+                        });
+                        return Some(Effect::CancelWarning(Some(id)));
+                    }
+                    _ => {}
+                }
+            }
+            CancelRequest::Ask | CancelRequest::Immediate => {}
+        }
+        let cancel_pending = matches!(
+            self.stage,
+            Stage::Recording {
+                cancel_prompt: Some(_),
+                ..
+            }
+        );
+        self.on_cancel();
+        Some(Effect::CancelCapture { cancel_pending })
+    }
+
     /// The pipeline of `run_id` is done. Only the one this machine still waits
     /// for settles it: a pipeline abandoned by a cancel finishes while the
     /// next recording may already be open.
@@ -575,6 +670,7 @@ impl CoordinatorState {
                 latched,
                 duration: RecordingDeadline::new(recording_started_at),
                 suggestion: MeetingSuggestion::new(recording_started_at),
+                cancel_prompt: None,
             };
         }
     }
@@ -639,7 +735,10 @@ impl CoordinatorState {
     fn hand_over_recording(&mut self, shortcut_label: String) -> Option<Effect> {
         match std::mem::replace(&mut self.stage, Stage::Idle) {
             Stage::Recording {
-                intent, run_plan, ..
+                intent,
+                run_plan,
+                cancel_prompt,
+                ..
             } => {
                 self.stage = Stage::Processing {
                     run_id: run_plan.run_id,
@@ -648,6 +747,7 @@ impl CoordinatorState {
                     intent,
                     shortcut_label,
                     run_plan,
+                    cancel_prompt,
                 })
             }
             other => {
@@ -666,7 +766,7 @@ pub struct TranscriptionCoordinator {
 }
 
 impl TranscriptionCoordinator {
-    pub fn new(app: AppHandle) -> Self {
+    pub(crate) fn new(app: AppHandle, cancel_policy: CancelPolicy) -> Self {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
@@ -700,14 +800,12 @@ impl TranscriptionCoordinator {
                         Command::Submit { source } => state.on_submit(source),
                         #[cfg(target_os = "macos")]
                         Command::InterruptMouseShortcut => state.on_mouse_shortcut_interrupted(),
-                        Command::Cancel => {
-                            state.on_cancel();
-                            let _ = DictationDurationWarningEvent {
-                                remaining_seconds: None,
-                            }
-                            .emit(&app);
-                            None
-                        }
+                        Command::Cancel(request) => state.request_cancel(
+                            request,
+                            cancel_policy,
+                            Instant::now(),
+                            KeyboardFocus::now,
+                        ),
                         Command::ProcessingFinished { run_id } => {
                             state.on_processing_finished(run_id)
                         }
@@ -800,8 +898,8 @@ impl TranscriptionCoordinator {
         }
     }
 
-    pub fn notify_cancel(&self) {
-        if self.tx.send(Command::Cancel).is_err() {
+    pub(crate) fn send_cancel(&self, request: CancelRequest) {
+        if self.tx.send(Command::Cancel(request)).is_err() {
             warn!("Transcription coordinator channel closed");
         }
     }
@@ -826,12 +924,22 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
             intent,
             shortcut_label,
             run_plan,
+            cancel_prompt,
         } => {
             let _ = DictationDurationWarningEvent {
                 remaining_seconds: None,
             }
             .emit(app);
-            actions::stop_transcription(app, &intent.recording_id(), &shortcut_label, *run_plan);
+            if cancel_prompt.is_some() {
+                let _ = DictationCancelWarningEvent { prompt_id: None }.emit(app);
+            }
+            actions::stop_transcription(
+                app,
+                &intent.recording_id(),
+                &shortcut_label,
+                *run_plan,
+                cancel_prompt.map(|prompt| prompt.focus_before_warning),
+            );
         }
         Effect::Settled(next) => {
             hide_recording_overlay(app);
@@ -845,6 +953,19 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
                 remaining_seconds: Some(60),
             }
             .emit(app);
+        }
+        Effect::CancelWarning(prompt_id) => {
+            let _ = DictationCancelWarningEvent { prompt_id }.emit(app);
+        }
+        Effect::CancelCapture { cancel_pending } => {
+            if cancel_pending {
+                let _ = DictationCancelWarningEvent { prompt_id: None }.emit(app);
+            }
+            let _ = DictationDurationWarningEvent {
+                remaining_seconds: None,
+            }
+            .emit(app);
+            cancel_capture(app);
         }
         Effect::Latched => crate::shortcut::release_bare_recording_keys(app),
         Effect::MeetingSuggestion { elapsed_seconds } => {
@@ -1133,6 +1254,7 @@ mod tests {
                 Some(Effect::DurationWarning) => self.warnings += 1,
                 Some(Effect::Latched) => self.latches += 1,
                 Some(Effect::MeetingSuggestion { .. }) => {}
+                Some(Effect::CancelWarning(_) | Effect::CancelCapture { .. }) => {}
                 None => {}
             }
         }
@@ -1207,6 +1329,15 @@ mod tests {
         fn submit(&mut self) {
             let effect = self.state.on_submit("send".to_string());
             self.apply(effect);
+        }
+
+        fn cancel(&mut self, request: CancelRequest) -> Option<Effect> {
+            self.state.request_cancel(
+                request,
+                CancelPolicy::ConfirmLongRecording,
+                self.clock,
+                KeyboardFocus::default,
+            )
         }
 
         fn advance(&mut self, by: Duration) {
@@ -1647,6 +1778,91 @@ mod tests {
             "cancel means silence, not a deferred start"
         );
         assert!(harness.is_idle());
+    }
+
+    #[test]
+    fn a_dictation_of_thirty_seconds_or_less_cancels_without_warning() {
+        let mut harness = Harness::new();
+        harness.external_press(active_mode(), false);
+        harness.advance(Duration::from_secs(30));
+        assert!(matches!(
+            harness.cancel(CancelRequest::Ask),
+            Some(Effect::CancelCapture {
+                cancel_pending: false
+            })
+        ));
+        assert!(harness.is_idle());
+    }
+
+    #[test]
+    fn a_long_dictation_keeps_recording_until_cancel_is_confirmed() {
+        let mut harness = Harness::new();
+        harness.external_press(active_mode(), false);
+        harness.advance(Duration::from_millis(30_001));
+        let Some(Effect::CancelWarning(Some(prompt_id))) = harness.cancel(CancelRequest::Ask)
+        else {
+            panic!("Cancel must ask before stopping a long recording");
+        };
+        assert!(harness.cancel(CancelRequest::Ask).is_none());
+        assert!(harness.is_recording());
+        let keep = harness.cancel(CancelRequest::Answer {
+            prompt_id,
+            choice: DictationCancelChoice::Keep,
+        });
+        assert!(matches!(keep, Some(Effect::CancelWarning(None))));
+        assert!(harness.is_recording());
+        let Some(Effect::CancelWarning(Some(new_prompt))) = harness.cancel(CancelRequest::Ask)
+        else {
+            panic!("A new request must warn again while still recording");
+        };
+        let stale = harness.cancel(CancelRequest::Answer {
+            prompt_id,
+            choice: DictationCancelChoice::Cancel,
+        });
+        assert!(stale.is_none());
+        assert!(harness.is_recording());
+        let confirmed = harness.cancel(CancelRequest::Answer {
+            prompt_id: new_prompt,
+            choice: DictationCancelChoice::Cancel,
+        });
+        assert!(matches!(
+            confirmed,
+            Some(Effect::CancelCapture {
+                cancel_pending: true
+            })
+        ));
+        assert!(harness.is_idle());
+    }
+
+    #[test]
+    fn a_warning_cannot_cancel_a_later_dictation() {
+        let mut harness = Harness::new();
+        harness.external_press(active_mode(), false);
+        harness.advance(Duration::from_secs(31));
+        let Some(Effect::CancelWarning(Some(prompt_id))) = harness.cancel(CancelRequest::Ask)
+        else {
+            panic!("Expected an active cancel warning");
+        };
+        let stop = harness.state.on_finish("Stop recording".to_string());
+        assert!(matches!(
+            stop,
+            Some(Effect::Stop {
+                cancel_prompt: Some(_),
+                ..
+            })
+        ));
+        harness.apply(stop);
+        harness.processing_finished();
+        harness.external_press(active_mode(), false);
+        harness.advance(Duration::from_secs(31));
+        let new_warning = harness.cancel(CancelRequest::Ask);
+        assert!(matches!(new_warning, Some(Effect::CancelWarning(Some(id))) if id != prompt_id));
+        let stale = harness.cancel(CancelRequest::Answer {
+            prompt_id,
+            choice: DictationCancelChoice::Cancel,
+        });
+        assert!(stale.is_none());
+        assert!(harness.is_recording());
     }
 
     #[test]

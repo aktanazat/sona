@@ -1824,6 +1824,10 @@ impl AudioRecordingManager {
         self.cancel_generation.load(Ordering::Acquire) != generation
     }
 
+    pub(crate) fn invalidate_pending_delivery(&self) {
+        self.cancel_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn stop_recording(&self, binding_id: &str, cancel_generation: u64) -> StoppedRecording {
         let mut state = lock_recover(&self.state);
 
@@ -1987,7 +1991,7 @@ impl AudioRecordingManager {
     /// recording this cancel ended hands back its spool, finished and closed.
     pub fn cancel_recording(&self) -> Option<CaptureSpool> {
         self.invalidate_recording_readiness();
-        self.cancel_generation.fetch_add(1, Ordering::AcqRel);
+        self.invalidate_pending_delivery();
         let mut state = lock_recover(&self.state);
 
         match *state {

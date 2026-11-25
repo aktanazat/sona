@@ -44,6 +44,7 @@ pub mod workflows;
 pub mod wrap;
 
 use crate::settings::{get_settings, update_settings, AppSettings, LogLevel};
+use crate::transcription_coordinator::{CancelRequest, DictationCancelChoice};
 use crate::utils::cancel_current_operation;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
@@ -58,7 +59,13 @@ fn bundled_notice_path(resource_dir: &Path, name: &str) -> PathBuf {
 #[tauri::command]
 #[specta::specta]
 pub fn cancel_operation(app: AppHandle) {
-    cancel_current_operation(&app);
+    cancel_current_operation(&app, CancelRequest::Ask);
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn answer_dictation_cancel(app: AppHandle, prompt_id: u64, choice: DictationCancelChoice) {
+    cancel_current_operation(&app, CancelRequest::Answer { prompt_id, choice });
 }
 
 /// The Stop button on the capture page. It ends whatever is recording,

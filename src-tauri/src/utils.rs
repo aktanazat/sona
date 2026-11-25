@@ -3,6 +3,7 @@ use crate::managers::transcription::TranscriptionManager;
 use crate::meeting::session::MeetingSessionManager;
 use crate::recorder::ScreenRecorderManager;
 use crate::shortcut;
+use crate::transcription_coordinator::CancelRequest;
 use crate::TranscriptionCoordinator;
 use log::info;
 use std::sync::Arc;
@@ -73,9 +74,19 @@ fn native_windows_machine() -> Option<u16> {
     .then_some(native_machine)
 }
 
-/// Centralized cancellation function that can be called from anywhere in the app.
-/// Handles cancelling both recording and transcription operations and updates UI state.
-pub fn cancel_current_operation(app: &AppHandle) {
+pub(crate) fn cancel_current_operation(app: &AppHandle, request: CancelRequest) {
+    if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
+        if matches!(request, CancelRequest::Ask | CancelRequest::Immediate) {
+            // A paste can already be queued for the main thread. A live recording
+            // does not take its delivery generation until it stops.
+            app.state::<Arc<AudioRecordingManager>>()
+                .invalidate_pending_delivery();
+        }
+        coordinator.send_cancel(request);
+    }
+}
+
+pub(crate) fn cancel_capture(app: &AppHandle) {
     info!("Initiating operation cancellation...");
 
     // Unregister cancel and send asynchronously
@@ -102,11 +113,6 @@ pub fn cancel_current_operation(app: &AppHandle) {
 
     // Unload model if immediate unload is enabled
     tm.maybe_unload_immediately("cancellation");
-
-    // Notify coordinator so it can keep lifecycle state coherent.
-    if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
-        coordinator.notify_cancel();
-    }
 
     info!("Operation cancellation completed - returned to idle state");
 }

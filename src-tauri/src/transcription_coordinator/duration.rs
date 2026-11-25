@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 const SUGGEST_MEETING_AFTER: Duration = Duration::from_secs(3 * 60);
 const WARNING_AFTER: Duration = Duration::from_secs(19 * 60);
 const STOP_AFTER: Duration = Duration::from_secs(20 * 60);
+const CONFIRM_CANCEL_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DurationAction {
@@ -32,6 +33,10 @@ impl RecordingDeadline {
             } else {
                 WARNING_AFTER
             }
+    }
+
+    pub(super) fn needs_cancel_confirmation(&self, now: Instant) -> bool {
+        now > self.started_at + CONFIRM_CANCEL_AFTER
     }
 
     pub(super) fn action(&mut self, now: Instant) -> Option<DurationAction> {

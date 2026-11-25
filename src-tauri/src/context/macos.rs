@@ -311,6 +311,7 @@ fn capture_keyboard_focus(require_editable: bool) -> KeyboardFocus {
         pid,
         element,
         editable,
+        ..KeyboardFocus::default()
     }
 }
 

@@ -103,6 +103,7 @@ pub struct KeyboardFocus {
     /// equally, so the same control always matches itself.
     pub(crate) element: Option<usize>,
     pub(crate) editable: bool,
+    pub(crate) require_confirmed_control: bool,
 }
 
 impl KeyboardFocus {
@@ -140,9 +141,22 @@ impl KeyboardFocus {
             && self.element == current.element
     }
 
+    pub(crate) fn requiring_confirmation(mut self) -> Self {
+        self.require_confirmed_control = true;
+        self
+    }
+
+    /// Ordinary stops refuse a proven change. A stop made from the keyed cancel
+    /// warning may deliver only once the control it displaced is confirmed.
     /// Whether `current` is known to be another control. A part either read
     /// could not reach proves nothing, so it never refuses a delivery.
     fn differs_from(self, current: Self) -> bool {
+        if self.require_confirmed_control {
+            return self.pid.is_none()
+                || self.element.is_none()
+                || self.pid != current.pid
+                || self.element != current.element;
+        }
         fn known_and_different<T: PartialEq>(stopped: Option<T>, current: Option<T>) -> bool {
             matches!((stopped, current), (Some(stopped), Some(current)) if stopped != current)
         }
@@ -191,7 +205,7 @@ pub fn deliver(
     };
     let focus_moved = focus_left(settings, stopped_at, KeyboardFocus::now);
     let receipt = if focus_moved {
-        log::warn!("Keyboard focus moved after the recording stopped; text was not delivered");
+        log::warn!("Keyboard focus could not be confirmed; text was not delivered");
         DeliveryReceipt::new(
             primary_method(settings),
             DeliveryOutcome::DefinitelyNotDispatched,
@@ -534,6 +548,7 @@ mod tests {
             pid: Some(100),
             element: Some(7),
             editable: true,
+            ..KeyboardFocus::default()
         };
         assert!(stopped.confirms_text_field(stopped));
         for current in [
@@ -724,23 +739,23 @@ mod tests {
         let stopped_at = KeyboardFocus {
             pid: Some(100),
             element: Some(7),
-            editable: false,
+            ..KeyboardFocus::default()
         };
         let moved = [
             KeyboardFocus {
                 pid: Some(200),
                 element: Some(9),
-                editable: false,
+                ..KeyboardFocus::default()
             },
             KeyboardFocus {
                 pid: Some(100),
                 element: Some(8),
-                editable: false,
+                ..KeyboardFocus::default()
             },
             KeyboardFocus {
                 pid: Some(200),
                 element: None,
-                editable: false,
+                ..KeyboardFocus::default()
             },
         ];
         let unproven = [
@@ -748,7 +763,7 @@ mod tests {
             KeyboardFocus {
                 pid: Some(100),
                 element: None,
-                editable: false,
+                ..KeyboardFocus::default()
             },
             KeyboardFocus::default(),
         ];
@@ -774,6 +789,34 @@ mod tests {
                 "{method:?} with nothing read at stop"
             );
         }
+    }
+
+    #[test]
+    fn stop_from_cancel_warning_delivers_only_to_the_restored_control() {
+        let original = KeyboardFocus {
+            pid: Some(100),
+            element: Some(7),
+            ..KeyboardFocus::default()
+        };
+        let warning = KeyboardFocus {
+            element: Some(8),
+            ..original
+        };
+        let unknown_control = KeyboardFocus {
+            element: None,
+            ..original
+        };
+        let stopped_at = original.requiring_confirmation();
+        let settings = plan(PasteMethod::CtrlV);
+
+        assert!(focus_left(&settings, stopped_at, || warning));
+        assert!(focus_left(&settings, stopped_at, || unknown_control));
+        assert!(focus_left(
+            &settings,
+            unknown_control.requiring_confirmation(),
+            || original
+        ));
+        assert!(!focus_left(&settings, stopped_at, || original));
     }
 
     /// A dictation that vanishes into a password field used to produce the
