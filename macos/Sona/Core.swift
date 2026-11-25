@@ -169,6 +169,10 @@ final class Core: @unchecked Sendable {
     private var process = Process()
     private let socketPath: String
     private let lock = NSLock()
+    /// Held for the whole of one frame's write, and never with `lock`: a write
+    /// blocks while the core is not draining its socket, and the reader must
+    /// still take `lock` to deliver the replies that let the core drain it.
+    private let writeLock = NSLock()
     private var socket: Int32 = -1
     private var pending: [UInt64: CheckedContinuation<Data, Error>] = [:]
     private var nextID: UInt64 = 0
@@ -371,11 +375,14 @@ final class Core: @unchecked Sendable {
 
     /// One writer at a time, so a reply never lands inside another frame.
     private func send(_ frame: Data, to socket: Int32) -> Bool {
-        lock.withLock {
+        writeLock.withLock {
             frame.withUnsafeBytes { bytes -> Bool in
                 var offset = 0
                 while offset < bytes.count {
                     let written = Darwin.write(socket, bytes.baseAddress! + offset, bytes.count - offset)
+                    if written < 0, errno == EINTR {
+                        continue
+                    }
                     if written <= 0 {
                         return false
                     }
@@ -387,19 +394,31 @@ final class Core: @unchecked Sendable {
     }
 
     /// The reader thread: whole lines out of the socket, each one a frame.
+    /// Only bytes that arrived since the last read are searched for the end
+    /// of a line, so a frame of many megabytes is scanned once, not once per
+    /// read.
     private func read(_ socket: Int32) {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         var carried = Data()
         while true {
             let count = Darwin.read(socket, &buffer, buffer.count)
+            if count < 0, errno == EINTR {
+                continue
+            }
             if count <= 0 {
                 break
             }
+            let searched = carried.count
             carried.append(contentsOf: buffer[0..<count])
-            while let newline = carried.firstIndex(of: UInt8(ascii: "\n")) {
-                let line = carried.subdata(in: carried.startIndex..<newline)
-                carried.removeSubrange(carried.startIndex...newline)
-                dispatch(line)
+            var lineStart = carried.startIndex
+            var from = carried.startIndex + searched
+            while let newline = carried[from...].firstIndex(of: UInt8(ascii: "\n")) {
+                dispatch(carried.subdata(in: lineStart..<newline))
+                lineStart = newline + 1
+                from = lineStart
+            }
+            if lineStart > carried.startIndex {
+                carried.removeSubrange(carried.startIndex..<lineStart)
             }
         }
         let (waiting, closed) = lock.withLock { () -> ([CheckedContinuation<Data, Error>], (@MainActor () -> Void)?) in
