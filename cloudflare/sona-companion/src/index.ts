@@ -2357,9 +2357,8 @@ function encryptedShareFile(
   env: Env,
   shareId: string,
   initial: PublicShare,
-  session: UploadSessionRow,
+  chunks: readonly { expected: UploadPlanChunk; key: string }[],
 ): ReadableStream<Uint8Array> {
-  const plan = planFromJson(session.chunk_plan);
   const header = utf8(
     `${JSON.stringify({
       format: "sona-encrypted-share-v1",
@@ -2375,7 +2374,7 @@ function encryptedShareFile(
         ),
       },
       manifest: base64UrlEncode(bytesFromDb(initial.manifest)),
-      chunks: plan,
+      chunks: chunks.map(({ expected }) => expected),
     })}\n`,
   );
   let phase: "header" | "chunk" | "done" = "header";
@@ -2405,47 +2404,21 @@ function encryptedShareFile(
         index += 1;
         return;
       }
-      if (index >= plan.length) {
+      const current = chunks[index];
+      if (current === undefined) {
         phase = "done";
         controller.close();
         return;
       }
-      const current = plan[index];
-      if (current === undefined) {
-        controller.error(problem("not_found"));
-        return;
-      }
-      const currentShare = await activePublicShare(env, shareId, Date.now());
-      const currentSession = await uploadSession(
-        env,
-        currentShare.vault_id,
-        currentShare.upload_id,
-      );
-      if (currentSession === null) {
-        controller.error(problem("not_found"));
-        return;
-      }
-      const receipt = await env.DB.prepare(
-        "SELECT r2_key, byte_size, digest FROM upload_chunks WHERE upload_id = ? AND chunk_index = ?",
-      )
-        .bind(currentSession.upload_id, current.index)
-        .first<{ byte_size: number; digest: string; r2_key: string }>();
-      if (
-        receipt === null ||
-        receipt.byte_size !== current.size ||
-        receipt.digest !== current.sha256
-      ) {
-        controller.error(problem("not_found"));
-        return;
-      }
-      const stored = await env.CIPHERTEXT.get(receipt.r2_key);
-      if (stored === null || !matchingR2Object(stored, current)) {
+      await activePublicShare(env, shareId, Date.now());
+      const stored = await env.CIPHERTEXT.get(current.key);
+      if (stored === null || !matchingR2Object(stored, current.expected)) {
         controller.error(problem("not_found"));
         return;
       }
       if (!prefixed) {
         const prefix = new Uint8Array(4);
-        new DataView(prefix.buffer).setUint32(0, current.size, false);
+        new DataView(prefix.buffer).setUint32(0, current.expected.size, false);
         controller.enqueue(prefix);
         prefixed = true;
       }
@@ -2469,8 +2442,31 @@ async function downloadShare(
   const share = await activePublicShare(env, shareId, now);
   const session = await uploadSession(env, share.vault_id, share.upload_id);
   if (session === null) throw problem("not_found");
+  const plan = planFromJson(session.chunk_plan);
+  const receipts = await env.DB.prepare(
+    "SELECT chunk_index, byte_size, digest, r2_key FROM upload_chunks WHERE upload_id = ? ORDER BY chunk_index",
+  )
+    .bind(session.upload_id)
+    .all<{
+      byte_size: number;
+      chunk_index: number;
+      digest: string;
+      r2_key: string;
+    }>();
+  const chunks = plan.map((expected, index) => {
+    const receipt = receipts.results[index];
+    if (
+      receipt === undefined ||
+      receipt.chunk_index !== expected.index ||
+      receipt.byte_size !== expected.size ||
+      receipt.digest !== expected.sha256
+    ) {
+      throw problem("not_found");
+    }
+    return { expected, key: receipt.r2_key };
+  });
   return bytesResponse(
-    encryptedShareFile(env, shareId, share, session),
+    encryptedShareFile(env, shareId, share, chunks),
     200,
     {
       "Content-Disposition": 'attachment; filename="sona-share.sona"',

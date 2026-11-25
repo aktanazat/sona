@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MAX_CHUNK_BYTES } from "../src/constants";
@@ -87,5 +87,33 @@ describe("bounded upload behavior", () => {
     expect(committed.status).toBe(200);
     expect(heads).toHaveBeenCalledTimes(0);
     expect(lists).toHaveBeenCalledTimes(1);
+  });
+
+  it("streams a share file with one share check and one read per chunk", async () => {
+    const device = await makeDevice();
+    await bootstrap(device);
+    const shareId = testId("share");
+    const uploadId = await stagedUpload(device, { shareId });
+    const committed = await signedFetch(device, {
+      method: "POST",
+      path: `/v1/uploads/${uploadId}/commit`,
+      body: JSON.stringify({ version: 1 }),
+      idempotencyKey: testId("share_commit"),
+    });
+    expect(committed.status).toBe(200);
+
+    const queries = vi.spyOn(env.DB, "prepare");
+    const reads = vi.spyOn(env.CIPHERTEXT, "get");
+    const file = await SELF.fetch(
+      `https://companion.test/v1/shares/${shareId}/file`,
+    );
+    const bytes = new Uint8Array(await file.arrayBuffer());
+
+    expect(file.status).toBe(200);
+    expect(bytes.length - (bytes.indexOf(0x0a) + 1)).toBe(
+      CHUNKS.reduce((total, chunk) => total + 4 + chunk.length, 0),
+    );
+    expect(queries).toHaveBeenCalledTimes(3 + CHUNKS.length);
+    expect(reads).toHaveBeenCalledTimes(CHUNKS.length);
   });
 });
