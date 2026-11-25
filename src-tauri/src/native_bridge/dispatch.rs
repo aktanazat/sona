@@ -5784,6 +5784,13 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "work_guidance" => reply(crate::planning::work::work_guidance(app.state()).await),
+        "work_guidance_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let text = args.take("text")?;
+            reply(crate::planning::work::work_guidance_save(app.clone(), operation_id, text).await)
+        }
         "work_comment_add" => {
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;

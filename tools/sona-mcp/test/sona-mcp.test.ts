@@ -809,6 +809,27 @@ describe("tool arguments", () => {
     expect(() => save.argv({ prompt: "x" })).toThrow("name is required");
   });
 
+  test("guidance is read as one command, and an empty text clears it", () => {
+    expect(tool("sona_guidance").argv({})).toEqual(["work", "guidance", "--json"]);
+    expect(tool("sona_guidance_save").argv({ text: "Titles start with a verb." }, "Claude")).toEqual([
+      "work",
+      "guidance-save",
+      "--agent=Claude",
+      "--json",
+      "--",
+      "Titles start with a verb.",
+    ]);
+    expect(tool("sona_guidance_save").argv({ text: "", dry_run: true })).toEqual([
+      "work",
+      "guidance-save",
+      "--dry-run",
+      "--json",
+      "--",
+      "",
+    ]);
+    expect(() => tool("sona_guidance_save").argv({})).toThrow("text is required");
+  });
+
   test("an automation run, restore and delete name the automation last, and run and delete are opt-in", () => {
     expect(tool("sona_automation_run").argv({ automation: "-Digest" }, "Claude")).toEqual([
       "work",
@@ -929,6 +950,7 @@ async function published(selection?: string) {
 
 /** The verbs and flags with which `sona` changes something. */
 const SONA_WRITES = {
+  "guidance-save": true,
   "meeting-restore": true,
   "inbox-settings-save": true,
   "feed-save": true,

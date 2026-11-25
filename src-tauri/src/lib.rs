@@ -2237,6 +2237,8 @@ pub fn run(cli_args: CliArgs) {
             planning::work::work_copy,
             planning::work::work_set_parent,
             planning::work::work_comments,
+            planning::work::work_guidance,
+            planning::work::work_guidance_save,
             planning::work::work_comment_add,
             planning::work::work_comment_edit,
             planning::work::work_comment_delete,

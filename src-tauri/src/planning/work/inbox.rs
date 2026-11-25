@@ -1230,6 +1230,17 @@ pub(crate) fn mentions_user(body: &str, user_name: Option<&str>) -> bool {
     })
 }
 
+/// Whether `body` names Sona as `@Sona`, not a longer word that starts so.
+pub(crate) fn mentions_sona(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    lower.match_indices("@sona").any(|(at, _)| {
+        lower[at + "@sona".len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| !next.is_alphanumeric())
+    })
+}
+
 /// A comment someone else wrote that mentions the user: they are
 /// subscribed, and its notice reads as a mention.
 pub(crate) fn mentioned(
@@ -1826,5 +1837,18 @@ mod update_due_tests {
 
         assert_eq!(last_cycle_due(&zone, last_ms, 1, 2, at(8, 1)), None);
         assert_eq!(last_cycle_due(&zone, last_ms, 1, 2, at(8, 3)), Some(at(8, 3)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mentions_sona;
+
+    #[test]
+    fn sona_is_mentioned_only_as_a_whole_name() {
+        assert!(mentions_sona("ask @Sona about it"));
+        assert!(mentions_sona("@sona"));
+        assert!(!mentions_sona("@Sonata is not Sona"));
+        assert!(!mentions_sona("no mention here"));
     }
 }

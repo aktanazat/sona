@@ -864,6 +864,11 @@ final class AppModel {
         sheet = .chat
     }
 
+    func discussSelection(_ quoted: QuotedSelection) {
+        chat.openAsk(draft: quoted.draft)
+        sheet = .chat
+    }
+
     func planWithSona() {
         chat.openPlanner()
         sheet = .chat

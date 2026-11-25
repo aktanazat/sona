@@ -325,6 +325,11 @@ private struct DetailNotes: View {
     @State private var hovering = false
     @State private var selection: TextSelection?
 
+    private var quoted: QuotedSelection? {
+        guard case let .selection(range)? = selection?.indices, !range.isEmpty else { return nil }
+        return QuotedSelection(text: String(text[range]), link: TaskCopy.link(row))
+    }
+
     var body: some View {
         let details = row.details ?? ""
         let open = MarkdownBody.openChecklist(details).titles.count
@@ -394,6 +399,7 @@ private struct DetailNotes: View {
                 .foregroundStyle(Theme.ink)
                 .textEditorStyle(.plain)
                 .padding(.horizontal, -5)
+                .focusedValue(\.quotedSelection, quoted)
                 .withoutWritingTools()
                 .onExitCommand {
                     text = row.details ?? ""

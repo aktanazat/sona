@@ -264,7 +264,7 @@ private struct ScratchNoteEditorPage: View {
             .padding(.bottom, 20)
             ErrorNote(store.error)
             ErrorNote(sourceError)
-            ScratchNoteEditor(text: bodyText, focused: $editorFocused, mentions: mentions, mention: mention)
+            ScratchNoteEditor(text: bodyText, focused: $editorFocused, mentions: mentions, mention: mention, noteId: store.openId)
             .padding(.bottom, 24)
             .zIndex(1)
             connections
@@ -692,11 +692,17 @@ private struct ScratchNoteEditor: View {
     var focused: FocusState<Bool>.Binding
     let mentions: (String) -> [ScratchMention]
     let mention: (ScratchMention) -> Void
+    let noteId: String?
 
     @State private var selection: TextSelection?
     @State private var highlighted = 0
     @State private var dismissed: ScratchTrigger?
     @State private var caretBottom: CGFloat = 0
+
+    private var quoted: QuotedSelection? {
+        guard let noteId, case let .selection(range)? = selection?.indices, !range.isEmpty else { return nil }
+        return QuotedSelection(text: String(text[range]), link: "sona://note/\(noteId)")
+    }
 
     private var trigger: ScratchTrigger? {
         guard let found = ScratchTrigger(text: text, selection: selection), found != dismissed else { return nil }
@@ -754,6 +760,7 @@ private struct ScratchNoteEditor: View {
                     MarkdownTextEditor(text: $text, selection: $selection, focused: focused, label: "Note", keys: key)
                         .font(TypeScale.body())
                         .foregroundStyle(Theme.ink)
+                        .focusedValue(\.quotedSelection, quoted)
                 }
             }
             .overlay(alignment: .topLeading) {

@@ -99,6 +99,9 @@ pub(crate) fn failure(error: anyhow::Error) -> String {
             "Shorten the status description and try again."
         }
         Some(store::Refusal::StatusHueOutOfRange) => "Choose a status color from 0 to 360 degrees.",
+        Some(store::Refusal::GuidanceTooLong) => {
+            "Shorten the guidance to 2000 characters or fewer."
+        }
         Some(store::Refusal::NotFound) => "This item no longer exists.",
         Some(store::Refusal::StaleRevision) => "This item changed. Reload and try again.",
         Some(store::Refusal::OperationConflict) => {

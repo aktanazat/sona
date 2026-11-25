@@ -1451,6 +1451,20 @@ const AGENT_LOOP = {
   description: "An automation's name or id, from sona_automation_list.",
 } as const;
 
+const GUIDANCE_WRITES =
+  "This changes the user's standing guidance in Sona, nothing else. It needs Settings > Agents > External access and External mutations; with either off Sona refuses with consent_required and names the setting. dry_run:true shows the result without writing.";
+
+/** The guidance text; empty is an answer, it clears the guidance. */
+function guidanceText(input: ToolInput): string {
+  const value = input.text;
+  if (value === undefined || value === null) {
+    throw new SonaInputError("text is required. Pass an empty string to clear it.");
+  }
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success) throw new SonaInputError("text must be a string.");
+  return parsed.data;
+}
+
 function onAgentLoop(
   verb: "run" | "enable" | "disable" | "delete",
   title: string,
@@ -9099,6 +9113,42 @@ export const TOOLS: readonly ToolDefinition[] = [
   onAgentLoop("disable", "Turn a Sona automation off", "Turn an automation off: its trigger stops running it until it is turned on.", {
     mutates: "changes",
   }),
+  {
+    name: "sona_guidance",
+    title: "Read Sona's standing guidance",
+    description:
+      "Read the standing guidance: the personal instructions that every Sona agent and Talk to Sona answer follows, such as how to title a task or the shape of an update, with its earlier versions. Empty when none is saved.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    argv: () => ["work", "guidance", "--json"],
+  },
+  {
+    name: "sona_guidance_save",
+    title: "Save Sona's standing guidance",
+    description: `Save the standing guidance that every Sona agent and Talk to Sona answer follows from now on. It replaces the current text as a new version; saving the same text again changes nothing; an empty text clears it. The text is limited to 2000 characters. ${GUIDANCE_WRITES}`,
+    mutates: "changes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: {
+          type: "string",
+          description: "The whole guidance, replacing the current one. Empty clears it.",
+        },
+        dry_run: DRY_RUN,
+        operation_id: OPERATION_ID,
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+    argv: (input, agent) => [
+      "work",
+      "guidance-save",
+      ...(flag(input, "dry_run") ? ["--dry-run"] : []),
+      ...writing(input, agent),
+      "--json",
+      "--",
+      guidanceText(input),
+    ],
+  },
   {
     name: "sona_automation_restore_version",
     title: "Restore a Sona automation version",

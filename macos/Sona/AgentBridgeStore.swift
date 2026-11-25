@@ -117,6 +117,10 @@ final class AgentBridgeStore {
     private(set) var mcpToolsLoading: Set<String> = []
     private(set) var mcpBusy = false
     private(set) var mcpError: String?
+    var guidanceDraft = ""
+    private(set) var guidanceSaved = ""
+    private(set) var guidanceBusy = false
+    private(set) var guidanceError: String?
     private(set) var questionDrafts: [String: AgentBridgeQuestionDraft] = [:]
     private(set) var respondingRequests: Set<String> = []
 
@@ -154,6 +158,7 @@ final class AgentBridgeStore {
         await loadSettings()
         await loadHookSnippet()
         await loadMcpServers()
+        await loadGuidance()
     }
 
     /// The Refresh button: the observations, the policy, and one more try at
@@ -164,6 +169,35 @@ final class AgentBridgeStore {
             await loadSettings()
             await loadHookSnippet()
             await loadMcpServers()
+        }
+    }
+
+    func loadGuidance() async {
+        do {
+            let guidance: AgentGuidance = try await core.request("work_guidance")
+            guidanceSaved = guidance.text
+            guidanceDraft = guidance.text
+            guidanceError = nil
+        } catch {
+            guidanceError = "Couldn't load the guidance: \(Self.reason(error))"
+        }
+    }
+
+    func saveGuidance() async {
+        guidanceBusy = true
+        guidanceError = nil
+        defer { guidanceBusy = false }
+        do {
+            let saved: AgentGuidance = try await core.request(
+                "work_guidance_save",
+                [
+                    "operationId": JSONValue.string(UUID().uuidString.lowercased()),
+                    "text": JSONValue.string(guidanceDraft),
+                ])
+            guidanceSaved = saved.text
+            guidanceDraft = saved.text
+        } catch {
+            guidanceError = "Couldn't save the guidance: \(Self.reason(error))"
         }
     }
 
