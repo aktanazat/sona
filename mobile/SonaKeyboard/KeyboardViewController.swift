@@ -35,7 +35,6 @@ final class KeyboardViewController: UIInputViewController {
     private let state = KeyboardState()
     private let waveform = KeyboardWaveformLevels()
     private let typing = TypingModel()
-    private let emoji = EmojiModel()
     private let tools = KeyboardTools()
     private var corrector: TypingCorrector?
     private var session = TypingSession(corrector: nil)
@@ -90,7 +89,6 @@ final class KeyboardViewController: UIInputViewController {
         typing.deleteWord = { [weak self] in self?.deleteWord() }
         typing.restore = { [weak self] text in self?.restore(text) }
         typing.touched = { [weak self] key in self?.feedback(for: key) }
-        emoji.insert = { [weak self] glyph in self?.insertEmoji(glyph) }
         requestSupplementaryLexicon { [weak self] lexicon in
             let entries = lexicon.entries.map { (shortcut: $0.userInput, text: $0.documentText) }
             Task { @MainActor in
@@ -129,7 +127,6 @@ final class KeyboardViewController: UIInputViewController {
             state: state,
             typing: typing,
             prepare: { [weak self] in self?.prepareMicrophone() },
-            emoji: emoji,
             tools: tools,
             waveform: waveform,
             microphone: { [weak self] in self?.start() },
@@ -194,7 +191,6 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        typing.emojiQuery = nil
         guard hasFullAccess else { return }
         do {
             if try !KeyboardLearningStore.shared().save(session.learning, readAt: learningResets) {
@@ -360,7 +356,6 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func press(_ key: Key) {
-        if typing.emojiQuery != nil, search(key) { return }
         if tools.type(key, face: typing.face(of:)) {
             if typing.shift == .once { typing.shift = .off }
             return
@@ -416,37 +411,10 @@ final class KeyboardViewController: UIInputViewController {
         scheduleSuggestions()
     }
 
-    /// Keys while the emoji search is open type into the search; return or ABC closes it.
-    private func search(_ key: Key) -> Bool {
-        guard let query = typing.emojiQuery else { return false }
-        switch key {
-        case let .character(text): typing.emojiQuery = query + text.lowercased()
-        case .space: typing.emojiQuery = query + " "
-        case .delete: typing.emojiQuery = String(query.dropLast())
-        case .newLine: typing.emojiQuery = nil; typing.layer = .emoji
-        case let .layer(layer): typing.emojiQuery = nil; typing.layer = layer
-        case .shift: toggleShift()
-        default: return false
-        }
-        return true
-    }
-
     private func choose(_ word: String) {
         typing.hasTyped = true
-        if EmojiCatalog.shared?.entry(for: word) != nil { emoji.memory.used(word) }
         let context = textContext
         apply(session.choose(word, before: knownBefore(context)), to: context)
-        afterKey()
-    }
-
-    private func insertEmoji(_ glyph: String) {
-        if tools.type(.character(glyph), face: { $0 }) {
-            feedback(for: .character(glyph))
-            return
-        }
-        typing.hasTyped = true
-        apply(TypingSession.Edit(insert: glyph))
-        feedback(for: .character(glyph))
         afterKey()
     }
 
@@ -591,7 +559,6 @@ final class KeyboardViewController: UIInputViewController {
         }
         typing.showsDomainKey = [.emailAddress, .URL].contains(proxy.keyboardType ?? .default)
         if startingField {
-            typing.emojiQuery = nil
             switch proxy.keyboardType ?? .default {
             case .numberPad, .phonePad, .decimalPad, .asciiCapableNumberPad, .numbersAndPunctuation:
                 typing.layer = .numbers
@@ -922,7 +889,6 @@ private struct KeyboardView: View {
     @ObservedObject var state: KeyboardState
     let typing: TypingModel
     let prepare: () -> Void
-    let emoji: EmojiModel
     let tools: KeyboardTools
     let waveform: KeyboardWaveformLevels
     let microphone: () -> Void
@@ -953,14 +919,6 @@ private struct KeyboardView: View {
                             .frame(height: rowHeight * CGFloat(typing.rowCount - 1))
                             .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .bottom)))
                         keys([typing.bottomRow(withDelete: false)]).frame(height: rowHeight)
-                    } else if typing.layer == .emoji, let catalog = EmojiCatalog.shared {
-                        EmojiPanel(catalog: catalog, model: emoji, typing: typing) {
-                            typing.emojiQuery = ""
-                            typing.layer = .letters
-                        }
-                        .frame(maxWidth: KeyGrid.maxWidth)
-                        .padding(.horizontal, KeyGrid.margin)
-                        .frame(height: proxy.size.height)
                     } else {
                         let rows = typing.rows + [typing.bottomRow(withDelete: false)]
                         keys(rows).frame(height: rowHeight * CGFloat(rows.count))
@@ -974,29 +932,20 @@ private struct KeyboardView: View {
         .foregroundStyle(Theme.textPrimary).tint(Theme.accent)
     }
 
-    /// The top bar: the emoji search while it is open, otherwise the strip or what the
-    /// keyboard has to say, beside Dictate.
+    /// The top bar: the strip or what the keyboard has to say, beside Dictate.
     @ViewBuilder
     private var bar: some View {
         HStack(spacing: 8) {
-            if let query = typing.emojiQuery, let catalog = EmojiCatalog.shared {
-                EmojiSearchBar(
-                    query: query, results: catalog.search(query), memory: emoji.memory,
-                    pick: { glyph, base in emoji.pick(glyph, base: base) },
-                    close: { typing.emojiQuery = nil; typing.layer = .emoji }
-                )
-            } else {
-                ToolsButton(tools: tools)
-                if !tools.isOpen, !tools.heldReviews.isEmpty {
-                    HeldReviewButton(tools: tools)
-                }
-                if let purpose = tools.composing {
-                    ComposeBar(tools: tools, purpose: purpose)
-                } else {
-                    status.frame(maxWidth: .infinity, alignment: .leading)
-                }
+            ToolsButton(tools: tools)
+            if !tools.isOpen, !tools.heldReviews.isEmpty {
+                HeldReviewButton(tools: tools)
             }
-            let ordinaryBar = typing.emojiQuery == nil && tools.composing == nil
+            if let purpose = tools.composing {
+                ComposeBar(tools: tools, purpose: purpose)
+            } else {
+                status.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            let ordinaryBar = tools.composing == nil
             if state.hasFullAccess, ordinaryBar || state.dictating || state.waiting {
                 if state.waiting {
                     KeyboardWaveform()
@@ -1022,7 +971,7 @@ private struct KeyboardView: View {
             .overlay {
                 KeySurface(
                     model: typing, rows: rows,
-                    swipes: typing.layer == .letters && typing.emojiQuery == nil
+                    swipes: typing.layer == .letters
                 )
             }
             .overlay(alignment: .topLeading) {

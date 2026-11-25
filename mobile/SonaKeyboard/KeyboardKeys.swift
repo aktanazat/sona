@@ -2,14 +2,13 @@ import SwiftUI
 import UIKit
 
 enum KeyLayer: Equatable {
-    case letters, numbers, symbols, emoji
+    case letters, numbers, symbols
 
     var title: String {
         switch self {
         case .letters: "ABC"
         case .numbers: "123"
         case .symbols: "#+="
-        case .emoji: ""
         }
     }
 
@@ -18,7 +17,6 @@ enum KeyLayer: Equatable {
         case .letters: "keyboard.letters"
         case .numbers: "keyboard.numbers"
         case .symbols: "keyboard.symbols"
-        case .emoji: "keyboard.emoji"
         }
     }
 }
@@ -165,8 +163,6 @@ final class TypingModel {
     var trackpad = false
     var trail: [CGPoint] = []
     var accentChoice: AccentChoice?
-    /// The emoji search being typed, while the letter keys type into it.
-    var emojiQuery: String?
     @ObservationIgnored var press: (Key) -> Void = { _ in }
     @ObservationIgnored var choose: (String) -> Void = { _ in }
     @ObservationIgnored var swipe: ([CGPoint], KeyGrid) -> Void = { _, _ in }
@@ -182,7 +178,6 @@ final class TypingModel {
     /// Rows in the letter layout, bottom row included; every layer shares their height so
     /// switching layers never moves the keyboard.
     var rowCount: Int { numberRow ? 5 : 4 }
-    var showsNumberRow: Bool { numberRow && emojiQuery == nil }
     var letterGrid: KeyboardLetterGrid { language.letterGrid(englishLayout: englishLayout) }
 
     /// The rows above the bottom row.
@@ -192,7 +187,7 @@ final class TypingModel {
             let grid = letterGrid
             let letters = grid.rows
             let side = Double(grid.columns - letters[2].count) / 2
-            let digits = showsNumberRow ? [Self.caps("1234567890")] : []
+            let digits = numberRow ? [Self.caps("1234567890")] : []
             return digits + [
                 Self.caps(letters[0]),
                 Self.caps(letters[1]),
@@ -212,18 +207,16 @@ final class TypingModel {
                 [KeyCap(key: .layer(.numbers), units: 1.5)] + Self.caps(".,?!'", units: 1.4)
                     + [KeyCap(key: .delete, units: 1.5)],
             ]
-        case .emoji:
-            return []
         }
     }
 
-    /// The bottom row: layer switch, emoji, the field's extra keys, space and return, as wide
-    /// as the rows above it.
+    /// The bottom row: layer switch, the field's extra keys, space and return, as wide as the
+    /// rows above it. Emoji and the next keyboard come from the system's own globe and emoji
+    /// keys below the keyboard; the globe is drawn here only where the system asks for one.
     func bottomRow(withDelete: Bool) -> [KeyCap] {
         var leading = [KeyCap(key: .layer(layer == .letters ? .numbers : .letters), units: 1.25)]
         if showsNextKeyboard { leading.append(KeyCap(key: .nextKeyboard, units: 1.25)) }
         if showsLanguageKey, withDelete || extraKeys.isEmpty { leading.append(KeyCap(key: .language, units: 1.25)) }
-        leading.append(KeyCap(key: .layer(.emoji), units: 1.25))
         if !withDelete {
             leading += extraKeys.map { KeyCap(key: .character($0)) }
             if showsDomainKey { leading.append(KeyCap(key: .domain, units: 1.5)) }
@@ -271,7 +264,9 @@ private struct KeyButton: View {
         label
             .opacity(model.trackpad ? 0 : 1)
             .modifier(KeyFace(
-                pressed: model.pressed.contains(cap.key) && !isCharacter,
+                // Letters never show pressed here, so they must not read `pressed`: reading it
+                // makes every letter redraw on each tap.
+                pressed: !isCharacter && model.pressed.contains(cap.key),
                 prominent: cap.key == .newLine && model.returnKey.prominent,
                 trackpad: model.trackpad,
                 inset: inset
@@ -289,7 +284,7 @@ private struct KeyButton: View {
     /// Shift and delete beside the third letter row are drawn narrower than they reach, as on
     /// the system keyboard: the gap to the letters still types them.
     private var inset: EdgeInsets {
-        guard cap.units == 1.5, model.layer != .emoji else { return EdgeInsets() }
+        guard cap.units == 1.5 else { return EdgeInsets() }
         let side = KeyFace.gap / 2 + 9
         switch cap.key {
         case .shift, .layer(.symbols), .layer(.numbers) where model.layer != .letters:
@@ -310,12 +305,8 @@ private struct KeyButton: View {
             Image(systemName: model.shift.symbol)
                 .font(.system(size: 19, weight: .medium))
         case let .layer(layer):
-            if layer == .emoji {
-                Image(systemName: "face.smiling").font(.system(size: 21))
-            } else {
-                Text(verbatim: layer.title)
-                    .font(.system(size: 17))
-            }
+            Text(verbatim: layer.title)
+                .font(.system(size: 17))
         case .nextKeyboard:
             Image(systemName: "globe").font(.system(size: 19))
         case .language:

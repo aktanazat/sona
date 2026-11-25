@@ -359,15 +359,10 @@ private final class FieldDouble: NSObject, UITextDocumentProxy {
 
 @MainActor
 struct EmojiCatalogTests {
-    @Test("the strip's emoji for a word, and search by the start of its words")
-    func suggestAndSearch() throws {
+    @Test("the strip offers the emoji named by a typed word")
+    func suggest() throws {
         let catalog = try #require(EmojiCatalog.shared)
-        let pizza = "\u{1F355}", thumbsUp = "\u{1F44D}", wave = "\u{1F44B}", waveMedium = "\u{1F44B}\u{1F3FD}"
-        #expect(catalog.emoji(for: "pizza") == pizza)
-        #expect(catalog.search("thumbs").map(\.glyph).contains(thumbsUp))
-        #expect(catalog.search("heart").first?.glyph == "\u{2764}\u{FE0F}")
-        #expect(catalog.entry(for: waveMedium)?.glyph == wave)
-        #expect(catalog.entry(for: wave)?.tones.count == 5)
+        #expect(catalog.emoji(for: "Pizza") == "\u{1F355}")
     }
 }
 

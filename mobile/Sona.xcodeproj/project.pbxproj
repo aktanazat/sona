@@ -105,7 +105,6 @@
 		CC0000000000000000000097 /* NextWords in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000097 /* NextWords */; };
 		CD0000000000000000000096 /* emoji.tsv in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000096 /* emoji.tsv */; };
 		CC0000000000000000000096 /* emoji.tsv in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000096 /* emoji.tsv */; };
-		CD0000000000000000000094 /* EmojiKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000094 /* EmojiKeyboard.swift */; };
 		CD0000000000000000000093 /* EmojiCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000093 /* EmojiCatalog.swift */; };
 		CC0000000000000000000093 /* EmojiCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000093 /* EmojiCatalog.swift */; };
 		CD0000000000000000000092 /* NextWords.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000092 /* NextWords.swift */; };
@@ -294,7 +293,6 @@
 		BB0000000000000000000098 /* emoji-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "emoji-LICENSE.txt"; sourceTree = "<group>"; };
 		BB0000000000000000000097 /* NextWords */ = {isa = PBXFileReference; lastKnownFileType = folder; path = NextWords; sourceTree = "<group>"; };
 		BB0000000000000000000096 /* emoji.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = emoji.tsv; sourceTree = "<group>"; };
-		BB0000000000000000000094 /* EmojiKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiKeyboard.swift; sourceTree = "<group>"; };
 		BB0000000000000000000093 /* EmojiCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiCatalog.swift; sourceTree = "<group>"; };
 		BB0000000000000000000092 /* NextWords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NextWords.swift; sourceTree = "<group>"; };
 		BB0000000000000000000091 /* KeyboardLearning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardLearning.swift; sourceTree = "<group>"; };
@@ -566,7 +564,6 @@
 				BB0000000000000000000098 /* emoji-LICENSE.txt */,
 				BB0000000000000000000097 /* NextWords */,
 				BB0000000000000000000096 /* emoji.tsv */,
-				BB0000000000000000000094 /* EmojiKeyboard.swift */,
 				BB0000000000000000000093 /* EmojiCatalog.swift */,
 				BB0000000000000000000092 /* NextWords.swift */,
 				BB0000000000000000000025 /* Info.plist */,
@@ -930,7 +927,6 @@
 				CD0000000000000000000066 /* KeyboardMicrophone.swift in Sources */,
 				CD0000000000000000000068 /* KeyboardDictationQueue.swift in Sources */,
 				CD0000000000000000000090 /* KeyboardFeel.swift in Sources */,
-				CD0000000000000000000094 /* EmojiKeyboard.swift in Sources */,
 				CD0000000000000000000093 /* EmojiCatalog.swift in Sources */,
 				CD0000000000000000000092 /* NextWords.swift in Sources */,
 				CD0000000000000000000091 /* KeyboardLearning.swift in Sources */,

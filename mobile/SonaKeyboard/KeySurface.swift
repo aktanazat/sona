@@ -217,7 +217,7 @@ final class KeyTouchView: UIView {
                 guard finger.moved, isTyping(key) else { return }
                 model.press(key)
                 KeyboardFeel.typed(since: touch.timestamp)
-                if model.layer != returnLayer, returnLayer != .emoji { model.press(.layer(returnLayer)) }
+                if model.layer != returnLayer { model.press(.layer(returnLayer)) }
                 return
             }
             switch key {
@@ -249,7 +249,7 @@ final class KeyTouchView: UIView {
     private func showPreview(_ finger: Finger) {
         guard let key = finger.key else { model.preview = nil; return }
         switch key.cap.key {
-        case let .character(text) where model.layer != .emoji:
+        case let .character(text):
             model.preview = KeyPreview(text: model.face(of: text), frame: key.frame)
         default:
             model.preview = nil
@@ -374,7 +374,6 @@ private final class KeyElement: UIAccessibilityElement {
                 case .layer(.letters): String(localized: "keyboard.letters")
                 case .layer(.numbers): String(localized: "keyboard.numbers")
                 case .layer(.symbols): String(localized: "keyboard.symbols")
-                case .layer(.emoji): String(localized: "keyboard.emoji")
                 case .nextKeyboard: String(localized: "keyboard.next")
                 case .language: String(localized: "keyboard.language \(model.language.name)")
                 case .space: String(localized: "keyboard.space")
