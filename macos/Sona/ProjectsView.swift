@@ -806,10 +806,10 @@ struct ProjectsView: View {
         items.flatMap { $0.split(separator: "\n").map(String.init) }
     }
 
-    /// Drops projects above `target`. Only manual order takes a drop. Across groups it
+    /// Drops projects above `target`. Only manual order, not reversed, takes a drop. Across groups it
     /// takes one only in a priority grouping, where the drop also sets the priority.
     private func reorder(_ ids: [String], onto target: PlanningProjectSummary) -> Bool {
-        guard store.orderBy == .manual, !ids.isEmpty, !ids.contains(target.id) else { return false }
+        guard store.orderBy == .manual, !store.reverseOrder, !ids.isEmpty, !ids.contains(target.id) else { return false }
         let sameGroup = groupedProjects.contains { _, members in
             members.contains { $0.id == target.id } && ids.allSatisfy { id in members.contains { $0.id == id } }
         }

@@ -115,6 +115,14 @@ extension AppModel {
         if focus.inboxSelected.contains(id) { focus.inboxSelected.remove(id) } else { focus.inboxSelected.insert(id) }
     }
 
+    /// The notices a row stands for: a closed task row is every notice of its task, an open one only itself.
+    func inboxRowIds(_ notice: WorkNotification) -> [String] {
+        guard !workFocus.inboxExpanded.contains(notice.itemId ?? notice.id) else { return [notice.id] }
+        let shown = inboxShown
+        let groups = inboxGroups(shown.filter(\.priority)) + inboxGroups(shown.filter { !$0.priority })
+        return groups.first { $0[0].id == notice.id }?.map(\.id) ?? [notice.id]
+    }
+
     private func inboxMatches(_ notice: WorkNotification, _ query: String, task: WorkItemRow?, project: String?) -> Bool {
         let texts = [notice.kind.label, notice.what, notice.excerpt, task?.title, project,
                      task.map { TaskPriority($0.priority).label }, task.map { "#\($0.number)" }]
@@ -377,7 +385,8 @@ private struct InboxGroupRows: View {
         let focus = model.workFocus
         let lead = group[0]
         let expanded = focus.inboxExpanded.contains(lead.itemId ?? lead.id)
-        InboxRow(notice: lead, highlighted: focus.inboxHighlighted == lead.id, count: group.count, expanded: expanded)
+        InboxRow(notice: lead, highlighted: focus.inboxHighlighted == lead.id, count: group.count, expanded: expanded,
+                 members: expanded ? [lead] : group)
             .id(lead.id)
         if expanded {
             ForEach(group.dropFirst()) { notice in
@@ -420,9 +429,11 @@ private struct InboxBulkBar: View {
 
     var body: some View {
         let focus = model.workFocus
-        let ids = Array(focus.inboxSelected)
+        let ids = Array(Set(focus.inboxSelected.flatMap { id in
+            model.inboxShown.first { $0.id == id }.map(model.inboxRowIds) ?? [id]
+        }))
         HStack(spacing: 10) {
-            Text("\(ids.count) selected").metaText()
+            Text("\(focus.inboxSelected.count) selected").metaText()
             Spacer(minLength: 12)
             Button("Mark read") { model.work.mark(ids, .read); focus.inboxSelected = [] }
             Menu("Snooze") {
@@ -461,15 +472,19 @@ private struct InboxRow: View {
     var count = 1
     var expanded = false
     var indented = false
+    /// The notices this row acts on: its task's whole group while the row is closed.
+    var members: [WorkNotification] = []
     @Environment(AppModel.self) private var model
     @State private var hovering = false
     private var selected: Bool { model.workFocus.inboxSelected.contains(notice.id) }
+    private var ids: [String] { members.isEmpty ? [notice.id] : members.map(\.id) }
+    private var unread: Bool { (members.isEmpty ? [notice] : members).contains { $0.readAtMs == nil } }
 
     var body: some View {
         let store = model.work
         let row = notice.itemId.flatMap { model.workRows([$0]).first }
         let deleted = row == nil ? notice.itemId.flatMap { store.binned[$0]?.item } : nil
-        let unread = notice.readAtMs == nil
+        let unread = self.unread
         HStack(spacing: 10) {
             if count > 1 {
                 Button { model.toggleInboxGroup(notice.itemId ?? notice.id) } label: {
@@ -612,7 +627,7 @@ private struct InboxRow: View {
             .fixedSize()
             .help("Snooze  H")
             .accessibilityLabel("Snooze")
-            WorkBarButton(icon: "checkmark", help: "Archive  ⌫") { model.work.mark([notice.id], .archive) }
+            WorkBarButton(icon: "checkmark", help: "Archive  ⌫") { model.work.mark(ids, .archive) }
                 .accessibilityLabel("Archive")
         }
     }
@@ -625,12 +640,12 @@ private struct InboxRow: View {
     @ViewBuilder
     private var snoozeChoices: some View {
         if notice.snoozedUntilMs.map({ $0 > model.work.now }) ?? false {
-            Button("Wake now") { model.work.mark([notice.id], .snooze, until: nil) }
+            Button("Wake now") { model.work.mark(ids, .snooze, until: nil) }
             Divider()
         }
         ForEach(InboxSnooze.allCases, id: \.self) { choice in
             if let until = choice.until {
-                Button(choice.title) { model.work.mark([notice.id], .snooze, until: until) }
+                Button(choice.title) { model.work.mark(ids, .snooze, until: until) }
             }
         }
     }
@@ -655,13 +670,13 @@ private struct InboxRow: View {
                 Task { await store.undoBatch(notice) }
             }
         }
-        if notice.readAtMs == nil {
-            Button("Mark read", systemImage: "envelope.open") { store.mark([notice.id], .read) }
+        if unread {
+            Button("Mark read", systemImage: "envelope.open") { store.mark(ids, .read) }
         } else {
-            Button("Mark unread", systemImage: "envelope.badge") { store.mark([notice.id], .unread) }
+            Button("Mark unread", systemImage: "envelope.badge") { store.mark(ids, .unread) }
         }
         Menu("Snooze") { snoozeChoices }
-        Button("Archive", systemImage: "checkmark") { store.mark([notice.id], .archive) }
+        Button("Archive", systemImage: "checkmark") { store.mark(ids, .archive) }
     }
 }
 
@@ -707,7 +722,7 @@ enum InboxKeys {
             guard let notice, let index else { return false }
             let rest = notices.filter { $0.id != notice.id }
             focus.inboxHighlighted = rest.isEmpty ? nil : rest[min(index, rest.count - 1)].id
-            model.work.mark([notice.id], mark, until: until)
+            model.work.mark(model.inboxRowIds(notice), mark, until: until)
             return true
         }
         if event.keyCode == 53, !focus.inboxSelected.isEmpty {
@@ -742,7 +757,9 @@ enum InboxKeys {
             return true
         case "u":
             guard let notice else { return false }
-            model.work.mark([notice.id], notice.readAtMs == nil ? .read : .unread)
+            let ids = model.inboxRowIds(notice)
+            let anyUnread = model.work.notifications.contains { ids.contains($0.id) && $0.readAtMs == nil }
+            model.work.mark(ids, anyUnread ? .read : .unread)
             return true
         case "h": return leave(.snooze, until: InboxSnooze.tomorrow.until)
         default: return false

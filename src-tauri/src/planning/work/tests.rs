@@ -1844,9 +1844,12 @@ fn a_followed_task_hears_once_its_last_open_blocker_is_done() {
         .expect("the inbox")
         .into_iter()
         .filter(|notice| notice.kind == inbox::NotificationKind::Unblocked)
-        .map(|notice| notice.item_id)
+        .map(|notice| (notice.item_id, notice.from))
         .collect::<Vec<_>>();
-    assert_eq!(unblocked, [Some(move_in.id.clone())]);
+    assert_eq!(
+        unblocked,
+        [(Some(move_in.id.clone()), Some("Sign the lease".to_owned()))]
+    );
 }
 
 #[test]

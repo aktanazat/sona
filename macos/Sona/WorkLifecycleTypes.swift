@@ -314,7 +314,9 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
                 return automation?.error.map { "\(failed): \($0)" } ?? failed
             }
             return "finished"
-        case .unblocked: return "unblocked it"
+        case .unblocked:
+            let verb = to == "canceled" ? "canceled" : "finished"
+            return from.map { "\(verb) “\($0)”, which blocked it" } ?? "unblocked it"
         case .unknown: return "changed it"
         }
     }

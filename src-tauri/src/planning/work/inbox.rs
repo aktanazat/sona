@@ -773,15 +773,11 @@ pub(crate) struct Entry<'a> {
 }
 
 /// Posts an unblocked notice for each followed task that `finished` was the
-/// last open blocker of. Only a blocker that finished counts.
-fn unblocked(
-    conn: &Connection,
-    finished: &str,
-    actor: WorkActor,
-    to: Option<&str>,
-    now_ms: i64,
-) -> Result<()> {
-    if !matches!(to, Some("done" | "canceled")) {
+/// last open blocker of. Only a blocker that finished counts. The notice
+/// names the blocker's title in `from` and shares its status entry, which
+/// names the agent that finished it.
+fn unblocked(conn: &Connection, finished: &str, entry: &Entry<'_>, now_ms: i64) -> Result<()> {
+    if !matches!(entry.to, Some("done" | "canceled")) {
         return Ok(());
     }
     let mut statement = conn.prepare(
@@ -798,10 +794,20 @@ fn unblocked(
     let blocked = statement
         .query_map([finished], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    if blocked.is_empty() {
+        return Ok(());
+    }
+    let title: String = conn.query_row(
+        "SELECT title FROM planning_tasks WHERE id = ?1",
+        [finished],
+        |row| row.get(0),
+    )?;
     for id in blocked {
         let notice = Notice {
-            to,
-            ..Notice::new(Some(&id), NotificationKind::Unblocked, actor)
+            activity_id: Some(entry.activity_id),
+            from: Some(&title),
+            to: entry.to,
+            ..Notice::new(Some(&id), NotificationKind::Unblocked, entry.actor)
         };
         notify(conn, &notice, now_ms)?;
     }
@@ -831,7 +837,7 @@ pub(crate) fn on_activity(conn: &Connection, entry: &Entry<'_>, now_ms: i64) -> 
         ..Notice::new(Some(task_id), kind, actor)
     };
     if matches!(kind, WorkActivityKind::Status) && actor != WorkActor::Me {
-        unblocked(conn, task_id, actor, to, now_ms)?;
+        unblocked(conn, task_id, entry, now_ms)?;
     }
     match kind {
         WorkActivityKind::Created => {

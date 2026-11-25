@@ -755,7 +755,7 @@ pub struct ProjectViewSaveArgs {
     /// initiative, label or none.
     #[arg(long, value_enum)]
     pub group_by: Option<ProjectGroupArg>,
-    /// The order the projects list in: manual (drag order) by default.
+    /// The order the projects list in; without one they keep the order they load in.
     #[arg(long, value_enum)]
     pub order_by: Option<ProjectOrderArg>,
     /// Descending instead of ascending: true or false.
@@ -1224,6 +1224,11 @@ fn group_keys(
                 "No initiative".to_owned(),
             ),
         }],
+        ProjectGroupBy::Label if project.labels.is_empty() => vec![(
+            (u8::MAX, String::new()),
+            "label:none".to_owned(),
+            "No label".to_owned(),
+        )],
         ProjectGroupBy::Label => project
             .labels
             .iter()

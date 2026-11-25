@@ -1038,7 +1038,9 @@ impl Tracker<'_> {
         if let Some(by) = display.order_by {
             super::views::project_order(&mut rows, by, display.reverse);
         }
-        let groups = super::views::project_groups(&rows, display.group_by);
+        let groups = (view.is_some() || args.group_by.is_some())
+            .then(|| super::views::project_groups(&rows, display.group_by))
+            .flatten();
         Ok(WorkAnswer::Projects(ExternalWorkProjects {
             schema_version: QUERY_SCHEMA_VERSION,
             projects: rows,
@@ -1217,9 +1219,7 @@ impl Tracker<'_> {
             .map(|value| Self::pick_project(value, &projects))
             .transpose()?
             .map(|project| project.id.clone());
-        let operation_id = args
-            .write
-            .operation_id("project-move", &(&current.id, &before))?;
+        let operation_id = args.write.fresh_operation_id();
         self.applies("moving a project")?;
         work::plans::project_move(self.app, &operation_id, &current.id, before.as_deref())
             .map_err(|message| self.write_refusal(message, &operation_id, "The project"))?;
