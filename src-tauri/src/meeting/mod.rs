@@ -36,6 +36,7 @@ pub(crate) mod local_generator;
 pub mod lone_tail;
 pub mod loop_types;
 pub mod mail_context;
+pub(crate) mod note_edits;
 pub mod open_windows;
 pub(crate) mod pdf;
 pub mod people_types;

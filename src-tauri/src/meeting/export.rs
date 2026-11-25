@@ -367,8 +367,9 @@ fn current_artifact(review: &MeetingReviewSnapshot) -> Option<&GeneratedMeetingA
     review
         .artifacts
         .iter()
-        .filter(|artifact| artifact.state == MeetingArtifactState::Current)
-        .max_by_key(|artifact| artifact.generated_at_utc_ms)
+        .find(|artifact| {
+            artifact.state == MeetingArtifactState::Current && artifact.content.is_some()
+        })
         .and_then(|artifact| artifact.content.as_ref())
 }
 
@@ -540,6 +541,7 @@ mod tests {
                 action_items: vec![MeetingActionItem {
                     text: cited("Draft the launch note"),
                     owner_text: Some("Priya".to_string()),
+                    owner_edited: false,
                     due_text: Some("Friday".to_string()),
                 }],
                 key_questions: Vec::new(),

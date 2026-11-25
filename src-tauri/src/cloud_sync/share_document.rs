@@ -351,6 +351,7 @@ mod tests {
                 action_items: vec![MeetingActionItem {
                     text: cited("Draft the launch note"),
                     owner_text: Some("Priya".to_owned()),
+                    owner_edited: false,
                     due_text: Some("Friday".to_owned()),
                 }],
                 key_questions: Vec::new(),

@@ -1030,6 +1030,43 @@ struct MeetingGeneratedArtifacts: Decodable {
     let leftOut: [MeetingLeftOutSpan]?
 }
 
+struct MeetingNoteEditSource: Codable, Equatable, Identifiable {
+    let sessionId: MeetingSessionId
+    let artifactId: MeetingArtifactId
+    let expectedRevision: Int
+
+    var id: MeetingArtifactId { artifactId }
+}
+
+struct MeetingNoteTextEdit: Codable {
+    let slot: UInt32
+    let text: String
+}
+
+struct MeetingNoteEditPreview: Decodable {
+    struct Difference: Decodable, Identifiable {
+        let label: String
+        let context: String?
+        let before: String
+        let change: MeetingNoteTextEdit
+
+        var id: UInt32 { change.slot }
+    }
+
+    let source: MeetingNoteEditSource
+    let changes: [Difference]
+}
+
+struct MeetingNoteEditPrompt: Encodable {
+    let source: MeetingNoteEditSource
+    let instruction: String
+}
+
+struct MeetingNoteEditApproval: Encodable {
+    let source: MeetingNoteEditSource
+    let changes: [MeetingNoteTextEdit]
+}
+
 /// `LeftOutSpan`: one stretch of a meeting its notes leave out, and why.
 struct MeetingLeftOutSpan: Decodable {
     let startOffsetNs: Int64?
@@ -1173,7 +1210,7 @@ struct MeetingReviewSnapshot: Decodable {
 
     /// The newest current revision, which is what the notes panes read.
     var currentArtifact: MeetingArtifactRevision? {
-        artifacts.first { $0.state == .current }
+        artifacts.first { $0.state == .current && $0.content != nil }
     }
 
     /// The newest revision with anything in it, current or not. A corrected

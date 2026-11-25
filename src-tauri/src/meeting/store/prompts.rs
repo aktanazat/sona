@@ -253,8 +253,8 @@ impl MeetingStore {
         let stored: Option<String> = connection
             .query_row(
                 "SELECT artifact_id FROM meeting_artifact_revisions
-                  WHERE session_id = ?1 AND state = 'current'
-                  ORDER BY generated_at_utc_ms DESC LIMIT 1",
+                  WHERE session_id = ?1 AND state = 'current' AND content_json IS NOT NULL
+                  ORDER BY generated_at_utc_ms DESC, rowid DESC LIMIT 1",
                 params![id(session_id)],
                 |row| row.get(0),
             )

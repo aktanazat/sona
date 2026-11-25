@@ -1265,6 +1265,8 @@ pub struct MeetingOutlineTopic {
 pub struct MeetingActionItem {
     pub text: CitedArtifactText,
     pub owner_text: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_edited: bool,
     pub due_text: Option<String>,
 }
 

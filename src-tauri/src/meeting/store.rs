@@ -54,6 +54,7 @@ pub(crate) mod meeting_maybe;
 #[cfg(test)]
 mod meeting_maybe_tests;
 pub(crate) mod memory_index;
+mod note_edits;
 pub(crate) mod note_evidence;
 #[cfg(test)]
 mod note_evidence_tests;
@@ -6495,13 +6496,22 @@ impl MeetingStore {
         done: bool,
     ) -> Result<(), StoreError> {
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let action_count: i64 = transaction.query_row(
-            "SELECT COALESCE(json_array_length(content_json, '$.action_items'), 0)
-             FROM meeting_artifact_revisions WHERE artifact_id = ?1 AND session_id = ?2",
-            params![id(artifact_id), id(session_id)],
-            |row| row.get(0),
-        )?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let action_count: Option<i64> = transaction
+            .query_row(
+                "SELECT COALESCE(json_array_length(content_json, '$.action_items'), 0), artifact_id
+                   FROM meeting_artifact_revisions
+                  WHERE session_id = ?1 AND state IN ('current', 'out_of_date')
+                    AND content_json IS NOT NULL
+                  ORDER BY state = 'current' DESC, generated_at_utc_ms DESC, rowid DESC LIMIT 1",
+                params![id(session_id)],
+                |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(0)?)),
+            )
+            .optional()?
+            .filter(|(current, _)| *current == id(artifact_id))
+            .map(|(_, count)| count);
+        let action_count = action_count.ok_or(StoreError::StaleRevision)?;
         if i64::from(action_index) >= action_count {
             return Err(StoreError::Invalid);
         }
@@ -8569,7 +8579,7 @@ macro_rules! readable_artifact {
                 AND a.content_json IS NOT NULL
               ORDER BY json_type(a.content_json, '$.ledger') IS 'object' DESC,
                        a.state = 'current' DESC,
-                       a.generated_at_utc_ms DESC
+                       a.generated_at_utc_ms DESC, a.rowid DESC
               LIMIT 1"
         )
     };
@@ -9373,6 +9383,9 @@ impl ReceiptSpeakers {
     /// A voice in `my_labels` is the user's and reads as `me`.
     fn name_owners(&self, items: &mut [MeetingActionItem], my_labels: &[String], me: &str) {
         for item in items {
+            if item.owner_edited {
+                continue;
+            }
             let Some(owner) = item.owner_text.as_deref() else {
                 continue;
             };
@@ -9572,7 +9585,7 @@ fn artifact_revisions_for_session(
                 a.generated_at_utc_ms, r.wall_ms, r.audio_ns, r.route
          FROM meeting_artifact_revisions a
          LEFT JOIN meeting_processing_receipts r ON r.artifact_id = a.artifact_id
-         WHERE a.session_id = ?1 ORDER BY a.generated_at_utc_ms DESC",
+         WHERE a.session_id = ?1 ORDER BY a.generated_at_utc_ms DESC, a.rowid DESC",
     )?;
     let rows = statement.query_map(params![id(session_id)], |row| {
         artifact_revision_from_row(row, session_id)
@@ -12466,6 +12479,7 @@ mod tests {
                 .map(|_| MeetingActionItem {
                     text: text.clone(),
                     owner_text: None,
+                    owner_edited: false,
                     due_text: None,
                 })
                 .collect(),
@@ -13886,6 +13900,318 @@ mod tests {
                 ],
             )
             .expect("insert listed artifact");
+    }
+
+    #[test]
+    fn finished_note_apply_rejects_a_second_preview_and_keeps_the_original() {
+        use crate::meeting::note_edits::{NoteEditApply, NoteEditSource, NoteTextEdit};
+
+        let (_directory, store) = store();
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(&store, session_id);
+        list_artifact(&store, session_id, "Ask Niall about the launch.", None);
+        let original = store.current_artifact_id(session_id).unwrap().unwrap();
+        let source = NoteEditSource {
+            session_id,
+            artifact_id: original,
+            expected_revision: revision,
+        };
+        assert_eq!(
+            store.finished_note_for_edit(source).unwrap().summary.text,
+            "Ask Niall about the launch."
+        );
+        let approval = |replacement: &str| NoteEditApply {
+            source,
+            changes: vec![NoteTextEdit {
+                slot: 0,
+                text: replacement.into(),
+            }],
+        };
+        store
+            .save_finished_note_edit(approval("Ask Nyal about the launch."))
+            .unwrap();
+        assert_eq!(
+            store.save_finished_note_edit(approval("Ask Lila about the launch.")),
+            Err(StoreError::StaleRevision)
+        );
+        let snapshot = store.review_snapshot(session_id).unwrap();
+        let current = crate::meeting::review_text::readable_artifact(&snapshot.artifacts).unwrap();
+        assert_eq!(
+            current.content.as_ref().unwrap().summary.text,
+            "Ask Nyal about the launch."
+        );
+        let older = snapshot
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_id == original)
+            .unwrap();
+        assert_eq!(
+            older.content.as_ref().unwrap().summary.text,
+            "Ask Niall about the launch."
+        );
+    }
+
+    #[test]
+    fn finished_note_apply_rejects_a_regeneration_even_when_the_session_revision_is_unchanged() {
+        use crate::meeting::note_edits::{NoteEditApply, NoteEditSource, NoteTextEdit};
+
+        let (_directory, store) = store();
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(&store, session_id);
+        list_artifact(&store, session_id, "Old notes.", None);
+        let original = store
+            .review_snapshot(session_id)
+            .unwrap()
+            .artifacts
+            .remove(0);
+        let mut fresh = trend_artifacts(0);
+        fresh.summary.text = "New generation.".into();
+        let new = store
+            .store_artifact_revision(ArtifactRevisionInput {
+                session_id,
+                transcript_revision_id: original.transcript_revision_id,
+                input_revision: revision,
+                template_id: &original.template_id,
+                template_version: original.template_version,
+                generation_key: "concurrent-generation",
+                state: MeetingArtifactState::Current,
+                content: Some(&fresh),
+                generated_at_utc_ms: original.generated_at_utc_ms,
+            })
+            .unwrap();
+        assert_eq!(
+            store.session_snapshot(session_id).unwrap().revision,
+            revision
+        );
+        assert_eq!(
+            store.save_finished_note_edit(NoteEditApply {
+                source: NoteEditSource {
+                    session_id,
+                    artifact_id: original.artifact_id,
+                    expected_revision: revision
+                },
+                changes: vec![NoteTextEdit {
+                    slot: 0,
+                    text: "Stale change.".into()
+                }],
+            }),
+            Err(StoreError::StaleRevision)
+        );
+        let snapshot = store.review_snapshot(session_id).unwrap();
+        assert_eq!(snapshot.artifacts.len(), 2);
+        let concurrent =
+            crate::meeting::review_text::readable_artifact(&snapshot.artifacts).unwrap();
+        assert_eq!(snapshot.artifacts[0].artifact_id, new.artifact_id);
+        assert_eq!(concurrent.artifact_id, new.artifact_id);
+        assert_eq!(
+            store.current_artifact_id(session_id).unwrap(),
+            Some(new.artifact_id)
+        );
+        assert_eq!(
+            concurrent.content.as_ref().unwrap().summary.text,
+            "New generation."
+        );
+    }
+
+    #[test]
+    fn finished_note_apply_preserves_done_items_notes_and_supporting_evidence() {
+        use crate::meeting::note_edits::{NoteEditApply, NoteEditSource, NoteTextEdit};
+
+        let (_directory, store) = store();
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(&store, session_id);
+        list_artifact(&store, session_id, "Seed notes.", None);
+        let seed = store
+            .review_snapshot(session_id)
+            .unwrap()
+            .artifacts
+            .remove(0);
+        let mut note = trend_artifacts(1);
+        note.summary.text = "Keep this.\nFix Niall.".into();
+        let citation = |offset| ArtifactCitation {
+            segment_id: TranscriptSegmentId::new(),
+            start_offset_ns: offset,
+            end_offset_ns: offset + 1,
+        };
+        let first = citation(0);
+        let second = citation(1);
+        let changed = citation(2);
+        note.summary.citations = vec![first.clone(), second.clone(), changed.clone()];
+        note.summary_trace = vec![
+            SummaryLineTrace {
+                line: 0,
+                anchor: first,
+            },
+            SummaryLineTrace {
+                line: 1,
+                anchor: changed,
+            },
+        ];
+        let old = store
+            .store_artifact_revision(ArtifactRevisionInput {
+                session_id,
+                transcript_revision_id: seed.transcript_revision_id,
+                input_revision: revision,
+                template_id: &seed.template_id,
+                template_version: seed.template_version,
+                generation_key: "with-actions",
+                state: MeetingArtifactState::Current,
+                content: Some(&note),
+                generated_at_utc_ms: seed.generated_at_utc_ms + 1,
+            })
+            .unwrap();
+        let personal = store
+            .save_user_notes(
+                session_id,
+                "My own notes.",
+                MeetingNotesTemplate::General,
+                None,
+                0,
+            )
+            .unwrap();
+        store
+            .set_action_item_done(session_id, old.artifact_id, 0, true)
+            .unwrap();
+        store
+            .save_finished_note_edit(NoteEditApply {
+                source: NoteEditSource {
+                    session_id,
+                    artifact_id: old.artifact_id,
+                    expected_revision: revision,
+                },
+                changes: vec![NoteTextEdit {
+                    slot: 0,
+                    text: "Keep this.\nFix Nyal.".into(),
+                }],
+            })
+            .unwrap();
+        assert_eq!(
+            store.set_action_item_done(session_id, old.artifact_id, 0, false),
+            Err(StoreError::StaleRevision)
+        );
+        let snapshot = store.review_snapshot(session_id).unwrap();
+        let edited = &snapshot.artifacts[0];
+        let result = edited.content.as_ref().unwrap();
+        assert_eq!(result.summary.text, "Keep this.\nFix Nyal.");
+        assert_eq!(result.summary_trace, note.summary_trace[..1]);
+        assert!(result.summary.citations.contains(&second));
+        assert!(store
+            .action_item_states(session_id)
+            .unwrap()
+            .iter()
+            .any(|state| state.artifact_id == edited.artifact_id
+                && state.action_index == 0
+                && state.done));
+        assert_eq!(
+            store
+                .user_notes(session_id, MeetingNotesTemplate::General.into())
+                .unwrap(),
+            personal
+        );
+    }
+
+    #[test]
+    fn finished_note_preview_identifies_the_action_an_owner_change_applies_to() {
+        use crate::meeting::note_edits::{propose, NoteEditApply, NoteEditSource};
+        struct AssignBudget;
+
+        impl MeetingTextGenerator for AssignBudget {
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn model_id(&self) -> &'static str {
+                "test-note-edit"
+            }
+            fn model_version(&self) -> Cow<'static, str> {
+                Cow::Borrowed("1")
+            }
+            fn max_input_bytes(&self) -> usize {
+                usize::MAX
+            }
+
+            fn generate(
+                &self,
+                _: &str,
+                evidence: &str,
+                _: i32,
+                _: ReplyShape,
+            ) -> Result<String, MeetingTextGenerationError> {
+                let evidence: serde_json::Value = serde_json::from_str(evidence).unwrap();
+                let owner = evidence["fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|field| {
+                        field["label"] == "Action owner" && field["context"] == "Send the budget"
+                    })
+                    .unwrap();
+                Ok(
+                    serde_json::json!({"changes": [{"slot": owner["slot"], "text": "Kim"}]})
+                        .to_string(),
+                )
+            }
+        }
+
+        let (_directory, store) = store();
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(&store, session_id);
+        list_artifact(&store, session_id, "Seed notes.", None);
+        let seed = store
+            .review_snapshot(session_id)
+            .unwrap()
+            .artifacts
+            .remove(0);
+        let mut note = trend_artifacts(2);
+        for (item, text) in note
+            .action_items
+            .iter_mut()
+            .zip(["Send the report", "Send the budget"])
+        {
+            item.text.text = text.into();
+            item.owner_text = Some("Angela".into());
+        }
+        let artifact = store
+            .store_artifact_revision(ArtifactRevisionInput {
+                session_id,
+                transcript_revision_id: seed.transcript_revision_id,
+                input_revision: revision,
+                template_id: &seed.template_id,
+                template_version: seed.template_version,
+                generation_key: "two-owners",
+                state: MeetingArtifactState::Current,
+                content: Some(&note),
+                generated_at_utc_ms: seed.generated_at_utc_ms + 1,
+            })
+            .unwrap();
+        let source = NoteEditSource {
+            session_id,
+            artifact_id: artifact.artifact_id,
+            expected_revision: revision,
+        };
+        let current = store.finished_note_for_edit(source).unwrap();
+        let preview = propose(source, current, "Assign the budget to Kim", &AssignBudget).unwrap();
+        assert_eq!(preview.changes.len(), 1);
+        let change = &preview.changes[0];
+        assert_eq!(change.context.as_deref(), Some("Send the budget"));
+        assert_eq!(change.before, "Angela");
+        assert_eq!(
+            store.finished_note_for_edit(source).unwrap().action_items,
+            note.action_items
+        );
+        store
+            .save_finished_note_edit(NoteEditApply {
+                source: preview.source,
+                changes: preview
+                    .changes
+                    .into_iter()
+                    .map(|change| change.change)
+                    .collect(),
+            })
+            .unwrap();
+        let snapshot = store.review_snapshot(session_id).unwrap();
+        let actions = &snapshot.artifacts[0].content.as_ref().unwrap().action_items;
+        assert_eq!(actions[0].owner_text.as_deref(), Some("Angela"));
+        assert_eq!(actions[1].owner_text.as_deref(), Some("Kim"));
     }
 
     /// Give `session_id` a current transcript of `texts` and no artifacts, so

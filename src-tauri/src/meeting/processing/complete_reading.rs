@@ -1141,6 +1141,7 @@ fn keep_marked_moments(content: &mut GeneratedMeetingArtifacts, evidence: &Artif
                         MeetingActionItem {
                             text: said,
                             owner_text: None,
+                            owner_edited: false,
                             due_text: None,
                         },
                     );
