@@ -1,6 +1,18 @@
 import AppKit
 import SwiftUI
 
+/// The focused Markdown editor's link action, while words are selected. ⌘K is
+/// a menu command, and a menu takes its key before the editor sees it, so the
+/// menu item asks for this first.
+struct MarkdownLinkAction: FocusedValueKey { typealias Value = () -> Void }
+
+extension FocusedValues {
+    var markdownLink: MarkdownLinkAction.Value? {
+        get { self[MarkdownLinkAction.self] }
+        set { self[MarkdownLinkAction.self] = newValue }
+    }
+}
+
 /// The editor for Markdown notes and task details. It keeps the system text
 /// editor, and adds the formatting keys, list keys and a bar over a selection.
 /// Key codes are US ANSI, so the shortcuts match the keys' positions.
@@ -29,6 +41,7 @@ struct MarkdownTextEditor: View {
             .scrollDisabled(true)
             .focused(focused)
             .accessibilityLabel(label)
+            .focusedValue(\.markdownLink, span.flatMap { $0.start == $0.end ? nil : { run(.link(nil)) } })
             .onKeyPress { press in
                 if keys(press) == .handled { return .handled }
                 guard let command = command(for: press), run(command) else { return .ignored }
@@ -52,8 +65,9 @@ struct MarkdownTextEditor: View {
 
     private func command(for press: KeyPress) -> MarkdownCommand? {
         let modifiers = press.modifiers
-        if press.key == .tab, !modifiers.contains(.command) {
-            return .nest(outdent: modifiers.contains(.shift))
+        // Shift-Tab arrives as the backtab character, not as Tab with Shift.
+        if press.key == .tab || press.characters == "\u{19}", !modifiers.contains(.command) {
+            return .nest(outdent: modifiers.contains(.shift) || press.characters == "\u{19}")
         }
         if press.key == .return, modifiers.isEmpty {
             return .newline
@@ -66,7 +80,6 @@ struct MarkdownTextEditor: View {
         case (34, false, false): return .mark("*")
         case (1, true, false), (7, true, false): return .mark("~~")
         case (14, false, false): return .mark("`")
-        case (40, false, false): return .link(nil)
         case (9, false, false): return pastedLink.map { MarkdownCommand.link($0) }
         case (29, false, true): return .heading(0)
         case (18, false, true): return .heading(1)
@@ -94,13 +107,14 @@ struct MarkdownTextEditor: View {
     @discardableResult
     private func run(_ command: MarkdownCommand) -> Bool {
         guard let span, let edited = MarkdownEdit.run(command, on: span) else { return false }
-        text = edited.text
-        selection = TextSelection(range: index(edited.start)..<index(edited.end))
+        // The binding may hand back the old text until the next update, so the
+        // selection is placed in the edited text itself.
+        let words = edited.text
+        let start = words.index(words.startIndex, offsetBy: edited.start)
+        let end = words.index(words.startIndex, offsetBy: edited.end)
+        text = words
+        selection = TextSelection(range: start..<end)
         return true
-    }
-
-    private func index(_ offset: Int) -> String.Index {
-        text.index(text.startIndex, offsetBy: offset)
     }
 }
 

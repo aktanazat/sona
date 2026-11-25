@@ -5,6 +5,7 @@ import SwiftUI
 @main
 struct SonaApp: App {
     @NSApplicationDelegateAdaptor(SonaAppDelegate.self) private var appDelegate
+    @FocusedValue(\.markdownLink) private var markdownLink
 
     private var model: AppModel { appDelegate.model }
 
@@ -44,7 +45,9 @@ struct SonaApp: App {
                 Button("Record a Meeting") { model.recordMeeting() }
                 ScreenRecordingMenuItem(model: model)
                 Divider()
-                Button("Search Sona…") { model.toggleSearch() }
+                Button("Search Sona…") {
+                    if let markdownLink { markdownLink() } else { model.toggleSearch() }
+                }
                     .keyboardShortcut("k", modifiers: .command)
             }
             CommandGroup(replacing: .help) {
