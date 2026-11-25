@@ -2,6 +2,44 @@ import SwiftUI
 import QuartzCore
 import Observation
 
+struct DictationCancelPrompt: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let promptId = model.cancelConfirmation {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Cancel this dictation?")
+                    .font(.system(size: 13, weight: .medium))
+                    .accessibilityAddTraits(.isHeader)
+                HStack(spacing: 8) {
+                    Button("Keep recording") { model.answerCancel(promptId, choice: .keep) }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.defaultAction)
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .background(Theme.hudControl, in: Capsule())
+                    Button("Cancel dictation", role: .destructive) {
+                        model.answerCancel(promptId, choice: .cancel)
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .help("Cancel dictation (⌘⌫)")
+                    .padding(.horizontal, 8)
+                    .frame(height: 28)
+                }
+                .font(.system(size: 12, weight: .medium))
+            }
+            .padding(12)
+            .foregroundStyle(Theme.hudInk)
+            .background(Theme.hud, in: RoundedRectangle(cornerRadius: Theme.radiusDialog))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.hudBorder, lineWidth: 1))
+            .environment(\.colorScheme, .dark)
+            .padding(8)
+            .onExitCommand { model.answerCancel(promptId, choice: .keep) }
+        }
+    }
+}
+
 struct HUDPill: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

@@ -294,7 +294,11 @@ pub(crate) fn keyboard_focus() -> KeyboardFocus {
             let element: &CFType = &element;
             CFHash(Some(element))
         });
-    KeyboardFocus { pid, element }
+    KeyboardFocus {
+        pid,
+        element,
+        ..KeyboardFocus::default()
+    }
 }
 
 /// Reads just the browser host needed to select a local mode. The captured URL

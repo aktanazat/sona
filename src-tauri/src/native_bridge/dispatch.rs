@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 52] = [
+pub(super) const TYPED_EVENTS: [&str; 53] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -22,6 +22,7 @@ pub(super) const TYPED_EVENTS: [&str; 52] = [
     crate::modes::ModesChangedEvent::NAME,
     crate::managers::audio::DictationRecordingChangedEvent::NAME,
     crate::transcription_coordinator::DictationDurationWarningEvent::NAME,
+    crate::transcription_coordinator::DictationCancelWarningEvent::NAME,
     crate::managers::history::HistoryUpdatePayload::NAME,
     crate::managers::transcription::StreamTextEvent::NAME,
     crate::managers::transcription::StreamPhaseEvent::NAME,
@@ -1892,6 +1893,17 @@ pub(super) async fn call(
             let handle = app.clone();
             on_main_thread(app, move || {
                 crate::commands::cancel_operation(handle.clone());
+                encode_plain(())
+            })
+            .await?
+        }
+        "answer_dictation_cancel" => {
+            let mut args = Args::parse(params)?;
+            let prompt_id = args.take("promptId")?;
+            let choice = args.take("choice")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                crate::commands::answer_dictation_cancel(handle.clone(), prompt_id, choice);
                 encode_plain(())
             })
             .await?

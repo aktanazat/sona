@@ -867,7 +867,7 @@ fn build_tray(app_handle: &AppHandle, visible: bool) -> anyhow::Result<()> {
                 }
             }
             "cancel_transcription" => {
-                utils::cancel_current_operation(app);
+                utils::cancel_current_operation(app, transcription_coordinator::CancelRequest::Ask);
             }
             "start_meeting_notes" => {
                 let manager = Arc::clone(&app.state::<Arc<MeetingSessionManager>>());
@@ -1697,6 +1697,7 @@ pub fn run(cli_args: CliArgs) {
             secure_input::run_keyboard_diagnostic,
             show_main_window_command,
             commands::cancel_operation,
+            commands::answer_dictation_cancel,
             commands::finish_recording,
             commands::paste_held_dictation,
             commands::is_portable,
@@ -2184,6 +2185,7 @@ pub fn run(cli_args: CliArgs) {
             modes::ModesChangedEvent,
             managers::audio::DictationRecordingChangedEvent,
             transcription_coordinator::DictationDurationWarningEvent,
+            transcription_coordinator::DictationCancelWarningEvent,
             managers::history::HistoryUpdatePayload,
             managers::transcription::StreamTextEvent,
             managers::transcription::StreamPhaseEvent,
@@ -2333,7 +2335,10 @@ pub fn run(cli_args: CliArgs) {
                         "toggled transcription with post-processing"
                     }
                     ForwardedControl::Cancel => {
-                        crate::utils::cancel_current_operation(app);
+                        crate::utils::cancel_current_operation(
+                            app,
+                            transcription_coordinator::CancelRequest::Immediate,
+                        );
                         "cancelled the current operation"
                     }
                 }
@@ -2516,7 +2521,15 @@ pub fn run(cli_args: CliArgs) {
                 Ordering::Relaxed,
             );
             let app_handle = app.handle().clone();
-            app.manage(TranscriptionCoordinator::new(app_handle.clone()));
+            let cancel_policy = if cfg!(target_os = "macos") && native_socket.is_some() {
+                transcription_coordinator::CancelPolicy::ConfirmLongRecording
+            } else {
+                transcription_coordinator::CancelPolicy::Immediate
+            };
+            app.manage(TranscriptionCoordinator::new(
+                app_handle.clone(),
+                cancel_policy,
+            ));
 
             let startup_app = app_handle.clone();
             let complete_startup = move || {

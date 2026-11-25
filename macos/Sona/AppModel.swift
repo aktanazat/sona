@@ -167,6 +167,19 @@ struct DictationDurationWarningEvent: Decodable {
     let remainingSeconds: Int?
 }
 
+struct DictationCancelWarningEvent: Decodable {
+    let promptId: UInt64?
+}
+
+enum DictationCancelChoice: String, Encodable {
+    case keep, cancel
+}
+
+private struct DictationCancelAnswer: Encodable {
+    let promptId: UInt64
+    let choice: DictationCancelChoice
+}
+
 enum DictationDeliveryOutcome: String, Decodable {
     case pasted, sent
 }
@@ -234,6 +247,7 @@ extension CoreEvent {
     /// second while the microphone is open and the overlay style shows them.
     static let micLevel = "mic-level"
     static let dictationDurationWarning = "dictation-duration-warning-event"
+    static let dictationCancelWarning = "dictation-cancel-warning-event"
     /// A voice command question was answered into the chat; the sheet is
     /// what shows it.
     static let commandAnswered = "command-mode://answered"
@@ -309,6 +323,7 @@ final class AppModel {
     /// has said so; nil the rest of the time. The pill shows it, on its own
     /// if it has to.
     private(set) var pillWarningSeconds: Int?
+    private(set) var cancelConfirmation: UInt64?
     private(set) var pillFeedback: PillFeedback?
     /// The dictation has run long enough that meeting mode would suit it,
     /// until the recording ends.
@@ -370,6 +385,7 @@ final class AppModel {
     @ObservationIgnored let core = Core()
     @ObservationIgnored let workKeys = WorkKeys()
     @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
+    @ObservationIgnored private var cancelPromptPanel: FloatingPanel?
     @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel(), arrival: .slide)
     @ObservationIgnored private let windowAttached: WindowAttachedCard
     @ObservationIgnored private lazy var quickEntry = QuickEntry(model: self)
@@ -454,6 +470,7 @@ final class AppModel {
             CoreEvent.modelDeleted, CoreEvent.recordingError, CoreEvent.pasteError, CoreEvent.rewriteSkipped,
             CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
             CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
+            CoreEvent.dictationCancelWarning,
             CoreEvent.commandAnswered, CoreEvent.showMainWindow, CoreEvent.dictationDelivery,
             CoreEvent.dictationKept, CoreEvent.dictationMeetingSuggestion,
         ] {
@@ -855,6 +872,18 @@ final class AppModel {
         clearPillFeedback()
     }
 
+    func answerCancel(_ promptId: UInt64, choice: DictationCancelChoice) {
+        guard cancelConfirmation == promptId else { return }
+        if case .keep = choice {
+            cancelConfirmation = nil
+            cancelPromptPanel?.hide()
+        }
+        call {
+            try await self.core.request(
+                "answer_dictation_cancel", DictationCancelAnswer(promptId: promptId, choice: choice))
+        }
+    }
+
     /// The pill's "Paste here": the words held back when the window changed
     /// go to the window in front now.
     func pasteHeldDictation() {
@@ -1073,6 +1102,7 @@ final class AppModel {
     private func coreClosed() {
         coreStopped = true
         liveText = ""
+        cancelConfirmation = nil
         clearPillFeedback()
         setCapture(.idle)
     }
@@ -1182,6 +1212,20 @@ final class AppModel {
         pillCapture = capture
         _ = pillReturned
         pill.dockable = false
+        if !coreStopped, case .recording = capture, cancelConfirmation != nil {
+            pill.hide()
+            if cancelPromptPanel == nil {
+                let panel = FloatingPanel(DictationCancelPrompt().environment(self), keyed: true)
+                panel.onResignKey = { [weak self] in
+                    guard let self, let promptId = self.cancelConfirmation else { return }
+                    self.answerCancel(promptId, choice: .keep)
+                }
+                cancelPromptPanel = panel
+            }
+            cancelPromptPanel?.show(at: .edge(HudPillEdge(record.overlayPosition)))
+            return
+        }
+        cancelPromptPanel?.hide()
         if coreStopped {
             pill.hide()
         } else if capture != .idle || pillFeedback != nil {
@@ -1377,6 +1421,9 @@ final class AppModel {
             case CoreEvent.dictationDurationWarning:
                 let event: DictationDurationWarningEvent = try Core.payload(line)
                 pillWarningSeconds = event.remainingSeconds
+            case CoreEvent.dictationCancelWarning:
+                let event: DictationCancelWarningEvent = try Core.payload(line)
+                cancelConfirmation = event.promptId
             case CoreEvent.recordingError:
                 let event: RecordingErrorEvent = try Core.payload(line)
                 notice = CaptureNotice(text: Self.recordingErrorText(event.errorType))
@@ -1469,7 +1516,7 @@ final class AppModel {
                 : "The words could not be pasted into the app in front. They are kept in the Library."
         }
         return [
-            "You switched windows before the words were ready, so they weren't pasted.",
+            "Sona couldn't confirm where to paste the words.",
             offered ? "Click Paste here on the pill to paste them where you are now." : nil,
             event.historyId == nil ? nil : "They are kept in the Library.",
         ].compactMap { $0 }.joined(separator: " ")
