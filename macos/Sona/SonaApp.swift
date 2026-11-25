@@ -334,6 +334,16 @@ struct MenuBarMenu: View {
                 Divider()
                 if let event = summary.event {
                     Button(summary.label) { model.openBrief(event.eventKey) }
+                    if let join = summary.join {
+                        Button("Join \(join.title)") {
+                            Task {
+                                if let url = await model.prep.joinURL(for: join), !model.coreStopped {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                        }
+                        .disabled(model.prep.joiningFromMenu)
+                    }
                 } else {
                     Text(summary.label)
                     if model.prep.upcoming?.access != .authorized {
