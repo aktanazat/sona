@@ -584,11 +584,13 @@ fn create_audio_recorder(
 pub struct RecordingReadiness {
     receiver: mpsc::Receiver<()>,
     generation: u64,
+    input_name: Option<String>,
 }
 
 impl RecordingReadiness {
-    pub fn wait(self) -> bool {
-        self.receiver.recv().is_ok()
+    pub fn wait(self) -> Result<Option<String>, mpsc::RecvError> {
+        self.receiver.recv()?;
+        Ok(self.input_name)
     }
 
     pub fn generation(&self) -> u64 {
@@ -1510,11 +1512,12 @@ impl AudioRecordingManager {
         previous
     }
 
-    pub fn try_start_recording(
+    pub(crate) fn try_start_recording(
         &self,
         binding_id: &str,
         vad_policy: VadPolicy,
         spool: CaptureSpool,
+        on_input_failure: impl FnOnce() + Send + 'static,
     ) -> Result<RecordingReadiness, String> {
         let mut state = lock_recover(&self.state);
         if !matches!(*state, RecordingState::Idle) {
@@ -1556,12 +1559,14 @@ impl AudioRecordingManager {
             .as_ref()
             .ok_or_else(|| "Recorder not available".to_string())
             .and_then(|recorder| {
-                recorder
+                let started = recorder
                     .start_spooled(vad_policy, path)
-                    .map_err(|error| format!("Failed to start recorder: {error}"))
+                    .map_err(|error| format!("Failed to start recorder: {error}"))?;
+                let input_name = recorder.watch_recording_input(on_input_failure);
+                Ok((started, input_name))
             });
-        let (receiver, path) = match result {
-            Ok(started) => started,
+        let ((receiver, path), input_name) = match result {
+            Ok(ready) => ready,
             Err(error) => {
                 self.release_failed_dictation_microphone(token);
                 return Err(error);
@@ -1581,6 +1586,7 @@ impl AudioRecordingManager {
         Ok(RecordingReadiness {
             receiver,
             generation,
+            input_name,
         })
     }
 
@@ -1626,6 +1632,7 @@ impl AudioRecordingManager {
             Ok(receiver) => Ok(RecordingReadiness {
                 receiver,
                 generation,
+                input_name: None,
             }),
             Err(error) => {
                 self.capture_lease.release(token);
@@ -1803,6 +1810,10 @@ impl AudioRecordingManager {
 
     pub fn is_recording_readiness_current(&self, generation: u64) -> bool {
         self.capture_generation.load(Ordering::Acquire) == generation
+    }
+
+    pub(crate) fn is_recording_input_available(&self, generation: u64) -> bool {
+        self.is_recording_readiness_current(generation) && self.stream_is_running()
     }
 
     pub fn cancel_generation(&self) -> u64 {

@@ -284,6 +284,7 @@ extension CoreEvent {
 
 extension CoreEvent {
     static let recordingError = "recording-error"
+    static let dictationInput = "dictation-input"
     static let pasteError = "paste-error"
     static let rewriteSkipped = "rewrite-skipped"
     static let transcriptionError = "transcription-error"
@@ -342,6 +343,8 @@ final class AppModel {
     /// The microphone follows this: on while recording, off otherwise. The
     /// core decides; the shell only asks and follows the events.
     private(set) var capture: CaptureState = .idle
+    private(set) var activeDictationInput: String?
+    @ObservationIgnored private var activeInputRunID: UInt64?
     /// The words of the dictation in flight: committed text, then what the
     /// engine still expects to revise.
     private(set) var liveText = ""
@@ -516,6 +519,7 @@ final class AppModel {
 
         for name in [
             CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase, CoreEvent.micLevel,
+            CoreEvent.dictationInput,
             CoreEvent.modelStateChanged, CoreEvent.modelsUpdated, CoreEvent.downloadProgress,
             CoreEvent.downloadComplete, CoreEvent.downloadFailed, CoreEvent.downloadCancelled,
             CoreEvent.verificationStarted, CoreEvent.verificationCompleted,
@@ -1043,6 +1047,8 @@ final class AppModel {
 
     private func setCapture(_ state: CaptureState) {
         capture = state
+        activeDictationInput = nil
+        activeInputRunID = nil
         if case .recording = state {
             slowConnectionStage = nil
             clearPillFeedback()
@@ -1498,10 +1504,17 @@ final class AppModel {
                     liveText = ""
                     notice = nil
                     setCapture(.recording(since: .now))
+                    activeInputRunID = activity.runId
                 case "transcribing":
                     setCapture(.working("transcribing"))
                 default:
                     setCapture(.idle)
+                }
+            case CoreEvent.dictationInput:
+                let input: DictationInput = try Core.payload(line)
+                if activeInputRunID == input.runId {
+                    activeDictationInput = input.inputName
+                    if input.inputName == nil { activeInputRunID = nil }
                 }
             case CoreEvent.streamText:
                 let text: StreamText = try Core.payload(line)

@@ -70,6 +70,11 @@ struct DictationActivity: Decodable {
     let runId: UInt64?
 }
 
+struct DictationInput: Decodable {
+    let runId: UInt64
+    let inputName: String?
+}
+
 struct StreamText: Decodable {
     let committed: String
     let tentative: String
