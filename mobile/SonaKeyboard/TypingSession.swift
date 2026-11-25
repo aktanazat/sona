@@ -156,7 +156,9 @@ struct TypingSession {
             let edit = Edit(deleteCount: correction.typed.count, insert: correction.replacement + separator)
             return remember(.corrected(correction, separator: separator), edit, on: text)
         }
-        if corrects { learn(before: text) }
+        /* Before the common words load, the corrector cannot tell a typo from a rare word and
+         * leaves both alone; counting such a word would make a typo known for good. */
+        if corrects, corrector?.common != nil { learn(before: text) }
         return remember(separator == " " ? .space : .other, Edit(insert: separator), on: text)
     }
 
@@ -249,6 +251,20 @@ struct TypingSession {
 
     private mutating func keep(_ word: String) {
         learning.keep(word)
+        lexicon.setLearned(learning.known)
+    }
+
+    /// A word learned before the corrector could judge it may be a plain typo ("teh") that,
+    /// once known, is never corrected again. Once, with the common words loaded, learned
+    /// words the corrector would clearly fix, mid-sentence and without the learning, are
+    /// forgotten. Words in the vocabulary and the person's names stay known.
+    mutating func forgetLearnedTypos() {
+        guard let corrector, corrector.common != nil, learning.typosChecked != true else { return }
+        var bare = lexicon
+        bare.setLearned([])
+        let typos = learning.known.filter { corrector.correction(before: "so " + $0, lexicon: bare) != nil }
+        learning.forget(typos)
+        learning.typosChecked = true
         lexicon.setLearned(learning.known)
     }
 

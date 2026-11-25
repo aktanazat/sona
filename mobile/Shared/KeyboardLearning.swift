@@ -12,6 +12,9 @@ struct KeyboardLearning: Codable, Equatable {
 
     private(set) var words: [String: Int] = [:]
     private(set) var follows: [String: [String: Int]] = [:]
+    /// Whether learned words were once checked for typos learned by mistake; nil in learning
+    /// saved before that check existed.
+    var typosChecked: Bool?
 
     /// Learned words, spelled as the person types them in mid-sentence.
     var known: [String] { words.filter { $0.value >= Self.knownAfter }.map(\.key) }
@@ -32,6 +35,15 @@ struct KeyboardLearning: Codable, Equatable {
     mutating func keep(_ word: String) {
         words[word] = max(words[word] ?? 0, Self.knownAfter)
         prune()
+    }
+
+    /// Forgets `forgotten` as words and as what follows another word.
+    mutating func forget(_ forgotten: [String]) {
+        for word in forgotten {
+            words[word] = nil
+            for key in follows.keys { follows[key]?[word] = nil }
+            follows[word.lowercased()] = nil
+        }
     }
 
     /// What the person most often typed after `word`, most often first.

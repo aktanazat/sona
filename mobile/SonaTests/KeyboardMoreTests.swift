@@ -16,15 +16,56 @@ struct KeyboardLearningTests {
         #expect(text == "that is \(word) ")
     }
 
+    /// The corrector as it is once the language's common words have loaded.
+    private func warmSession(_ learning: KeyboardLearning = KeyboardLearning()) async throws -> TypingSession {
+        let corrector = try #require(TypingCorrector(language: "en-US"))
+        corrector.common = await CommonWords.list(for: .english)
+        return TypingSession(corrector: corrector, learning: learning)
+    }
+
     @Test("a word typed twice is learned and offered as the completion of its start")
-    func learnsTypedWords() throws {
-        var session = try session()
+    func learnsTypedWords() async throws {
+        var session = try await warmSession()
         for _ in 0..<2 {
             var text = "ping aktanbot"
             text.apply(session.end(with: " ", before: text, corrects: true))
         }
         #expect(session.learning.knows("aktanbot"))
         #expect(session.suggestions(before: "ask akta")?.others.contains("aktanbot") == true)
+    }
+
+    @Test("a typo spaced past before the common words load is not learned, so it is corrected later")
+    func typoBeforeTheWordsLoadIsNotLearned() async throws {
+        var cold = try session()
+        for _ in 0..<2 {
+            var text = "so teh"
+            text.apply(cold.end(with: " ", before: text, corrects: true))
+        }
+        var session = try await warmSession(cold.learning)
+        var text = "so teh"
+        text.apply(session.end(with: " ", before: text, corrects: true))
+        #expect(text == "so the ")
+    }
+
+    @Test("typos learned by mistake are forgotten once, and learned names stay known")
+    func learnedTyposAreForgotten() async throws {
+        var learning = KeyboardLearning()
+        for word in ["teh", "teh", "Dauren", "Dauren"] { learning.typed(word, after: nil) }
+        var session = try await warmSession(learning)
+        session.forgetLearnedTypos()
+        #expect(!session.learning.knows("teh"))
+        #expect(session.learning.knows("Dauren"))
+        var text = "so teh"
+        text.apply(session.end(with: " ", before: text, corrects: true))
+        #expect(text == "so the ")
+    }
+
+    @Test("a lone j is the word I", arguments: ["j", "J"])
+    func loneJIsI(typed: String) throws {
+        var session = try session()
+        var text = "yes " + typed
+        text.apply(session.end(with: " ", before: text, corrects: true))
+        #expect(text == "yes I ")
     }
 
     @Test("coming back to a corrected word offers the word as typed, and choosing it keeps it")
