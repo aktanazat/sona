@@ -542,6 +542,9 @@ final class AppModel: NSObject, ObservableObject {
         let saving = UIApplication.shared.beginBackgroundTask(withName: "Save recording")
         Task {
             let kept: Bool
+            /* A save that threw left the audio on the iPhone; one that found no audio
+             * removed the capture, so there is nothing to try again. */
+            var failedToSave = false
             do {
                 kept = try await keepCapture(
                     finished.journal, audio: finished.audio,
@@ -556,13 +559,11 @@ final class AppModel: NSObject, ObservableObject {
             } catch {
                 library.error = error.localizedDescription
                 kept = false
+                failedToSave = true
             }
-            if !kept {
-                /* The audio stays on the iPhone; the next recovery tries it again. */
-                recorder.retryLater(finished.journal.id)
-                if !recorder.isRecording, recorder.mostRecentCaptureID == finished.journal.id, recorder.notice == nil {
-                    recorder.notice = .keptForRetry
-                }
+            if failedToSave { recorder.retryLater(finished.journal.id) }
+            if !kept, !recorder.isRecording, recorder.mostRecentCaptureID == finished.journal.id, recorder.notice == nil {
+                recorder.notice = failedToSave ? .keptForRetry : .notSaved
             }
             if saving != .invalid { UIApplication.shared.endBackgroundTask(saving) }
             await drain()

@@ -542,9 +542,12 @@ impl CoordinatorState {
     /// open until the next press.
     fn on_grace_expired(&mut self) -> Option<Effect> {
         let pending = self.pending_release.take()?;
+        /* Letting go while the cancel question is open is not a stop: the answer decides,
+         * so the recording stays open until it comes. */
+        let asking = matches!(self.stage, Stage::Recording { cancel_prompt: Some(_), .. });
         match pending.outcome {
-            GraceOutcome::Stop => self.stop_recording(&pending.intent, pending.shortcut_label),
-            GraceOutcome::Latch => self.latch(&pending.intent).then_some(Effect::Latched),
+            GraceOutcome::Stop if !asking => self.stop_recording(&pending.intent, pending.shortcut_label),
+            GraceOutcome::Stop | GraceOutcome::Latch => self.latch(&pending.intent).then_some(Effect::Latched),
         }
     }
 
@@ -1831,6 +1834,28 @@ mod tests {
                 cancel_pending: true
             })
         ));
+        assert!(harness.is_idle());
+    }
+
+    #[test]
+    fn letting_go_of_a_held_key_while_cancel_asks_does_not_deliver_the_dictation() {
+        let mut harness = Harness::new();
+        press_and_hold(&mut harness);
+        harness.advance(Duration::from_millis(30_001));
+        let Some(Effect::CancelWarning(Some(prompt_id))) = harness.cancel(CancelRequest::Ask)
+        else {
+            panic!("Cancel must ask before stopping a long recording");
+        };
+        harness.input(active_mode(), false, true);
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert_eq!(harness.stops, 0, "the release must not stop and deliver while the question is open");
+        assert!(harness.is_recording());
+        let confirmed = harness.cancel(CancelRequest::Answer {
+            prompt_id,
+            choice: DictationCancelChoice::Cancel,
+        });
+        assert!(matches!(confirmed, Some(Effect::CancelCapture { .. })));
         assert!(harness.is_idle());
     }
 

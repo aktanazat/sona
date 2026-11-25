@@ -25,8 +25,6 @@ struct EssentialsView<MeetingRows: View>: View {
                         set: { value in Task { await store.setPushToTalk(value) } }
                     )
                 )
-                ShortcutCaptureRow(store: store, id: "work_quick_entry")
-                ShortcutCaptureRow(store: store, id: "work_ramble")
                 ChoiceRow(
                     title: "Mouse shortcut",
                     detail: "The selected button is reserved for dictation. Requires Accessibility.",

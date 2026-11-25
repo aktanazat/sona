@@ -76,11 +76,6 @@ final class KeyboardViewController: UIInputViewController {
         return KeyboardView.barHeight + CGFloat(typing.rowCount) * (compact ? 40 : 54) + 4
     }
 
-    /// The system plays its key click only for an input view that asks for it.
-    override func loadView() {
-        view = ClickingInputView(frame: .zero, inputViewStyle: .keyboard)
-    }
-
     override func viewDidLoad() {
         super.viewDidLoad()
         signal = KeyboardSignal(.state) { [weak self] in
@@ -1391,8 +1386,4 @@ private struct DraftPanel: View {
 /// UITextDocumentProxy's own `documentIdentifier` getter with the nullability it has in practice.
 @objc private protocol OptionalDocumentIdentifier {
     var documentIdentifier: UUID? { get }
-}
-
-private final class ClickingInputView: UIInputView, UIInputViewAudioFeedback {
-    var enableInputClicksWhenVisible: Bool { true }
 }

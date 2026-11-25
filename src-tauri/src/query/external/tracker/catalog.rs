@@ -2099,7 +2099,7 @@ impl Tracker<'_> {
             appearance,
         );
         let result = work::catalog_status_appearance_cli_save(
-            self.history,
+            self.app,
             &operation_id,
             &request,
             |conn, now| {
@@ -2111,9 +2111,9 @@ impl Tracker<'_> {
                     .map(|current| using(&projects, current))
                     .unwrap_or_default();
                 let id = existing.map(|status| status.id.as_str());
-                let (saved, _) =
+                let (saved, moved_ids) =
                     planning::catalog::save_status_name(conn, id, category, name, appearance, now)?;
-                Ok(ExternalWorkProjectStatusChange {
+                Ok((ExternalWorkProjectStatusChange {
                     schema_version: QUERY_SCHEMA_VERSION,
                     dry_run: false,
                     operation_id: Some(operation_id.clone()),
@@ -2121,7 +2121,7 @@ impl Tracker<'_> {
                     deleted: false,
                     status: status_row(&saved, &projects),
                     changed_projects: moved,
-                })
+                }, moved_ids))
             },
         );
         let saved = result.map_err(|error| match error.downcast::<ExternalError>() {

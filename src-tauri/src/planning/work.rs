@@ -2564,14 +2564,17 @@ pub(crate) fn has_status_appearance_cli_receipt(
     })
 }
 
+/// A status saved with its colour or description from outside the app. `write` returns
+/// what it saved and the projects whose status moved, and every window hears about them,
+/// as a save in the app tells them.
 pub(crate) fn catalog_status_appearance_cli_save<T: serde::de::DeserializeOwned + Serialize>(
-    history: &HistoryManager,
+    app: &AppHandle,
     operation_id: &str,
     request: &impl Serialize,
-    write: impl FnOnce(&Connection, i64) -> StorageResult<T>,
+    write: impl FnOnce(&Connection, i64) -> StorageResult<(T, Vec<String>)>,
 ) -> StorageResult<T> {
     let now = now_ms();
-    history.with_connection(|conn| {
+    let (value, projects) = app.state::<Arc<HistoryManager>>().with_connection(|conn| {
         store::mutate(
             conn,
             operation_id,
@@ -2580,7 +2583,9 @@ pub(crate) fn catalog_status_appearance_cli_save<T: serde::de::DeserializeOwned 
             now,
             |tx| write(tx, now),
         )
-    })
+    })?;
+    tell(app, &Effects { projects, ..Effects::default() });
+    Ok(value)
 }
 
 pub(crate) fn catalog_status_name_delete(
