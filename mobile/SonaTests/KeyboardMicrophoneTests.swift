@@ -40,7 +40,18 @@ struct KeyboardMicrophoneTests {
         return (microphone, box)
     }
 
-    final class Box { var events: [KeyboardDictation.Event] = [] }
+    /// The events the microphone sent, and a wait for the first one that needs no clock.
+    final class Box {
+        var events: [KeyboardDictation.Event] = [] {
+            didSet { waiting.forEach { $0.resume() }; waiting = [] }
+        }
+        private var waiting: [CheckedContinuation<Void, Never>] = []
+
+        func firstEvent() async {
+            guard events.isEmpty else { return }
+            await withCheckedContinuation { waiting.append($0) }
+        }
+    }
 
     /// Waits on the main actor until `condition` holds, for at most two seconds.
     func until(_ condition: () -> Bool) async {
@@ -55,7 +66,7 @@ struct KeyboardMicrophoneTests {
         microphone.start(language: "en-US", hints: [])
         recognizer.reports[0]("old words", true, nil)
         recognizer.reports[1]("new", false, nil)
-        await until { !box.events.isEmpty }
+        await box.firstEvent()
         #expect(box.events == [.heard("new", final: false)])
     }
 
@@ -63,7 +74,7 @@ struct KeyboardMicrophoneTests {
     func startDeadlineRefuses() async {
         let (microphone, box) = microphone(start: .milliseconds(50))
         microphone.start(language: "en-US", hints: [])
-        await until { !box.events.isEmpty }
+        await box.firstEvent()
         #expect(box.events == [.captureRefused])
     }
 

@@ -215,13 +215,22 @@ struct KeyboardDictation {
             guard var saved = read(at: now) else { return nil }
             for id in ended { saved.done[id] = now }
             /* The same review in memory and in the file: the later copy, as a join made it. */
-            var byID = Dictionary(saved.reviews.map { ($0.id, $0) }) { first, _ in first }
-            for review in mine where byID[review.id].map({ review.date >= $0.date }) ?? true {
-                byID[review.id] = review
+            var merged: [KeptReview] = []
+            for review in saved.reviews where !merged.contains(where: { $0.id == review.id }) {
+                merged.append(review)
             }
-            saved.reviews = Array(byID.values)
-                .filter { saved.done[$0.id] == nil && now.timeIntervalSince($0.date) < $0.lifetime }
-                .sorted { $0.date < $1.date }
+            for review in mine {
+                if let index = merged.firstIndex(where: { $0.id == review.id }) {
+                    if review.date >= merged[index].date { merged[index] = review }
+                } else {
+                    merged.append(review)
+                }
+            }
+            /* Oldest first; reviews of the same moment keep the order they came in. */
+            saved.reviews = merged.enumerated()
+                .filter { saved.done[$0.element.id] == nil && now.timeIntervalSince($0.element.date) < $0.element.lifetime }
+                .sorted { ($0.element.date, $0.offset) < ($1.element.date, $1.offset) }
+                .map(\.element)
             guard !saved.reviews.isEmpty || !saved.done.isEmpty else {
                 try? FileManager.default.removeItem(at: url)
                 return saved
