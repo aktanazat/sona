@@ -142,7 +142,7 @@ enum TaskFilters {
     /// several values, so picking more widens it.
     static func startingOp(_ field: WorkConditionField) -> WorkConditionOp {
         switch field {
-        case .label: .includesAny
+        case .label, .projectLabel: .includesAny
         case .cycleScope, .repeat: .is
         default: field.dated ? .before : .anyOf
         }
@@ -219,6 +219,9 @@ enum TaskFilters {
                 + [ConditionChoice(value: "none", title: "No milestone")]
         case .label:
             return store.labels.map { ConditionChoice(value: $0.id, title: $0.name) }
+        case .projectLabel:
+            return store.labels.map { ConditionChoice(value: $0.id, title: $0.name) }
+                + [ConditionChoice(value: "none", title: "No project label")]
         case .parent:
             return (store.items ?? []).filter { $0.subTasks != nil }
                 .map { ConditionChoice(value: $0.id, title: "S-\($0.number) \($0.title)") }
@@ -734,13 +737,14 @@ private struct FilterCounts {
     init(model: AppModel, query: WorkQuery) {
         let now = model.work.now
         let cycles = model.work.cycles
+        let projectLabels = Dictionary(model.work.projects.map { ($0.id, $0.labelIds) }, uniquingKeysWith: { first, _ in first })
         let project = model.listedProject
         let base = (model.work.items ?? []).filter { row in project.map { row.projectId == $0 } ?? true }
         func kept(_ clear: (inout WorkQuery) -> Void) -> [WorkItemRow] {
             var widened = query
             clear(&widened)
             let triage = widened.statuses?.contains(.triage) == true
-            let filter = TaskListing.Filter(widened, now: now, cycles: cycles)
+            let filter = TaskListing.Filter(widened, now: now, cycles: cycles, projectLabels: projectLabels)
             return base.filter { ($0.status != .triage || triage) && filter.matches($0) }
         }
         func tally<Key: Hashable>(_ rows: [WorkItemRow], _ keys: (WorkItemRow) -> [Key]) -> [Key: Int] {

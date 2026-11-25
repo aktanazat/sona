@@ -59,7 +59,8 @@ extension AppModel {
     /// asks; a board leaves its hidden columns out.
     func listedGroups(_ rows: [WorkItemRow], draft: WorkViewDraft, now: Int64) -> [TaskGroup] {
         let triageAsked = draft.query.statuses?.contains(.triage) == true
-        let filter = TaskListing.Filter(draft.query, now: now, cycles: work.cycles)
+        let projectLabels = Dictionary(work.projects.map { ($0.id, $0.labelIds) }, uniquingKeysWith: { first, _ in first })
+        let filter = TaskListing.Filter(draft.query, now: now, cycles: work.cycles, projectLabels: projectLabels)
         let shown = rows.filter { ($0.status != .triage || triageAsked) && filter.matches($0) }
         let groups = TaskListing.groups(shown, display: draft.display, now: now, projects: work.projects,
                                         people: work.people, cycles: work.cycles, labels: workLabels,

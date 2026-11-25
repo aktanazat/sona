@@ -183,6 +183,7 @@ pub struct Project {
     /// Local hour of day (0–23) when an update reminder lands.
     pub update_hour: u8,
     /// The place in the owner's manual order, first to last.
+    #[serde(default)]
     pub position: i64,
 }
 

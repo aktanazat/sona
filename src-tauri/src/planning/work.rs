@@ -579,13 +579,23 @@ pub(crate) fn catch_up(app: AppHandle, store: Arc<MeetingStore>) {
 }
 
 fn project_choices(history: &Connection) -> StorageResult<Vec<WorkProjectChoice>> {
+    let mut labels: HashMap<String, Vec<String>> = HashMap::new();
+    let mut pairs = history
+        .prepare("SELECT project_id, label_id FROM planning_project_labels ORDER BY label_id")?;
+    let read = |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
+    for pair in pairs.query_map([], read)? {
+        let (project, label) = pair?;
+        labels.entry(project).or_default().push(label);
+    }
     let mut statement = history.prepare(
         "SELECT id, title, status FROM planning_projects
          ORDER BY status = 'completed', lower(title), id",
     )?;
     let rows = statement.query_map([], |row| {
+        let id: String = row.get(0)?;
         Ok(WorkProjectChoice {
-            id: row.get(0)?,
+            label_ids: labels.remove(&id).unwrap_or_default(),
+            id,
             title: row.get(1)?,
             status: row.get(2)?,
         })

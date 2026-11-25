@@ -1230,6 +1230,7 @@ mod tests {
             id: id.to_owned(),
             title: title.to_owned(),
             status: ProjectStatus::Active,
+            label_ids: Vec::new(),
         };
         Lexicon {
             labels: vec![label("bug", "bug"), label("mobile", "Mobile")],
