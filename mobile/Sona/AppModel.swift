@@ -86,6 +86,8 @@ final class AppModel: NSObject, ObservableObject {
     private var keyboardTicker: Task<Void, Never>?
     private var draining = false
     private var drainAgain = false
+    private var uploadRetryActive = false
+    private var uploadRetryTimer: Timer?
     private var keyboardRequestID: UUID?
     private var keyboardRequestDocumentID: UUID?
     private var lastKeyboardRequestID: UUID?
@@ -554,8 +556,11 @@ final class AppModel: NSObject, ObservableObject {
             drainAgain = true
             return
         }
+        uploadRetryTimer?.invalidate()
+        uploadRetryTimer = nil
         draining = true
         defer { draining = false }
+        var retryCutoff: Date?
         repeat {
             drainAgain = false
             queued = await queue.items()
@@ -564,10 +569,13 @@ final class AppModel: NSObject, ObservableObject {
                 continue
             }
             outbox = .uploading
+            // Keep a deadline that passes between the final queue check and this callback.
+            retryCutoff = Date()
             await queue.drain()
             queued = await queue.items()
             outbox = queued.isEmpty ? .saved : .waiting
         } while drainAgain
+        if let retryCutoff { scheduleUploadRetry(after: retryCutoff) }
     }
 
     // MARK: - Queue
@@ -580,6 +588,30 @@ final class AppModel: NSObject, ObservableObject {
 
     func drainNow() {
         Task { await drain() }
+    }
+
+    func setUploadRetryActive(_ active: Bool) {
+        uploadRetryActive = active
+        if active {
+            drainNow()
+        } else {
+            uploadRetryTimer?.invalidate()
+            uploadRetryTimer = nil
+        }
+    }
+
+    private func scheduleUploadRetry(after cutoff: Date) {
+        guard uploadRetryActive, vault.credentials != nil,
+              let deadline = QueuedObject.nextRetry(in: queued, after: cutoff)
+        else { return }
+        let timer = Timer(fire: deadline, interval: 0, repeats: false) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, self.uploadRetryTimer === timer else { return }
+                self.drainNow()
+            }
+        }
+        uploadRetryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     // MARK: - Pairing

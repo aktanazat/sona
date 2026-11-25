@@ -77,6 +77,13 @@ struct QueuedObject: Codable, Equatable, Identifiable {
         if case .ask = payload { return true }
         return false
     }
+
+    static func nextRetry(in items: [Self], after now: Date) -> Date? {
+        let utcMs = Int64(now.timeIntervalSince1970 * 1000)
+        return items.lazy.filter { !$0.parked && $0.nextAttemptUtcMs > utcMs }
+            .map(\.nextAttemptUtcMs).min()
+            .map { Date(timeIntervalSince1970: Double($0) / 1000) }
+    }
 }
 
 enum UploadQueueError: Error, Equatable {
@@ -209,9 +216,8 @@ actor UploadQueue {
             return
         }
         self.client = client
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
         var tried: Set<String> = []
-        while let item = nextDue(now: now, skipping: tried) {
+        while let item = nextDue(now: Int64(Date().timeIntervalSince1970 * 1000), skipping: tried) {
             tried.insert(item.objectId)
             sending = item.objectId
             defer { sending = nil }

@@ -45,7 +45,10 @@ struct SonaApp: App {
                 AgentChatScreen(model: model, chat: model.chat)
             }
             .onOpenURL { model.handle($0) }
-            .onChange(of: scenePhase) { _, phase in if phase == .active { model.importKeyboardDictations() } }
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                model.setUploadRetryActive(phase == .active)
+                if phase == .active { model.importKeyboardDictations() }
+            }
         }
     }
 }
