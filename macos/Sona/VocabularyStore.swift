@@ -30,6 +30,7 @@ final class VocabularyStore {
 
     private(set) var spokenEditsEnabled = false
     private(set) var spokenSendEnabled = false
+    private(set) var spokenSendKeyword = "send"
     private(set) var emojiEnabled = false
     private(set) var snippetsEnabled = true
     private(set) var replacementsEnabled = true
@@ -424,9 +425,20 @@ final class VocabularyStore {
         writeSetting(
             "update_spoken_send_enabled",
             enabled: enabled,
-            failure: "Couldn't change spoken Send. Try again.",
+            failure: "Couldn't change voice submission. Try again.",
             retry: { [weak self] in self?.setSpokenSend(enabled) }
         )
+    }
+
+    func setSpokenSendKeyword(_ word: String, onSaved: @escaping @MainActor () -> Void) {
+        write({ [weak self] in
+            guard let self else {
+                return
+            }
+            try await core.request("update_spoken_send_keyword", ["keyword": word])
+            try await fetchSettings()
+            onSaved()
+        })
     }
 
     func setEmojiEnabled(_ enabled: Bool) {
@@ -732,6 +744,7 @@ final class VocabularyStore {
         savedEntryCount = savedWords.count
         spokenEditsEnabled = settings.spokenEditsEnabled ?? false
         spokenSendEnabled = settings.spokenSendEnabled ?? false
+        spokenSendKeyword = settings.spokenSendKeyword ?? "send"
         emojiEnabled = settings.emojiReplacementsEnabled ?? false
         snippetsEnabled = settings.snippetsEnabled ?? true
         replacementsEnabled = settings.replacementsEnabled ?? true
@@ -843,7 +856,7 @@ final class VocabularyStore {
 
     private func write(
         _ work: @escaping () async throws -> Void,
-        retry: @escaping @MainActor () -> Void
+        retry: (@MainActor () -> Void)? = nil
     ) {
         guard !busy else {
             return

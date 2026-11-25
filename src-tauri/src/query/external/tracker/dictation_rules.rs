@@ -282,6 +282,7 @@ struct VocabularyView<'a> {
     emoji: &'a [EmojiReplacement],
     spoken_edits: bool,
     spoken_send: bool,
+    spoken_send_keyword: Option<&'a str>,
 }
 
 /// Rewrites and emoji match what is heard without regard to case or the
@@ -471,6 +472,7 @@ impl Tracker<'_> {
                     emoji: &settings.emoji_replacements,
                     spoken_edits: settings.spoken_edits_enabled,
                     spoken_send: settings.spoken_send_enabled,
+                    spoken_send_keyword: settings.spoken_send_keyword(),
                 };
                 return Ok(read(&what, &view));
             }

@@ -1545,9 +1545,11 @@ pub struct AppSettings {
     /// [`crate::audio_toolkit::apply_spoken_edits`].
     #[serde(default)]
     pub spoken_edits_enabled: bool,
-    /// Consent to press Enter after a trailing "send" in live English dictation.
+    /// Consent to press Enter after the submit word in live English dictation.
     #[serde(default)]
     pub spoken_send_enabled: bool,
+    #[serde(default)]
+    pub spoken_send_keyword: Option<String>,
     /// Samples of the user's own writing, injected into every rewrite prompt as
     /// voice-matching examples. Empty means the rewrite behaves exactly as it
     /// did before, which is the shipped state.
@@ -2363,6 +2365,7 @@ pub fn get_default_settings() -> AppSettings {
         replacements_rules: default_replacement_rules(),
         spoken_edits_enabled: false,
         spoken_send_enabled: false,
+        spoken_send_keyword: None,
         persona_samples: Vec::new(),
         hud_pill_enabled: false,
         hud_pill_position: default_hud_pill_position(),
@@ -2405,6 +2408,25 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub(crate) fn spoken_send_keyword(&self) -> Option<&str> {
+        use crate::audio_toolkit::spoken_edits::{
+            normalized_spoken_send_keyword, DEFAULT_SPOKEN_SEND_KEYWORD,
+        };
+        self.spoken_send_keyword.as_deref().map_or(
+            Some(DEFAULT_SPOKEN_SEND_KEYWORD),
+            normalized_spoken_send_keyword,
+        )
+    }
+
+    pub(crate) fn parse_spoken_send_keyword(value: &str) -> Result<Option<String>, &'static str> {
+        use crate::audio_toolkit::spoken_edits::{
+            normalized_spoken_send_keyword, DEFAULT_SPOKEN_SEND_KEYWORD,
+        };
+        let word = normalized_spoken_send_keyword(value)
+            .ok_or("Use one English word, up to 40 letters.")?;
+        Ok((!word.eq_ignore_ascii_case(DEFAULT_SPOKEN_SEND_KEYWORD)).then(|| word.to_owned()))
+    }
+
     pub fn post_process_provider(&self, provider_id: &str) -> Option<&PostProcessProvider> {
         self.post_process_providers
             .iter()

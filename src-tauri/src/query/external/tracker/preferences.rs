@@ -193,8 +193,10 @@ pub enum SettingKey {
     TextReplacements,
     /// Spoken edits such as "scratch that": true or false.
     SpokenEdits,
-    /// Submit after a trailing English "send": true or false.
+    /// Submit after the chosen word in live English dictation: true or false.
     SpokenSend,
+    /// The word that ends a spoken submission. Use "send" to restore the default.
+    SpokenSendKeyword,
     /// Emoji replacements: true or false.
     Emoji,
     /// The active mode's id: the capture mode chip.
@@ -852,6 +854,13 @@ fn setting_change<'a>(args: &'a SettingArgs) -> SettingsChange<'a> {
                 Ok(())
             }),
         ),
+        SettingKey::SpokenSendKeyword => (
+            show(|s| json!(s.spoken_send_keyword())),
+            apply(move |s| {
+                s.spoken_send_keyword = AppSettings::parse_spoken_send_keyword(value)?;
+                Ok(())
+            }),
+        ),
         SettingKey::Emoji => (
             show(|s| json!(s.emoji_replacements_enabled)),
             apply(move |s| Ok(s.emoji_replacements_enabled = flag(value)?)),
@@ -1134,6 +1143,7 @@ struct SettingsView<'a> {
     text_replacements: bool,
     spoken_edits: bool,
     spoken_send: bool,
+    spoken_send_keyword: Option<&'a str>,
     emoji: bool,
     persona_samples: &'a [PersonaSample],
     shortcuts: Vec<ShortcutView<'a>>,
@@ -1218,6 +1228,7 @@ fn settings_view(
         text_replacements: settings.replacements_enabled,
         spoken_edits: settings.spoken_edits_enabled,
         spoken_send: settings.spoken_send_enabled,
+        spoken_send_keyword: settings.spoken_send_keyword(),
         emoji: settings.emoji_replacements_enabled,
         persona_samples: &settings.persona_samples,
         shortcuts,

@@ -1,3 +1,4 @@
+use crate::audio_toolkit::spoken_edits::DEFAULT_SPOKEN_SEND_KEYWORD;
 use crate::audio_toolkit::text::vocabulary_spoken_key;
 use crate::context::{self, CaptureOptions, ContextPolicy, ContextSnapshot, PendingContext};
 use crate::settings::{
@@ -1319,6 +1320,7 @@ pub struct AsrPlan {
     pub replacements_enabled: bool,
     pub spoken_edits_enabled: bool,
     pub spoken_send_enabled: bool,
+    pub(crate) spoken_send_keyword: Option<Arc<str>>,
 }
 
 impl AsrPlan {
@@ -1358,6 +1360,7 @@ impl AsrPlan {
             replacements_enabled: settings.replacements_enabled,
             spoken_edits_enabled: settings.spoken_edits_enabled,
             spoken_send_enabled: false,
+            spoken_send_keyword: None,
         }
     }
 
@@ -1388,6 +1391,7 @@ impl AsrPlan {
             replacements_enabled: settings.replacements_enabled,
             spoken_edits_enabled: settings.spoken_edits_enabled,
             spoken_send_enabled: false,
+            spoken_send_keyword: None,
         }
     }
 
@@ -1880,7 +1884,7 @@ impl RunPlan {
             false,
             settings.dictation_project_root.as_deref(),
         )?;
-        run.asr.spoken_send_enabled = cfg!(target_os = "macos")
+        let allows_spoken_send = cfg!(target_os = "macos")
             && settings.spoken_send_enabled
             && !run.asr.translate_to_english
             && matches!(
@@ -1890,8 +1894,19 @@ impl RunPlan {
                     | PasteMethod::ShiftInsert
                     | PasteMethod::Direct
             );
+        if let Some(word) = allows_spoken_send
+            .then(|| settings.spoken_send_keyword())
+            .flatten()
+        {
+            run.asr.spoken_send_enabled = true;
+            run.asr.spoken_send_keyword =
+                (!word.eq_ignore_ascii_case(DEFAULT_SPOKEN_SEND_KEYWORD)).then(|| Arc::from(word));
+        }
         if let Some(fallback) = run.local_fallback.as_mut() {
             fallback.spoken_send_enabled = run.asr.spoken_send_enabled;
+            fallback
+                .spoken_send_keyword
+                .clone_from(&run.asr.spoken_send_keyword);
         }
         Ok(run)
     }

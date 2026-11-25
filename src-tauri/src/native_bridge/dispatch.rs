@@ -871,6 +871,18 @@ pub(super) async fn call(
             })
             .await?
         }
+        "update_spoken_send_keyword" => {
+            let mut args = Args::parse(params)?;
+            let keyword = args.take("keyword")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::vocabulary::update_spoken_send_keyword(
+                    handle.clone(),
+                    keyword,
+                ))
+            })
+            .await?
+        }
         "hud_pill_state" => {
             let handle = app.clone();
             on_main_thread(app, move || {

@@ -1318,6 +1318,7 @@ const SETTING_KEYS = [
   "text-replacements",
   "spoken-edits",
   "spoken-send",
+  "spoken-send-keyword",
   "emoji",
   "mode",
   "dictation-prompt",

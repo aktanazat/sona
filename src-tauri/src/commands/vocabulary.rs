@@ -532,6 +532,16 @@ pub fn update_spoken_send_enabled(app: AppHandle, enabled: bool) -> Result<(), S
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn update_spoken_send_keyword(app: AppHandle, keyword: String) -> Result<(), String> {
+    let keyword = settings::AppSettings::parse_spoken_send_keyword(&keyword)?;
+    settings::update_settings(&app, |settings| {
+        settings.spoken_send_keyword = keyword;
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

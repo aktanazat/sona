@@ -232,6 +232,7 @@ struct VocabularySettingsSnapshot: Decodable {
     let replacementsEnabled: Bool?
     let spokenEditsEnabled: Bool?
     let spokenSendEnabled: Bool?
+    let spokenSendKeyword: String?
 }
 
 /// The keys the core matches by, so the editor can refuse exactly what the
