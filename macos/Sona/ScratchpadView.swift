@@ -751,16 +751,9 @@ private struct ScratchNoteEditor: View {
                             .foregroundStyle(Theme.inkTertiary)
                             .padding(.horizontal, 5)
                     }
-                    TextEditor(text: $text, selection: $selection)
+                    MarkdownTextEditor(text: $text, selection: $selection, focused: focused, label: "Note", keys: key)
                         .font(TypeScale.body())
                         .foregroundStyle(Theme.ink)
-                        .scrollContentBackground(.hidden)
-                        .scrollDisabled(true)
-                        .focused(focused)
-                        .accessibilityLabel("Note")
-                        .onKeyPress(keys: [.upArrow, .downArrow, .return, .tab, .escape]) { press in
-                            key(press.key)
-                        }
                 }
             }
             .overlay(alignment: .topLeading) {
@@ -823,22 +816,24 @@ private struct ScratchNoteEditor: View {
         }
     }
 
-    private func key(_ key: KeyEquivalent) -> KeyPress.Result {
+    private func key(_ press: KeyPress) -> KeyPress.Result {
         guard choices > 0 else { return .ignored }
-        switch key {
+        switch press.key {
         case .upArrow:
             highlighted = (highlighted + choices - 1) % choices
         case .downArrow:
             highlighted = (highlighted + 1) % choices
         case .escape:
             dismissed = trigger
-        default:
+        case .return, .tab:
             let index = min(highlighted, choices - 1)
             if trigger?.mark == "/" {
                 run(commands[index])
             } else {
                 insert(people[index])
             }
+        default:
+            return .ignored
         }
         return .handled
     }
