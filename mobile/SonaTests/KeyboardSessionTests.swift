@@ -75,4 +75,34 @@ final class KeyboardSessionTests {
         #expect(!sample.isCurrent(for: request, after: 10, at: 10.1))
         #expect(!sample.isCurrent(for: request, after: 9, at: 9.9))
     }
+
+    @Test("the latest style chosen before finishing applies to that recording, including no style")
+    func activeRecordingKeepsTheLastStyle() throws {
+        let app = KeyboardSessionStore(directory: directory)
+        let keyboard = KeyboardSessionStore(directory: directory)
+        let request = UUID()
+        try app.publish(KeyboardSessionState(phase: .listening, requestID: request))
+        try keyboard.chooseStyle("email", for: request)
+        try keyboard.chooseStyle("", for: request)
+        try app.publish(KeyboardSessionState(phase: .finishing, requestID: request))
+        try keyboard.chooseStyle("note", for: request)
+
+        #expect(try app.takeStyle(for: request) == "")
+        #expect(try app.takeStyle(for: request) == nil)
+    }
+
+    @Test("another keyboard request cannot replace or consume the current recording's style")
+    func styleIsScopedToTheRecording() throws {
+        let app = KeyboardSessionStore(directory: directory)
+        let keyboard = KeyboardSessionStore(directory: directory)
+        let current = UUID()
+        let stale = UUID()
+        try app.publish(KeyboardSessionState(phase: .listening, requestID: current))
+        try keyboard.chooseStyle("message", for: current)
+        try keyboard.chooseStyle("email", for: stale)
+        try app.publish(KeyboardSessionState(phase: .finishing, requestID: current))
+
+        #expect(try app.takeStyle(for: stale) == nil)
+        #expect(try app.takeStyle(for: current) == "message")
+    }
 }

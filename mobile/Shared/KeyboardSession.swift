@@ -68,18 +68,26 @@ struct KeyboardLevel: Codable, Sendable {
     }
 }
 
+private struct KeyboardStyleChange: Codable {
+    let requestID: UUID
+    let style: String
+}
+
 struct KeyboardSessionStore {
     let directory: URL
+    private static let stateName = "keyboard-session.json"
+    private static let styleName = "keyboard-style.json"
+
     static func shared() throws -> Self {
         Self(directory: try KeyboardDraftStore.shared().directory)
     }
 
     func state() throws -> KeyboardSessionState {
-        try read(KeyboardSessionState.self, name: "keyboard-session.json") ?? KeyboardSessionState()
+        try coordinated { try state(in: $0) }
     }
 
     func publish(_ state: KeyboardSessionState) throws {
-        try write(state, name: "keyboard-session.json")
+        try coordinated { try write(state, name: Self.stateName, in: $0) }
         KeyboardSignal.post(.state)
     }
 
@@ -129,7 +137,7 @@ struct KeyboardSessionStore {
     }
 
     func send(_ command: KeyboardCommand) throws {
-        try write(command, name: "keyboard-command.json")
+        try coordinated { try write(command, name: "keyboard-command.json", in: $0) }
         KeyboardSignal.post(.command)
     }
 
@@ -159,21 +167,38 @@ struct KeyboardSessionStore {
         }
     }
 
-    private func read<T: Decodable>(_ type: T.Type, name: String) throws -> T? {
+    func chooseStyle(_ style: String, for requestID: UUID) throws {
         try coordinated { folder in
-            let file = folder.appendingPathComponent(name)
-            guard FileManager.default.fileExists(atPath: file.path) else { return nil }
-            return try JSONDecoder().decode(type, from: Data(contentsOf: file))
+            let current = try state(in: folder)
+            guard current.phase == .listening, current.requestID == requestID else { return }
+            try write(KeyboardStyleChange(requestID: requestID, style: style), name: Self.styleName, in: folder)
         }
     }
 
-    private func write<T: Encodable>(_ value: T, name: String) throws {
+    func takeStyle(for requestID: UUID) throws -> String? {
         try coordinated { folder in
-            try JSONEncoder().encode(value).write(
-                to: folder.appendingPathComponent(name),
-                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
-            )
+            let file = folder.appendingPathComponent(Self.styleName)
+            guard let change = try read(KeyboardStyleChange.self, from: file),
+                  change.requestID == requestID else { return nil }
+            try FileManager.default.removeItem(at: file)
+            return change.style
         }
+    }
+
+    private func state(in folder: URL) throws -> KeyboardSessionState {
+        try read(KeyboardSessionState.self, from: folder.appendingPathComponent(Self.stateName)) ?? KeyboardSessionState()
+    }
+
+    private func read<T: Decodable>(_ type: T.Type, from file: URL) throws -> T? {
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        return try JSONDecoder().decode(type, from: Data(contentsOf: file))
+    }
+
+    private func write<T: Encodable>(_ value: T, name: String, in folder: URL) throws {
+        try JSONEncoder().encode(value).write(
+            to: folder.appendingPathComponent(name),
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+        )
     }
 
     private func coordinated<T>(_ operation: (URL) throws -> T) throws -> T {
