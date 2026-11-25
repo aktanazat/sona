@@ -183,6 +183,7 @@
 "keyboard.emoji.close" = "Close emoji search";
 "keyboard.feel" = "Typing";
 "keyboard.numberRow" = "Number row";
+"keyboard.englishLayout" = "English layout";
 "keyboard.haptics" = "Key haptics";
 "keyboard.sounds" = "Key sounds";
 "keyboard.feelFooter" = "Haptics and sounds need Allow Full Access.";

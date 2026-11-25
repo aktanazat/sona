@@ -99,7 +99,7 @@ final class TypingCorrector {
     }
 
     /// The closest spelling language to a keyboard language such as `en-US`.
-    init?(language identifier: String) {
+    init?(language identifier: String, grid: KeyboardLetterGrid? = nil) {
         let wanted = identifier.replacingOccurrences(of: "-", with: "_")
         let base = String(wanted.prefix { $0 != "_" })
         let available = UITextChecker.availableLanguages
@@ -107,7 +107,7 @@ final class TypingCorrector {
             ?? available.first(where: { $0 == base || $0.hasPrefix(base + "_") })
         else { return nil }
         language = match
-        centres = (TypingLanguage(rawValue: identifier) ?? .english).keyCentres
+        centres = (grid ?? (TypingLanguage(rawValue: identifier) ?? .english).letterGrid()).keyCentres
     }
 
     /// Has Apple's checker load its dictionary for the language, which its first check and

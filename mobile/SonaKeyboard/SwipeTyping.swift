@@ -11,15 +11,6 @@ struct SwipeDecoder {
     let centres: [Character: CGPoint]
     let keyWidth: CGFloat
 
-    /// Key centres for the letter rows drawn `unit` wide and `rowHeight` tall from `origin`.
-    init(language: TypingLanguage, unit: CGFloat, rowHeight: CGFloat, origin: CGPoint = .zero) {
-        self.language = language
-        centres = language.keyCentres.mapValues {
-            CGPoint(x: origin.x + CGFloat($0.x) * unit, y: origin.y + (CGFloat($0.y) + 0.5) * rowHeight)
-        }
-        keyWidth = unit
-    }
-
     /// Up to four words, best first. `dictionary` returns the words that start with a prefix,
     /// most common first; `names` are offered whenever their shape fits.
     func words(for path: [CGPoint], dictionary: (String) -> [String], names: [String]) -> [String] {

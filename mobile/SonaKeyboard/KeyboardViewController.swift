@@ -75,6 +75,7 @@ final class KeyboardViewController: UIInputViewController {
         signal = KeyboardSignal(.state) { [weak self] in
             Task { @MainActor in self?.reload() }
         }
+        loadFeel()
         setLanguage(storedLanguage(in: KeyboardLanguages.shared().enabled))
         typing.press = { [weak self] key in self?.press(key) }
         typing.choose = { [weak self] word in self?.choose(word) }
@@ -126,9 +127,13 @@ final class KeyboardViewController: UIInputViewController {
         echo.forget()
         let languages = KeyboardLanguages.shared().enabled
         typing.showsLanguageKey = languages.count > 1
-        if !languages.contains(typing.language) { setLanguage(languages[0]) }
-        feel = hasFullAccess ? KeyboardFeelPreferences.shared() : KeyboardFeelPreferences(defaults: .standard)
-        typing.numberRow = feel.numberRow
+        let oldLayout = typing.englishLayout
+        loadFeel()
+        if !languages.contains(typing.language) {
+            setLanguage(languages[0])
+        } else if typing.language == .english, oldLayout != typing.englishLayout {
+            setLanguage(.english)
+        }
         haptic.prepare()
         if hasFullAccess {
             loadVocabulary()
@@ -137,6 +142,12 @@ final class KeyboardViewController: UIInputViewController {
         session.hostChanged(field: documentID, text: fieldText)
         refreshTyping(startingField: true)
         view.setNeedsLayout()
+    }
+
+    private func loadFeel() {
+        feel = hasFullAccess ? KeyboardFeelPreferences.shared() : KeyboardFeelPreferences(defaults: .standard)
+        typing.numberRow = feel.numberRow
+        typing.englishLayout = feel.englishLayout
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -257,7 +268,7 @@ final class KeyboardViewController: UIInputViewController {
     /// common words come in a moment later, read off the main thread the first time.
     private func setLanguage(_ language: TypingLanguage) {
         typing.language = language
-        let corrector = TypingCorrector(language: language.rawValue)
+        let corrector = TypingCorrector(language: language.rawValue, grid: typing.letterGrid)
         self.corrector = corrector
         let catalog = language == .english ? EmojiCatalog.shared : nil
         session = TypingSession(
@@ -374,9 +385,7 @@ final class KeyboardViewController: UIInputViewController {
     /// strip then offers the runners-up.
     private func swipe(_ path: [CGPoint], on grid: KeyGrid) {
         guard let corrector else { return }
-        let decoder = SwipeDecoder(
-            language: typing.language, unit: grid.unit, rowHeight: grid.rowHeight, origin: grid.origin
-        )
+        let decoder = SwipeDecoder(language: typing.language, centres: grid.letterCentres, keyWidth: grid.unit)
         let words = decoder.words(
             for: path, dictionary: corrector.completions(of:), names: session.lexicon.names + session.lexicon.learned
         )

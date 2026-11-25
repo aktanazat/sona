@@ -8,11 +8,10 @@ enum TypingLanguage: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
-    /// The letter rows as the system keyboard for the language lays them out.
-    var letterRows: [String] {
+    func letterGrid(englishLayout: EnglishKeyboardLayout = .qwerty) -> KeyboardLetterGrid {
         switch self {
-        case .english: ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
-        case .russian: ["йцукенгшщзх", "фывапролджэ", "ячсмитьбю"]
+        case .english: englishLayout.grid
+        case .russian: .russian
         }
     }
 
@@ -39,24 +38,40 @@ enum TypingLanguage: String, CaseIterable, Identifiable, Sendable {
         case .russian: "Русский"
         }
     }
+}
 
-    /// Key widths across the layout: the longest of the first two rows, at least ten. Shift
-    /// and delete share what the third row leaves, so every row spans the same width.
-    var columns: Int {
-        max(10, letterRows[0].count, letterRows[1].count)
+enum EnglishKeyboardLayout: String, CaseIterable, Sendable {
+    case qwerty
+    case qwertz
+
+    var grid: KeyboardLetterGrid {
+        switch self {
+        case .qwerty: .qwerty
+        case .qwertz: .qwertz
+        }
     }
+}
 
-    /// Letter centres in key widths across and rows down, laid out like the keyboard draws
-    /// them: every row centred, the third between shift and delete.
-    var keyCentres: [Character: (x: Double, y: Double)] {
+struct KeyboardLetterGrid: Sendable {
+    static let qwerty = Self(["qwertyuiop", "asdfghjkl", "zxcvbnm"])
+    static let qwertz = Self(["qwertzuiop", "asdfghjkl", "yxcvbnm"])
+    static let russian = Self(["йцукенгшщзх", "фывапролджэ", "ячсмитьбю"])
+
+    let rows: [String]
+    let columns: Int
+    let keyCentres: [Character: (x: Double, y: Double)]
+
+    private init(_ rows: [String]) {
+        self.rows = rows
+        columns = max(10, rows[0].count, rows[1].count)
         var centres: [Character: (x: Double, y: Double)] = [:]
-        for (row, letters) in letterRows.map(Array.init).enumerated() {
+        for (row, letters) in rows.enumerated() {
             let start = Double(columns - letters.count) / 2
             for (column, letter) in letters.enumerated() {
                 centres[letter] = (start + Double(column) + 0.5, Double(row))
             }
         }
-        return centres
+        keyCentres = centres
     }
 }
 
@@ -92,6 +107,7 @@ struct KeyboardLanguages {
 /// How the keyboard looks and answers a key, chosen in the app and read by the keyboard
 /// through the shared container.
 struct KeyboardFeelPreferences {
+    static let englishLayoutKey = "sona.keyboard.englishLayout"
     static let numberRowKey = "sona.keyboard.numberRow"
     static let hapticsKey = "sona.keyboard.haptics"
     static let soundsKey = "sona.keyboard.sounds"
@@ -101,6 +117,9 @@ struct KeyboardFeelPreferences {
         Self(defaults: UserDefaults(suiteName: KeyboardDraftStore.group) ?? .standard)
     }
 
+    var englishLayout: EnglishKeyboardLayout {
+        defaults.string(forKey: Self.englishLayoutKey).flatMap(EnglishKeyboardLayout.init(rawValue:)) ?? .qwerty
+    }
     var numberRow: Bool { defaults.bool(forKey: Self.numberRowKey) }
     var haptics: Bool { defaults.object(forKey: Self.hapticsKey) as? Bool ?? true }
     var sounds: Bool { defaults.object(forKey: Self.soundsKey) as? Bool ?? true }

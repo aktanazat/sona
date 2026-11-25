@@ -75,7 +75,6 @@ struct KeyGrid {
 
     let unit: CGFloat
     let rowHeight: CGFloat
-    let origin: CGPoint
     let frames: [(cap: KeyCap, frame: CGRect)]
 
     init(rows: [[KeyCap]], size: CGSize) {
@@ -86,7 +85,6 @@ struct KeyGrid {
         let origin = CGPoint(x: (size.width - width) / 2, y: 0)
         self.unit = unit
         self.rowHeight = rowHeight
-        self.origin = origin
         frames = rows.enumerated().flatMap { index, row in
             var x = origin.x + (width - row.reduce(0) { $0 + $1.units } * unit) / 2
             return row.map { cap in
@@ -94,6 +92,15 @@ struct KeyGrid {
                 return (cap, CGRect(x: x, y: rowHeight * CGFloat(index), width: cap.units * unit, height: rowHeight))
             }
         }
+    }
+
+    var letterCentres: [Character: CGPoint] {
+        var centres: [Character: CGPoint] = [:]
+        for (cap, frame) in frames {
+            guard case .character(let text) = cap.key, let letter = text.first, letter.isLetter else { continue }
+            centres[letter] = CGPoint(x: frame.midX, y: frame.midY)
+        }
+        return centres
     }
 
     /// The key under `point`, or the nearest key in that row when the point falls in a gap.
@@ -139,6 +146,7 @@ final class TypingModel {
 
     var layer = KeyLayer.letters
     var language = TypingLanguage.english
+    var englishLayout = EnglishKeyboardLayout.qwerty
     var shift = Shift.off
     var suggestions: Suggestions?
     var hasTyped = false
@@ -171,14 +179,17 @@ final class TypingModel {
     /// Rows in the letter layout, bottom row included; every layer shares their height so
     /// switching layers never moves the keyboard.
     var rowCount: Int { numberRow ? 5 : 4 }
+    var showsNumberRow: Bool { numberRow && emojiQuery == nil }
+    var letterGrid: KeyboardLetterGrid { language.letterGrid(englishLayout: englishLayout) }
 
     /// The rows above the bottom row.
     var rows: [[KeyCap]] {
         switch layer {
         case .letters:
-            let letters = language.letterRows
-            let side = Double(language.columns - letters[2].count) / 2
-            let digits = numberRow && emojiQuery == nil ? [Self.caps("1234567890")] : []
+            let grid = letterGrid
+            let letters = grid.rows
+            let side = Double(grid.columns - letters[2].count) / 2
+            let digits = showsNumberRow ? [Self.caps("1234567890")] : []
             return digits + [
                 Self.caps(letters[0]),
                 Self.caps(letters[1]),

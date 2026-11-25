@@ -14,8 +14,12 @@ struct SwipeTypingTests {
         "going", "right", "time", "good", "call", "home", "work", "love", "night", "today",
     ]
 
-    static func decoder(_ language: TypingLanguage) -> SwipeDecoder {
-        SwipeDecoder(language: language, unit: 40.2, rowHeight: 58)
+    static func decoder(_ language: TypingLanguage, layout: EnglishKeyboardLayout = .qwerty,
+                        origin: CGPoint = .zero, unit: CGFloat = 40.2) -> SwipeDecoder {
+        let centres = language.letterGrid(englishLayout: layout).keyCentres.mapValues {
+            CGPoint(x: origin.x + CGFloat($0.x) * unit, y: origin.y + (CGFloat($0.y) + 0.5) * 58)
+        }
+        return SwipeDecoder(language: language, centres: centres, keyWidth: unit)
     }
 
     /// A thumb's path through `word`: each letter's key centre pushed off-centre by up to
@@ -37,6 +41,14 @@ struct SwipeTypingTests {
             }
         }
         return path
+    }
+
+    @Test("swiping the top-row Z and O on QWERTZ produces the English word zoo")
+    func swipeUsesTheAlternateGrid() {
+        let decoder = Self.decoder(.english, layout: .qwertz, origin: CGPoint(x: 35, y: 58), unit: 40)
+        let path = [CGPoint(x: 255, y: 87), CGPoint(x: 375, y: 87)]
+
+        #expect(decoder.words(for: path, dictionary: { _ in [] }, names: ["zoo", "you"]).first == "zoo")
     }
 
     @Test("a swipe through a common word puts that word first at least 17 times in 20, and in the four offered 19 in 20")
