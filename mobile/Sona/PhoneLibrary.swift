@@ -81,6 +81,7 @@ private final class PhoneLibraryDisk: @unchecked Sendable {
     let directory: URL
     private let queue: DispatchQueue
     private var notes: [PhoneNote] = []
+    private var loaded = false
     private var revision: UInt64 = 0
     private var index: URL { directory.appending(path: "index.json") }
 
@@ -91,12 +92,17 @@ private final class PhoneLibraryDisk: @unchecked Sendable {
 
     func load() throws -> Snapshot {
         try queue.sync {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: index.path) {
-                notes = try JSONDecoder().decode([PhoneNote].self, from: Data(contentsOf: index))
-            }
+            try loadIfNeeded()
             return Snapshot(revision: revision, notes: notes)
         }
+    }
+
+    private func loadIfNeeded() throws {
+        guard !loaded else { return }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do { notes = try JSONDecoder().decode([PhoneNote].self, from: Data(contentsOf: index)) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile {}
+        loaded = true
     }
 
     func keep(_ note: PhoneNote, audio: CapturedAudio?) throws -> Snapshot {
@@ -127,6 +133,10 @@ private final class PhoneLibraryDisk: @unchecked Sendable {
     }
 
     private func keepOnQueue(_ note: PhoneNote, audio: CapturedAudio?) throws -> Snapshot {
+        try loadIfNeeded()
+        if notes.contains(where: { $0.id == note.id }) {
+            return Snapshot(revision: revision, notes: notes)
+        }
         if let audio, let file = note.audioFile {
             try Self.writeWave(audio, to: directory.appending(path: file))
         }
@@ -198,6 +208,14 @@ final class PhoneLibrary: ObservableObject {
 
     func keep(kind: PhoneNote.Kind, title: String, text: String, date: Date = Date(), audio: CapturedAudio? = nil) throws {
         try apply(disk.keep(Self.note(id: UUID(), kind: kind, title: title, text: text, date: date, audio: audio), audio: audio))
+    }
+
+    func keepRecording(id: UUID, title: String, notes: String, date: Date, audio: CapturedAudio) async throws -> PhoneNote {
+        let note = Self.note(id: id, kind: .meeting, title: title, text: notes, date: date, audio: audio)
+        let kept = try await disk.keepAsync(note, audio: audio)
+        apply(kept)
+        guard let saved = kept.notes.first(where: { $0.id == id }) else { throw CaptureError.writeFailed }
+        return saved
     }
 
     func deliverDictation(

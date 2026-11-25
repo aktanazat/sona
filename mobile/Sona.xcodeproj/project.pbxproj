@@ -19,6 +19,7 @@
 		CA000000000000000000000A /* RecordingScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000A /* RecordingScreen.swift */; };
 		CA000000000000000000000B /* PairingScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000B /* PairingScreen.swift */; };
 		CA000000000000000000000C /* PhoneRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000C /* PhoneRecorder.swift */; };
+		CA00000000000000000000F9 /* PhoneCaptureJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000F9 /* PhoneCaptureJournal.swift */; };
 		CA00000000000000000000F0 /* PhoneLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000F0 /* PhoneLocation.swift */; };
 		CA000000000000000000000D /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000D /* AppModel.swift */; };
 		CA0000000000000000000019 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000019 /* Theme.swift */; };
@@ -234,6 +235,7 @@
 		BB000000000000000000000A /* RecordingScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingScreen.swift; sourceTree = "<group>"; };
 		BB000000000000000000000B /* PairingScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScreen.swift; sourceTree = "<group>"; };
 		BB000000000000000000000C /* PhoneRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneRecorder.swift; sourceTree = "<group>"; };
+		BB00000000000000000000F9 /* PhoneCaptureJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCaptureJournal.swift; sourceTree = "<group>"; };
 		BB00000000000000000000F0 /* PhoneLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLocation.swift; sourceTree = "<group>"; };
 		BB000000000000000000000D /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		BB0000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -466,6 +468,7 @@
 				BB0000000000000000000009 /* SonaApp.swift */,
 				BB000000000000000000000D /* AppModel.swift */,
 				BB000000000000000000000C /* PhoneRecorder.swift */,
+				BB00000000000000000000F9 /* PhoneCaptureJournal.swift */,
 				BB00000000000000000000F0 /* PhoneLocation.swift */,
 				BB000000000000000000000A /* RecordingScreen.swift */,
 				BB000000000000000000000B /* PairingScreen.swift */,
@@ -783,6 +786,7 @@
 				CA000000000000000000000A /* RecordingScreen.swift in Sources */,
 				CA000000000000000000000B /* PairingScreen.swift in Sources */,
 				CA000000000000000000000C /* PhoneRecorder.swift in Sources */,
+				CA00000000000000000000F9 /* PhoneCaptureJournal.swift in Sources */,
 				CA00000000000000000000F0 /* PhoneLocation.swift in Sources */,
 				CA000000000000000000000D /* AppModel.swift in Sources */,
 				CA0000000000000000000019 /* Theme.swift in Sources */,

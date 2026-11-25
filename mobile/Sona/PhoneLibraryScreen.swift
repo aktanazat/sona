@@ -239,7 +239,7 @@ struct PhoneLibraryScreen: View {
         .navigationLinkIndicatorVisibility(.hidden)
         .swipeActions {
             Button("library.delete", role: .destructive) {
-                do { try library.delete(note) } catch { library.error = error.localizedDescription }
+                model.deleteLocalNote(note)
             }
         }
         .contextMenu {
@@ -250,7 +250,7 @@ struct PhoneLibraryScreen: View {
             ShareLink(item: note.text) { Label("library.share", systemImage: "square.and.arrow.up") }
                 .disabled(note.text.isEmpty)
             Button(role: .destructive) {
-                do { try library.delete(note) } catch { library.error = error.localizedDescription }
+                model.deleteLocalNote(note)
             } label: {
                 Label("library.delete", systemImage: "trash")
             }

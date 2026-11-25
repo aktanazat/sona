@@ -132,10 +132,10 @@ actor UploadQueue {
         notes: String? = nil,
         calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
         bookmarkOffsetsMs: [Int64] = [],
-        placeReading: DeviceRecordingManifest.PlaceReading? = nil
+        placeReading: DeviceRecordingManifest.PlaceReading? = nil,
+        captureDirectory: URL? = nil
     ) throws -> QueuedObject {
         let objectId = randomOpaqueId()
-        try adopt(audio.url, as: UploadQueue.recordingAudioFile, objectId: objectId)
         let item = newItem(
             objectId: objectId,
             capturedAtUtcMs: recordedAtUtcMs,
@@ -152,7 +152,15 @@ actor UploadQueue {
                 )
             )
         )
-        try save(item)
+        if let captureDirectory {
+            let audioURL = captureDirectory.appending(path: Self.recordingAudioFile)
+            guard audio.url.path == audioURL.path else { throw CaptureError.unsupportedFormat }
+            try writeItem(item, in: captureDirectory)
+            try FileManager.default.moveItem(at: captureDirectory, to: root.appending(path: directoryName(objectId)))
+        } else {
+            try adopt(audio.url, as: Self.recordingAudioFile, objectId: objectId)
+            try save(item)
+        }
         return item
     }
 
@@ -662,8 +670,12 @@ actor UploadQueue {
     private func save(_ item: QueuedObject) throws {
         let directory = root.appending(path: directoryName(item.objectId))
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try writeItem(item, in: directory)
+    }
+
+    private func writeItem(_ item: QueuedObject, in directory: URL) throws {
         try JSONEncoder().encode(item).write(
-            to: directory.appending(path: "item.json"), options: .atomic
+            to: directory.appending(path: "item.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
         )
     }
 

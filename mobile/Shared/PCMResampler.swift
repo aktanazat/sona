@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 
 /// Where a finished capture lives before it is queued.
-struct CapturedAudio {
+struct CapturedAudio: Sendable {
     var url: URL
     var byteLength: Int
     var sha256: String
@@ -34,12 +34,15 @@ final class PCMResampler {
     private let converter: AVAudioConverter
     private var hasher = SHA256()
     private var byteLength = 0
+    private var writeFailed = false
 
-    init(url: URL, inputFormat: AVAudioFormat) throws {
+    init(url: URL, inputFormat: AVAudioFormat, existingFile: Bool = false) throws {
         guard let target = PCMResampler.targetFormat,
               let converter = AVAudioConverter(from: inputFormat, to: target)
         else { throw CaptureError.unsupportedFormat }
-        FileManager.default.createFile(atPath: url.path, contents: nil)
+        if !existingFile && !FileManager.default.createFile(atPath: url.path, contents: nil) {
+            throw CaptureError.writeFailed
+        }
         guard let handle = try? FileHandle(forWritingTo: url) else {
             throw CaptureError.writeFailed
         }
@@ -49,6 +52,7 @@ final class PCMResampler {
     }
 
     func append(_ input: AVAudioPCMBuffer) throws {
+        guard !writeFailed else { throw CaptureError.writeFailed }
         guard let target = PCMResampler.targetFormat else { throw CaptureError.unsupportedFormat }
         let ratio = target.sampleRate / input.format.sampleRate
         let capacity = AVAudioFrameCount(Double(input.frameLength) * ratio) + 1024
@@ -72,6 +76,8 @@ final class PCMResampler {
 
     /// Flush the converter's tail so the last partial resampling window is not dropped.
     func finish() throws -> CapturedAudio {
+        defer { try? handle.close() }
+        guard !writeFailed else { throw CaptureError.writeFailed }
         guard let target = PCMResampler.targetFormat,
               let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: 4096)
         else { throw CaptureError.unsupportedFormat }
@@ -83,7 +89,6 @@ final class PCMResampler {
         if status != .error, conversionError == nil {
             try write(output)
         }
-        try? handle.close()
         let frames = byteLength / (RecordingAudioFormat.bytesPerFrame * RecordingAudioFormat.channels)
         return CapturedAudio(
             url: url,
@@ -99,13 +104,14 @@ final class PCMResampler {
         let bytes = samples[0].withMemoryRebound(to: UInt8.self, capacity: count * 2) { pointer in
             Data(bytes: pointer, count: count * RecordingAudioFormat.bytesPerFrame)
         }
-        hasher.update(data: bytes)
-        byteLength += bytes.count
         do {
             try handle.write(contentsOf: bytes)
         } catch {
+            writeFailed = true
             throw CaptureError.writeFailed
         }
+        hasher.update(data: bytes)
+        byteLength += bytes.count
     }
 }
 
