@@ -319,12 +319,6 @@ fn owner_columns(owner: &WorkOwner) -> (bool, Option<&str>) {
     }
 }
 
-fn existing_project(conn: &Connection, id: &str) -> Result<String> {
-    let id = store::uuid(id)?;
-    store::project(conn, &id)?;
-    Ok(id)
-}
-
 fn existing_milestone(conn: &Connection, id: &str, project_id: Option<&str>) -> Result<String> {
     let id = store::uuid(id)?;
     if Some(store::milestone(conn, &id)?.project_id.as_str()) != project_id {
@@ -496,7 +490,7 @@ pub(crate) fn insert(
     }
     let project_id = new
         .project_id
-        .map(|id| existing_project(conn, id))
+        .map(|id| super::views::existing_project(conn, id))
         .transpose()?;
     let milestone_id = new
         .milestone_id
@@ -771,7 +765,7 @@ pub(crate) fn apply(
     if let Some(project_id) = &patch.project_id {
         next.project_id = project_id
             .as_deref()
-            .map(|id| existing_project(conn, id))
+            .map(|id| super::views::existing_project(conn, id))
             .transpose()?;
         if next.project_id != before.project_id {
             next.milestone_id = None;

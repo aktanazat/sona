@@ -658,16 +658,36 @@ pub(super) fn same_words(title: &str) -> String {
         .to_lowercase()
 }
 
-/// An unfinished item with the same words as `item`, for a triage item
-/// that may already be tracked.
-fn same_as<'a>(all: &'a [WorkItem], item: &WorkItem) -> Option<&'a WorkItem> {
-    let words = same_words(&item.title);
-    all.iter().find(|other| {
-        other.id != item.id
-            && other.archived_at_ms.is_none()
-            && !other.status.is_closed()
-            && same_words(&other.title) == words
-    })
+/// The unfinished items by their words, built once per request: a triage
+/// list asks after every one of its items' duplicates.
+pub(crate) struct OpenTitles<'a> {
+    by_words: HashMap<String, Vec<&'a WorkItem>>,
+}
+
+impl<'a> OpenTitles<'a> {
+    pub(crate) fn of(all: &'a [WorkItem]) -> Self {
+        let mut by_words: HashMap<String, Vec<&'a WorkItem>> = HashMap::new();
+        for item in all
+            .iter()
+            .filter(|item| item.archived_at_ms.is_none() && !item.status.is_closed())
+        {
+            by_words
+                .entry(same_words(&item.title))
+                .or_default()
+                .push(item);
+        }
+        Self { by_words }
+    }
+
+    /// An unfinished item with the same words as `item`, for a triage item
+    /// that may already be tracked.
+    fn same_as(&self, item: &WorkItem) -> Option<&'a WorkItem> {
+        self.by_words
+            .get(&same_words(&item.title))?
+            .iter()
+            .copied()
+            .find(|other| other.id != item.id)
+    }
 }
 
 /// What Sona suggests for a triage item: its empty fields, read off the
@@ -676,14 +696,14 @@ fn same_as<'a>(all: &'a [WorkItem], item: &WorkItem) -> Option<&'a WorkItem> {
 pub(crate) fn suggestions(
     history: &Connection,
     reader: &mut MeetingReader<'_>,
-    all: &[WorkItem],
+    open: &OpenTitles<'_>,
     item: &WorkItem,
 ) -> Result<Vec<WorkFieldSuggestion>> {
     if item.status != WorkStatus::Triage {
         return Ok(Vec::new());
     }
     let mut suggestions = fill_suggestions(history, reader, item)?;
-    if let Some(original) = same_as(all, item) {
+    if let Some(original) = open.same_as(item) {
         let value = WorkSuggestionValue::Id(original.id.clone());
         suggestions.push(WorkFieldSuggestion {
             id: super::triage_hints::id(&item.id, WorkSuggestionField::Duplicate, &value),

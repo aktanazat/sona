@@ -99,7 +99,8 @@ impl Desk {
         let mut failed = None;
         let read = self.meetings.with_planning_snapshot(|meetings| {
             let mut reader = MeetingReader::new(Some(meetings), None);
-            sync::suggestions(&self.history, &mut reader, &all, item).map_err(|error| {
+            let open = sync::OpenTitles::of(&all);
+            sync::suggestions(&self.history, &mut reader, &open, item).map_err(|error| {
                 failed = Some(error);
                 StoreError::Unavailable
             })
