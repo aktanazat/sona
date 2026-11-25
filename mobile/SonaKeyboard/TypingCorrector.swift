@@ -144,7 +144,9 @@ final class TypingCorrector {
         if let expansion = lexicon.expansion(of: typed) {
             return Suggestions(typed: typed, correction: nil, others: Self.distinct([expansion] + completions, from: typed))
         }
-        if language.hasPrefix("en"), !lexicon.contains(word), typed == "i" || typed.hasPrefix("i'") || typed.hasPrefix("i’") {
+        /* "j" on its own is "I" with the finger a key low, as the system keyboard reads it. */
+        if language.hasPrefix("en"), !lexicon.contains(word),
+           typed == "i" || typed.lowercased() == "j" || typed.hasPrefix("i'") || typed.hasPrefix("i’") {
             return Suggestions(typed: typed, correction: "I" + typed.dropFirst(), others: Self.distinct(completions, from: typed))
         }
         guard guessing, needsCorrection(word, after: text, lexicon: lexicon) else {

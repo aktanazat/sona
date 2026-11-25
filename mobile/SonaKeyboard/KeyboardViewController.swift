@@ -332,8 +332,9 @@ final class KeyboardViewController: UIInputViewController {
             } while Date().timeIntervalSince(lastKeyAt) < 1
             RunLoop.main.perform(inModes: [.default]) { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let corrector, self?.corrector === corrector else { return }
+                    guard let corrector, let self, self.corrector === corrector else { return }
                     corrector.warmUp()
+                    self.session.forgetLearnedTypos()
                 }
             }
         }
