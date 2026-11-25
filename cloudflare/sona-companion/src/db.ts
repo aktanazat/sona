@@ -13,12 +13,16 @@ import type {
   UploadSessionRow,
 } from "./types";
 
+export function r2UploadPrefix(vaultId: string, uploadId: string): string {
+  return `v1/${vaultId}/u/${uploadId}/c/`;
+}
+
 export function r2ChunkKey(
   vaultId: string,
   uploadId: string,
   index: number,
 ): string {
-  return `v1/${vaultId}/u/${uploadId}/c/${index}`;
+  return `${r2UploadPrefix(vaultId, uploadId)}${index}`;
 }
 
 export function changeCount(result: D1Result<unknown>): number {

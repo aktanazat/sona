@@ -41,6 +41,7 @@ import {
   planFromJson,
   planToJson,
   r2ChunkKey,
+  r2UploadPrefix,
   responseDigestHeader,
   scheduleMaintenance,
   shareRow,
@@ -106,7 +107,6 @@ import {
 const emptyDigest = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
 const noBody = new Uint8Array();
 const minimumEncryptedPayloadBytes = 12 + 16;
-const MAX_CONCURRENT_R2_READS = 8;
 const MAX_CONCURRENT_QUEUE_JOBS = 8;
 
 type RouteName =
@@ -1612,22 +1612,34 @@ async function assertCompleteUpload(
     ) {
       throw problem("integrity_failed");
     }
-    return { expected, receipt };
+    return { expected, key: receipt.r2_key };
   });
-  await forEachBounded(
-    verifiedChunks,
-    MAX_CONCURRENT_R2_READS,
-    async ({ expected, receipt }) => {
-      let stored: R2Object | null;
-      try {
-        stored = await env.CIPHERTEXT.head(receipt.r2_key);
-      } catch {
-        throw dependencyProblem("r2");
-      }
-      if (stored === null || !matchingR2Object(stored, expected))
-        throw problem("integrity_failed");
-    },
-  );
+  const stored = new Map<string, R2Object>();
+  const listing: R2ListOptions = {
+    prefix: r2UploadPrefix(session.vault_id, session.upload_id),
+    include: ["customMetadata"],
+  };
+  for (;;) {
+    let listed: R2Objects;
+    try {
+      listed = await env.CIPHERTEXT.list(listing);
+    } catch {
+      throw dependencyProblem("r2");
+    }
+    for (const object of listed.objects) stored.set(object.key, object);
+    if (!listed.truncated) break;
+    listing.cursor = listed.cursor;
+  }
+  for (const { expected, key } of verifiedChunks) {
+    const object = stored.get(key);
+    if (
+      object === undefined ||
+      object.size !== expected.size ||
+      object.customMetadata?.sha256 !== expected.sha256
+    ) {
+      throw problem("integrity_failed");
+    }
+  }
   return plan;
 }
 
