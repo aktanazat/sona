@@ -28,6 +28,8 @@ const EVIDENCE_COLUMNS: &str = "id, target_kind, target_id, source_kind, source_
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum Refusal {
     Invalid,
+    StatusDescriptionTooLong,
+    StatusHueOutOfRange,
     NotFound,
     StaleRevision,
     OperationConflict,
@@ -55,6 +57,8 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Invalid => "invalid planner input",
+            Self::StatusDescriptionTooLong => "project status description is too long",
+            Self::StatusHueOutOfRange => "project status hue is outside 0 to 360 degrees",
             Self::NotFound => "planner record no longer exists",
             Self::StaleRevision => "planner revision changed",
             Self::OperationConflict => "operation id was already used for another change",

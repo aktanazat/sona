@@ -3,8 +3,8 @@
 
 use super::store::{self, Refusal};
 use super::types::{
-    DateResolution, Milestone, Project, ProjectActivity, ProjectStatus, ProjectStatusName,
-    TaskStatus,
+    DateResolution, Milestone, Project, ProjectActivity, ProjectStatus,
+    ProjectStatusAppearanceEdit, ProjectStatusName, TaskStatus,
 };
 use super::work::attachments;
 use super::work::types::WorkOwner;
@@ -110,6 +110,13 @@ BEGIN
     VALUES (lower(hex(randomblob(16))), new.project_id, 'milestoneTarget', new.title,
         CAST(old.due_at_ms AS TEXT), CAST(new.due_at_ms AS TEXT), new.updated_at_ms);
 END;";
+
+pub(crate) const PROJECT_STATUS_APPEARANCE_MIGRATION: &str =
+    "ALTER TABLE planning_project_status_names
+    ADD COLUMN description TEXT CHECK(description IS NULL OR
+        (length(trim(description)) > 0 AND length(CAST(description AS BLOB)) <= 512));
+ALTER TABLE planning_project_status_names
+    ADD COLUMN hue INTEGER CHECK(hue IS NULL OR (hue >= 0 AND hue <= 360));";
 
 /// Dependencies and initiatives join a project's history: a dependency
 /// added or removed is in both projects' histories, each naming the other,
@@ -321,7 +328,7 @@ fn status_named(
     Ok((status, name_id))
 }
 
-const STATUS_NAME_COLUMNS: &str = "id, category, name, position";
+const STATUS_NAME_COLUMNS: &str = "id, category, name, position, description, hue";
 
 fn read_status_name(row: &Row<'_>) -> rusqlite::Result<ProjectStatusName> {
     Ok(ProjectStatusName {
@@ -329,6 +336,8 @@ fn read_status_name(row: &Row<'_>) -> rusqlite::Result<ProjectStatusName> {
         category: row.get(1)?,
         name: row.get(2)?,
         position: row.get(3)?,
+        description: row.get(4)?,
+        hue: row.get(5)?,
     })
 }
 
@@ -363,12 +372,20 @@ pub(crate) fn save_status_name(
     id: Option<&str>,
     category: ProjectStatus,
     name: &str,
+    appearance: &ProjectStatusAppearanceEdit,
     now_ms: i64,
 ) -> Result<(ProjectStatusName, Vec<String>)> {
     let name = clean_title(name)?;
     let current = id
         .map(|id| status_name(conn, &store::uuid(id)?))
         .transpose()?;
+    let (description, hue) = appearance.resolved_against(current.as_ref());
+    if description.is_some_and(|value| value.len() > 512) {
+        return Err(Refusal::StatusDescriptionTooLong.into());
+    }
+    if hue.is_some_and(|value| value > 360) {
+        return Err(Refusal::StatusHueOutOfRange.into());
+    }
     let taken: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM planning_project_status_names
           WHERE lower(name) = lower(?1) AND id != ?2)",
@@ -380,24 +397,39 @@ pub(crate) fn save_status_name(
     }
     let next_position = "(SELECT coalesce(max(position), 0) + 1
         FROM planning_project_status_names WHERE category = ?2)";
-    let (id, moved) = match current {
+    let (id, moved) = match current.as_ref() {
         Some(current) => {
             if current.category == category {
                 conn.execute(
-                    "UPDATE planning_project_status_names SET name = ?3, updated_at_ms = ?4
-                     WHERE id = ?1 AND category = ?2",
-                    params![current.id, category.as_str(), name, now_ms],
+                    "UPDATE planning_project_status_names
+                        SET name = ?3, updated_at_ms = ?4, description = ?5, hue = ?6
+                      WHERE id = ?1 AND category = ?2",
+                    params![
+                        current.id,
+                        category.as_str(),
+                        name,
+                        now_ms,
+                        description,
+                        hue
+                    ],
                 )?;
-                (current.id, Vec::new())
+                (std::borrow::Cow::Borrowed(current.id.as_str()), Vec::new())
             } else {
                 conn.execute(
                     &format!(
                         "UPDATE planning_project_status_names
                             SET name = ?3, category = ?2, position = {next_position},
-                                updated_at_ms = ?4
+                                updated_at_ms = ?4, description = ?5, hue = ?6
                           WHERE id = ?1"
                     ),
-                    params![current.id, category.as_str(), name, now_ms],
+                    params![
+                        current.id,
+                        category.as_str(),
+                        name,
+                        now_ms,
+                        description,
+                        hue
+                    ],
                 )?;
                 let mut statement = conn.prepare(
                     "SELECT id FROM planning_projects WHERE status_name_id = ?1 ORDER BY id",
@@ -411,7 +443,7 @@ pub(crate) fn save_status_name(
                       WHERE status_name_id = ?1",
                     params![current.id, category.as_str(), now_ms],
                 )?;
-                (current.id, moved)
+                (std::borrow::Cow::Borrowed(current.id.as_str()), moved)
             }
         }
         None => {
@@ -419,12 +451,12 @@ pub(crate) fn save_status_name(
             conn.execute(
                 &format!(
                     "INSERT INTO planning_project_status_names
-                        (id, category, name, position, created_at_ms, updated_at_ms)
-                     VALUES (?1, ?2, ?3, {next_position}, ?4, ?4)"
+                        (id, category, name, position, created_at_ms, updated_at_ms, description, hue)
+                     VALUES (?1, ?2, ?3, {next_position}, ?4, ?4, ?5, ?6)"
                 ),
-                params![id, category.as_str(), name, now_ms],
+                params![id, category.as_str(), name, now_ms, description, hue],
             )?;
-            (id, Vec::new())
+            (std::borrow::Cow::Owned(id), Vec::new())
         }
     };
     Ok((status_name(conn, &id)?, moved))
@@ -1144,8 +1176,18 @@ mod tests {
     fn a_status_name_keeps_projects_inside_its_category() {
         let conn = Connection::open_in_memory().expect("a history database");
         schema::apply_all(&conn).expect("the planner schema");
-        let (review, _) = save_status_name(&conn, None, ProjectStatus::Active, "In review", 1)
-            .expect("a status name");
+        let (review, _) = save_status_name(
+            &conn,
+            None,
+            ProjectStatus::Active,
+            "In review",
+            &ProjectStatusAppearanceEdit {
+                description: Some(Some(" Waiting for review ".to_owned())),
+                hue: Some(Some(210)),
+            },
+            1,
+        )
+        .expect("a status name");
         let project = save_project(
             &conn,
             None,
@@ -1160,14 +1202,20 @@ mod tests {
         assert_eq!(project.status, ProjectStatus::Active);
         assert_eq!(project.status_name_id.as_deref(), Some(review.id.as_str()));
 
-        let (_, moved) = save_status_name(
+        let (moved_status, moved) = save_status_name(
             &conn,
             Some(&review.id),
             ProjectStatus::Paused,
             "In review",
+            &ProjectStatusAppearanceEdit::default(),
             3,
         )
         .expect("the name moved");
+        assert_eq!(
+            moved_status.description.as_deref(),
+            Some("Waiting for review")
+        );
+        assert_eq!(moved_status.hue, Some(210));
         assert_eq!(moved, [project.id.clone()]);
         let paused = store::project(&conn, &project.id).expect("the project");
         assert_eq!(paused.status, ProjectStatus::Paused);
@@ -1185,6 +1233,61 @@ mod tests {
         .expect("the project finished");
         assert_eq!(done.status, ProjectStatus::Completed);
         assert_eq!(done.status_name_id, None);
+    }
+
+    #[test]
+    fn clearing_status_appearance_leaves_its_category_and_position() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let (status, _) = save_status_name(
+            &conn,
+            None,
+            ProjectStatus::Active,
+            "In review",
+            &ProjectStatusAppearanceEdit {
+                description: Some(Some("Waiting for review".to_owned())),
+                hue: Some(Some(210)),
+            },
+            1,
+        )
+        .expect("a status with appearance");
+        let invalid = save_status_name(
+            &conn,
+            Some(&status.id),
+            ProjectStatus::Paused,
+            "Blocked",
+            &ProjectStatusAppearanceEdit {
+                description: Some(None),
+                hue: Some(Some(361)),
+            },
+            2,
+        );
+        assert!(invalid.is_err());
+        assert_eq!(
+            status_name(&conn, &status.id).expect("untouched status"),
+            status
+        );
+        let (cleared, moved) = save_status_name(
+            &conn,
+            Some(&status.id),
+            status.category,
+            &status.name,
+            &ProjectStatusAppearanceEdit {
+                description: Some(None),
+                hue: Some(None),
+            },
+            3,
+        )
+        .expect("cleared appearance");
+        assert!(moved.is_empty());
+        assert_eq!(
+            cleared,
+            ProjectStatusName {
+                description: None,
+                hue: None,
+                ..status
+            }
+        );
     }
 
     /// Turning a milestone into a project carries its name, date, state and

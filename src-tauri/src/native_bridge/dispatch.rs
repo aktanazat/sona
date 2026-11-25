@@ -6625,6 +6625,7 @@ pub(super) async fn call(
             let id = args.take("id")?;
             let category = args.take("category")?;
             let name = args.take("name")?;
+            let appearance = args.take("appearance")?;
             let handle = app.clone();
             off_main_thread(move || {
                 reply(
@@ -6634,6 +6635,7 @@ pub(super) async fn call(
                         id,
                         category,
                         name,
+                        appearance,
                     ),
                 )
             })

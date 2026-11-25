@@ -153,7 +153,7 @@ const FILTER_ITEM = { type: "object", anyOf: [CONDITION_SCHEMA, GROUP_SCHEMA] } 
  * list of strings, or a list of filter conditions. Typed so readers get the
  * enum without re-parsing the schema. */
 export interface ToolProperty {
-  readonly type: "string" | "number" | "integer" | "boolean" | "array";
+  readonly type: "string" | "number" | "integer" | "boolean" | "array" | readonly ["string" | "integer", "null"];
   readonly description: string;
   readonly enum?: readonly string[];
   readonly minimum?: number;
@@ -5104,7 +5104,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_project_status_save",
     title: "Save a Sona project status name",
-    description: `Make a project status name inside a category, or change one. Without status, makes name; with status, renames that one to name or moves it to category. Names are unique ignoring case. Moving a name in use to another category moves those projects' status with it. ${PLANNING_WRITES}`,
+    description: `Make a project status name inside a category, or change one. With status, renames that one to name or moves it to category. Moving a name in use to another category moves those projects with it. Omitted descriptions and colors are kept. ${PLANNING_WRITES}`,
     mutates: "changes",
     inputSchema: {
       type: "object",
@@ -5113,23 +5113,35 @@ export const TOOLS: readonly ToolDefinition[] = [
         category: {
           type: "string",
           enum: ["backlog", "planned", "active", "paused", "completed", "canceled"],
-          description: "The category it belongs to.",
+          description: "The category it belongs to. Required when making a status.",
         },
         status: {
           type: "string",
           description: "The status name to change, from sona_project_status_list.",
         },
+        description: {
+          type: ["string", "null"],
+          description: "A short description. Null or an empty string removes it.",
+        },
+        hue: {
+          type: ["integer", "null"],
+          minimum: 0,
+          maximum: 360,
+          description: "A color in degrees on the color wheel. Null uses the category's color.",
+        },
         dry_run: DRY_RUN,
         operation_id: OPERATION_ID,
       },
-      required: ["name", "category"],
+      required: ["name"],
       additionalProperties: false,
     },
     argv: (input, agent) => [
       "work",
       "project-status-save",
-      `--category=${text(input, "category", true)}`,
+      ...assigned("--category", text(input, "category")),
       ...assigned("--status", text(input, "status")),
+      ...nullable("--description", input, "description", ""),
+      ...assigned("--hue", input.hue === null ? "none" : count(input, "hue")),
       ...(flag(input, "dry_run") ? ["--dry-run"] : []),
       ...writing(input, agent),
       "--json",

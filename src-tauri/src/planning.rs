@@ -27,7 +27,8 @@ pub use schema::{
 pub use types::{
     DateResolution, EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, LabelScope, Milestone,
     PlanningCalendarPage, PlanningTask, Project, ProjectDetail, ProjectHealth, ProjectLink,
-    ProjectProgress, ProjectStatus, ProjectStatusName, ProjectSummary, ProjectUpdate, TaskStatus,
+    ProjectProgress, ProjectStatus, ProjectStatusAppearanceEdit, ProjectStatusName,
+    ProjectSummary, ProjectUpdate, TaskStatus,
 };
 
 use crate::managers::history::HistoryManager;
@@ -94,6 +95,10 @@ pub(crate) fn failure(error: anyhow::Error) -> String {
     }
     match error.downcast_ref::<store::Refusal>() {
         Some(store::Refusal::Invalid) => "Check the title, date, and selected owner.",
+        Some(store::Refusal::StatusDescriptionTooLong) => {
+            "Shorten the status description and try again."
+        }
+        Some(store::Refusal::StatusHueOutOfRange) => "Choose a status color from 0 to 360 degrees.",
         Some(store::Refusal::NotFound) => "This item no longer exists.",
         Some(store::Refusal::StaleRevision) => "This item changed. Reload and try again.",
         Some(store::Refusal::OperationConflict) => {

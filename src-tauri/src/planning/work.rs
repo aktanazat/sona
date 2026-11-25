@@ -2508,18 +2508,35 @@ pub(crate) fn catalog_status_name_save(
     id: Option<String>,
     category: crate::planning::types::ProjectStatus,
     name: &str,
+    appearance: &super::types::ProjectStatusAppearanceEdit,
 ) -> Result<crate::planning::types::ProjectStatusName, String> {
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum Request<'a> {
+        Original(&'a Option<String>, super::types::ProjectStatus, &'a str),
+        WithAppearance(
+            &'a Option<String>,
+            super::types::ProjectStatus,
+            &'a str,
+            &'a super::types::ProjectStatusAppearanceEdit,
+        ),
+    }
+    let request = if appearance.is_empty() {
+        Request::Original(&id, category, name)
+    } else {
+        Request::WithAppearance(&id, category, name, appearance)
+    };
     let now = now_ms();
     run_history(app, |history| {
         store::mutate(
             history,
             operation_id,
             "catalog_status_name_save",
-            &(&id, category, name),
+            &request,
             now,
             |tx| {
                 let (saved, projects) =
-                    catalog::save_status_name(tx, id.as_deref(), category, name, now)?;
+                    catalog::save_status_name(tx, id.as_deref(), category, name, appearance, now)?;
                 Ok(Done {
                     effects: Effects {
                         projects,
@@ -2528,6 +2545,40 @@ pub(crate) fn catalog_status_name_save(
                     value: saved,
                 })
             },
+        )
+    })
+}
+
+const STATUS_APPEARANCE_CLI_SAVE: &str = "catalog_status_appearance_cli_save";
+
+pub(crate) fn has_status_appearance_cli_receipt(
+    history: &HistoryManager,
+    operation_id: &str,
+) -> Result<bool, String> {
+    super::history(history, |conn| {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM planning_operations WHERE operation_id = ?1 AND command = ?2)",
+            [operation_id, STATUS_APPEARANCE_CLI_SAVE],
+            |row| row.get(0),
+        )?)
+    })
+}
+
+pub(crate) fn catalog_status_appearance_cli_save<T: serde::de::DeserializeOwned + Serialize>(
+    history: &HistoryManager,
+    operation_id: &str,
+    request: &impl Serialize,
+    write: impl FnOnce(&Connection, i64) -> StorageResult<T>,
+) -> StorageResult<T> {
+    let now = now_ms();
+    history.with_connection(|conn| {
+        store::mutate(
+            conn,
+            operation_id,
+            STATUS_APPEARANCE_CLI_SAVE,
+            request,
+            now,
+            |tx| write(tx, now),
         )
     })
 }
