@@ -8,6 +8,7 @@ import SwiftUI
 /// and arrive through `meetingRows`, which is the last thing on the page.
 struct EssentialsView<MeetingRows: View>: View {
     let store: SettingsStore
+    let activeInput: String?
     @ViewBuilder var meetingRows: () -> MeetingRows
 
     var body: some View {
@@ -28,7 +29,7 @@ struct EssentialsView<MeetingRows: View>: View {
                 )
                 ShortcutCaptureRow(store: store, id: "work_quick_entry")
                 ShortcutCaptureRow(store: store, id: "work_ramble")
-                MicrophoneRow(store: store)
+                MicrophoneRow(store: store, activeInput: activeInput)
                 /// The spoken language, beside the microphone that hears it.
                 /// The list narrows to what the loaded model can recognize,
                 /// so a one-language model offers one language rather than a
@@ -39,12 +40,6 @@ struct EssentialsView<MeetingRows: View>: View {
                 meetingRows()
             }
         }
-    }
-}
-
-extension EssentialsView where MeetingRows == EmptyView {
-    init(store: SettingsStore) {
-        self.init(store: store) { EmptyView() }
     }
 }
 
@@ -88,13 +83,16 @@ struct LoginItemRow: View {
 
 struct MicrophoneRow: View {
     let store: SettingsStore
+    let activeInput: String?
     @State private var managing = false
 
     var body: some View {
         CardRow(action: { managing = true }) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Microphone").bodyText()
-                if store.channelCount > 1 {
+                if let activeInput {
+                    Text("In use: \(activeInput)").metaText()
+                } else if store.channelCount > 1 {
                     Text("\(store.channelCount) channels").metaText()
                 }
             }

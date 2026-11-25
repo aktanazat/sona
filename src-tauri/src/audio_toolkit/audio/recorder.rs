@@ -510,11 +510,43 @@ impl VadConfig {
 /// Callback invoked with each 16 kHz mono frame that passes the active capture
 /// policy while recording. Used to feed a live streaming transcription as audio arrives.
 pub type AudioFrameCallback = Arc<dyn Fn(&[f32]) + Send + Sync + 'static>;
+
+type StreamFailureCallback = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+struct StreamHealth {
+    failed: AtomicBool,
+    on_failure: Mutex<Option<StreamFailureCallback>>,
+}
+
+impl StreamHealth {
+    fn watch(&self, callback: impl FnOnce() + Send + 'static) -> bool {
+        let mut slot = lock_recover(&self.on_failure);
+        if self.failed.load(Ordering::Acquire) {
+            return false;
+        }
+        *slot = Some(Box::new(callback));
+        true
+    }
+
+    fn report_failure(&self) {
+        self.failed.store(true, Ordering::Release);
+        let callback = lock_recover(&self.on_failure).take();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
+    fn clear_watch(&self) {
+        *lock_recover(&self.on_failure) = None;
+    }
+}
+
 struct StreamBuildOptions {
     producer: CaptureProducer,
     channels: usize,
     selected_channel: Option<usize>,
-    stream_error: Arc<AtomicBool>,
+    stream_health: Arc<StreamHealth>,
     meeting_control: Arc<MeetingCallbackControl>,
     sample_rate: u32,
 }
@@ -553,8 +585,7 @@ pub struct AudioRecorder {
     /// Which input channel to use. None = average all (original behavior).
     selected_channel: Option<usize>,
     config_cache: Arc<InputConfigCache>,
-    /// Set by cpal when the active input stream can no longer capture.
-    stream_error: Arc<AtomicBool>,
+    stream_health: Arc<StreamHealth>,
 }
 
 impl AudioRecorder {
@@ -568,7 +599,7 @@ impl AudioRecorder {
             audio_cb: None,
             selected_channel: None,
             config_cache: Arc::new(InputConfigCache::default()),
-            stream_error: Arc::new(AtomicBool::new(false)),
+            stream_health: Arc::new(StreamHealth::default()),
         })
     }
 
@@ -642,7 +673,7 @@ impl AudioRecorder {
             let _ = self.close();
         }
 
-        self.stream_error.store(false, Ordering::Relaxed);
+        self.stream_health.failed.store(false, Ordering::Relaxed);
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(1);
@@ -663,7 +694,7 @@ impl AudioRecorder {
         let audio_cb = self.audio_cb.clone();
         let selected_channel = self.selected_channel;
         let config_cache = Arc::clone(&self.config_cache);
-        let stream_error = Arc::clone(&self.stream_error);
+        let stream_health = Arc::clone(&self.stream_health);
 
         let worker = std::thread::spawn(move || {
             let device_name = thread_device.name().unwrap_or_default();
@@ -727,7 +758,7 @@ impl AudioRecorder {
                     producer,
                     channels,
                     selected_channel,
-                    stream_error: Arc::clone(&stream_error),
+                    stream_health: Arc::clone(&stream_health),
                     meeting_control: Arc::clone(&meeting_control),
                     sample_rate,
                 };
@@ -940,6 +971,7 @@ impl AudioRecorder {
     /// the sticky capture gap. The caller may persist that prefix for an
     /// explicit retry, but must not decode or deliver it automatically.
     pub fn stop(&self) -> Result<RecordedAudio, CaptureError> {
+        self.stream_health.clear_watch();
         let tx = self.cmd_tx.as_ref().ok_or(CaptureError::NotCapturing)?;
         let (resp_tx, resp_rx) = mpsc::channel();
         tx.send(Cmd::Stop(resp_tx))
@@ -1049,7 +1081,7 @@ impl AudioRecorder {
     /// cpal may report a device disconnect asynchronously without closing its
     /// callback channel, so also honor the error callback's explicit flag.
     pub fn needs_reopen(&self) -> bool {
-        self.stream_error.load(Ordering::Relaxed)
+        self.stream_health.failed.load(Ordering::Acquire)
             || self
                 .worker_handle
                 .as_ref()
@@ -1060,7 +1092,19 @@ impl AudioRecorder {
         self.device.as_ref().map(DeviceTrait::name).transpose()
     }
 
+    pub(crate) fn watch_recording_input(
+        &self,
+        on_failure: impl FnOnce() + Send + 'static,
+    ) -> Option<String> {
+        let name = self.input_device_name().ok().flatten()?;
+        if name.trim().is_empty() || !self.stream_health.watch(on_failure) {
+            return None;
+        }
+        Some(name)
+    }
+
     pub fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.stream_health.clear_watch();
         if let Some(tx) = self.cmd_tx.take() {
             let _ = tx.send(Cmd::Shutdown);
         }
@@ -1097,7 +1141,7 @@ impl AudioRecorder {
             mut producer,
             channels,
             selected_channel,
-            stream_error,
+            stream_health,
             meeting_control,
             sample_rate,
         } = options;
@@ -1136,7 +1180,7 @@ impl AudioRecorder {
             },
             move |err| {
                 log::error!("Stream error: {}", err);
-                stream_error.store(true, Ordering::Relaxed);
+                stream_health.report_failure();
             },
             None,
         )

@@ -15,7 +15,7 @@ struct SettingsScreen: View {
         case .profile:
             ProfileSettingsView()
         case .essentials:
-            EssentialsView(store: model.settings) {
+            EssentialsView(store: model.settings, activeInput: model.activeDictationInput) {
                 MeetingDetectionEssentials(store: model.meetingSettings)
             }
         case .dictation:

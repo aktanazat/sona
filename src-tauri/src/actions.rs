@@ -42,6 +42,15 @@ const COMMAND_REWRITE_DEADLINE: Duration = Duration::from_secs(30);
 const TRANSCRIPTION_FAILURE_LOG_MESSAGE: &str = "Transcription failed; no text was delivered";
 const TRANSCRIPTION_FAILURE_EVENT_MESSAGE: &str = "Transcription failed";
 
+pub(crate) const DICTATION_INPUT_EVENT: &str = "dictation-input";
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DictationInput {
+    run_id: u64,
+    input_name: Option<String>,
+}
+
 /// The one user-visible run-failure lane, emitted as `recording-error` by this
 /// module and by the capture owner. `error_type` names the failure; no field
 /// carries transcript, audio, sample counts, or provider text.
@@ -2077,7 +2086,20 @@ impl TranscribeAction {
             path: app.state::<Arc<HistoryManager>>().spool_path(&self.run),
             run: self.run.clone(),
         };
-        match rm.try_start_recording(&binding_id, vad_policy, spool) {
+        let run_id = self.run.run_id;
+        let failure_app = app.clone();
+        let on_input_failure = move || {
+            tauri::async_runtime::spawn(async move {
+                let _ = failure_app.emit(
+                    DICTATION_INPUT_EVENT,
+                    DictationInput {
+                        run_id,
+                        input_name: None,
+                    },
+                );
+            });
+        };
+        match rm.try_start_recording(&binding_id, vad_policy, spool, on_input_failure) {
             Ok(readiness) => {
                 debug!(
                     "Recording request accepted in {:?}; waiting for first microphone samples",
@@ -2097,11 +2119,10 @@ impl TranscribeAction {
                 let app_clone = app.clone();
                 let rm_clone = Arc::clone(&rm);
                 std::thread::spawn(move || {
-                    if !readiness.wait() {
+                    let Ok(input_name) = readiness.wait() else {
                         debug!("Microphone readiness wait ended without receiving samples");
-
                         return;
-                    }
+                    };
 
                     // Development-only preview hook for evaluating the brief
                     // arming animation on hardware that normally starts too fast
@@ -2125,6 +2146,10 @@ impl TranscribeAction {
 
                     debug!("Microphone is receiving samples; recording is ready");
                     utils::emit_recording_ready(&app_clone);
+                    if input_name.is_some() && rm_clone.is_recording_input_available(generation) {
+                        let _ = app_clone
+                            .emit(DICTATION_INPUT_EVENT, DictationInput { run_id, input_name });
+                    }
 
                     // The start chime is a readiness cue, so it must follow the
                     // first real input callback rather than Stream::play() or a
