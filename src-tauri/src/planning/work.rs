@@ -1454,7 +1454,7 @@ pub(crate) fn comment_add_as(
         .try_state::<Arc<MeetingSessionManager>>()
         .and_then(|meetings| meetings.user_name());
     let actor = author.actor;
-    comment_change(
+    let written = comment_change(
         app,
         operation_id,
         "work_comment_add",
@@ -1475,7 +1475,55 @@ pub(crate) fn comment_add_as(
             }
             Ok(comment)
         },
-    )
+    );
+    if let Ok(comment) = &written {
+        if matches!(actor, WorkActor::Me) && inbox::mentions_sona(body) {
+            answer_mention(app.clone(), comment.clone(), body.to_owned());
+        }
+    }
+    written
+}
+
+/// Sona answers a comment from the user that mentions `@Sona`, as a reply
+/// in its thread. The turn gets no tools, so it answers in words only.
+fn answer_mention(app: AppHandle, mention: WorkComment, body: String) {
+    tauri::async_runtime::spawn(async move {
+        let message = format!(
+            "The user wrote this comment on a {}:\n\n{body}\n\nAnswer it briefly, as Sona.",
+            mention.subject.as_str(),
+        );
+        let turn = crate::agent_panel::run_loop_turn(
+            &app,
+            &message,
+            &[],
+            None,
+            std::time::Duration::from_secs(300),
+        )
+        .await;
+        let reply = match turn.answer {
+            Ok(reply) => reply,
+            Err(error) => {
+                log::warn!("Sona could not answer a comment mention: {error:?}");
+                return;
+            }
+        };
+        let author = comments::Author {
+            actor: WorkActor::Sona,
+            agent: None,
+        };
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        if let Err(error) = comment_add_as(
+            &app,
+            author,
+            &operation_id,
+            mention.subject,
+            &mention.item_id,
+            &reply,
+            Some(mention.id.as_str()),
+        ) {
+            log::warn!("Sona's comment reply could not be saved: {error}");
+        }
+    });
 }
 
 /// [`work_comment_edit`] made by `author`.
