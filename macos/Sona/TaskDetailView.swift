@@ -323,6 +323,12 @@ private struct DetailNotes: View {
     @State private var editing = false
     @FocusState private var focused: Bool
     @State private var hovering = false
+    @State private var selection: TextSelection?
+
+    private var quoted: QuotedSelection? {
+        guard case let .selection(range)? = selection?.indices, !range.isEmpty else { return nil }
+        return QuotedSelection(text: String(text[range]), link: TaskCopy.link(row))
+    }
 
     var body: some View {
         let details = row.details ?? ""
@@ -387,7 +393,7 @@ private struct DetailNotes: View {
                 Text("Add details, a checklist or links").font(TypeScale.body(14)).foregroundStyle(Theme.inkDisabled)
                     .allowsHitTesting(false)
             }
-            TextEditor(text: $text)
+            TextEditor(text: $text, selection: $selection)
                 .font(TypeScale.body(14))
                 .lineSpacing(3)
                 .foregroundStyle(Theme.ink)
@@ -396,6 +402,7 @@ private struct DetailNotes: View {
                 .scrollDisabled(true)
                 .padding(.horizontal, -5)
                 .focused($focused)
+                .focusedValue(\.quotedSelection, quoted)
                 .withoutWritingTools()
                 .onExitCommand {
                     text = row.details ?? ""

@@ -31,6 +31,7 @@ struct SonaApp: App {
         .restorationBehavior(.disabled)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            SendSelectionCommand(model: model)
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
                     .keyboardShortcut(",", modifiers: .command)
@@ -368,5 +369,45 @@ struct MenuBarMenu: View {
         Divider()
         Button("Quit Sona") { model.quit() }
             .keyboardShortcut("q", modifiers: .command)
+    }
+}
+
+/// The text an editor has selected, and the `sona://` link to what it is in.
+/// The focused editor publishes it; ⌘J sends it to Talk to Sona as a quote.
+struct QuotedSelection: Equatable {
+    let text: String
+    let link: String
+
+    var draft: String {
+        let quoted = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "> \($0)" }
+            .joined(separator: "\n")
+        return "\(quoted)\n\n\(link)\n\n"
+    }
+}
+
+private struct QuotedSelectionKey: FocusedValueKey {
+    typealias Value = QuotedSelection
+}
+
+extension FocusedValues {
+    var quotedSelection: QuotedSelection? {
+        get { self[QuotedSelectionKey.self] }
+        set { self[QuotedSelectionKey.self] = newValue }
+    }
+}
+
+struct SendSelectionCommand: Commands {
+    let model: AppModel
+    @FocusedValue(\.quotedSelection) private var quoted: QuotedSelection?
+
+    var body: some Commands {
+        CommandGroup(after: .pasteboard) {
+            Button("Send Selection to Talk to Sona") {
+                if let quoted { model.discussSelection(quoted) }
+            }
+            .keyboardShortcut("j", modifiers: .command)
+            .disabled(quoted == nil)
+        }
     }
 }
