@@ -37,6 +37,7 @@ final class KeyboardViewController: UIInputViewController {
     private let typing = TypingModel()
     private let tools = KeyboardTools()
     private var corrector: TypingCorrector?
+    private var emojiCatalog: EmojiCatalog?
     private var session = TypingSession(corrector: nil)
     /// How many times Reset in the app had run when the learning was read, so a reset made
     /// while the keyboard was open is not undone by saving what it had before.
@@ -311,26 +312,28 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     /// Letters, spelling, next words and the language dictation listens in all follow the
-    /// typing language. Emoji found by word need English words. The next-word table and the
-    /// common words come in a moment later, read off the main thread the first time.
+    /// typing language. Emoji found by word need English words. The next-word table, the
+    /// common words and the emoji come in a moment later, read off the main thread the first
+    /// time.
     private func setLanguage(_ language: TypingLanguage) {
         typing.language = language
         let corrector = TypingCorrector(language: language.rawValue, grid: typing.letterGrid)
         self.corrector = corrector
-        let catalog = language == .english ? EmojiCatalog.shared : nil
         session = TypingSession(
             corrector: corrector, lexicon: session.lexicon, learning: session.learning,
-            emoji: { catalog?.emoji(for: $0) }
+            emoji: language == .english ? { [weak self] in self?.emojiCatalog?.emoji(for: $0) } : { _ in nil }
         )
         applySnippets()
         session.hostChanged(field: documentID, text: fieldText)
         Task { [weak self] in
             async let table = NextWords.table(for: language)
             async let common = CommonWords.list(for: language)
-            let (loadedTable, loadedCommon) = await (table, common)
+            async let emoji = language == .english ? EmojiCatalog.shared.value : nil
+            let (loadedTable, loadedCommon, loadedEmoji) = await (table, common, emoji)
             corrector?.common = loadedCommon
             guard let self, typing.language == language else { return }
             session.predictor = loadedTable
+            if let loadedEmoji { emojiCatalog = loadedEmoji }
             refreshSuggestions()
             /* Apple's checker loads its dictionary on its first call, which would otherwise
              * be the first space: 4 to 23 ms in a fresh keyboard on the simulator. So it is

@@ -360,8 +360,8 @@ private final class FieldDouble: NSObject, UITextDocumentProxy {
 @MainActor
 struct EmojiCatalogTests {
     @Test("the strip offers the emoji named by a typed word")
-    func suggest() throws {
-        let catalog = try #require(EmojiCatalog.shared)
+    func suggest() async throws {
+        let catalog = try #require(await EmojiCatalog.shared.value)
         #expect(catalog.emoji(for: "Pizza") == "\u{1F355}")
     }
 }

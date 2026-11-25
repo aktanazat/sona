@@ -3,13 +3,14 @@ import Foundation
 /// The emoji the strip offers for a typed word, with the English words that find each one
 /// (built by mobile/scripts/build-emoji.ts from Unicode's emoji list and CLDR's annotations).
 /// Picking emoji is the system emoji keyboard's job, so there is no panel here.
-final class EmojiCatalog {
-    @MainActor static let shared: EmojiCatalog? = {
+final class EmojiCatalog: Sendable {
+    /// The bundled catalog, parsed off the main thread once per process.
+    static let shared = Task.detached(priority: .userInitiated) { () -> EmojiCatalog? in
         guard let url = Bundle(for: EmojiCatalog.self).url(forResource: "emoji", withExtension: "tsv"),
               let contents = try? String(contentsOf: url, encoding: .utf8)
         else { return nil }
         return EmojiCatalog(contents: contents)
-    }()
+    }
 
     /// One emoji per single word: the emoji named exactly that word first, otherwise the
     /// first emoji in Apple's order that the word describes.
