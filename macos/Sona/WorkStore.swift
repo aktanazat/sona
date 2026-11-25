@@ -53,7 +53,13 @@ final class WorkStore {
     /// The projects, saved views and notes the inbox follows.
     private(set) var follows: [WorkFollow] = []
     /// Every notice not archived, snoozed ones too, newest first.
-    private(set) var notifications: [WorkNotification] = []
+    private(set) var notifications: [WorkNotification] = [] {
+        didSet { updateDockBadge() }
+    }
+    /// Whether the Dock icon shows the unread count.
+    private(set) var dockBadge = true {
+        didSet { updateDockBadge() }
+    }
     /// Archived and deleted tasks, once the archive page has asked.
     private(set) var archive: WorkArchiveList?
     private(set) var archiveError: String?
@@ -1279,8 +1285,10 @@ final class WorkStore {
     }
 
     func saveInboxSettings(_ change: WorkInboxSettingsChange) async throws -> WorkInboxSettings {
-        try await core.request(
+        let saved: WorkInboxSettings = try await core.request(
             "work_inbox_settings_save", InboxSettingsSaveParams(operationId: Self.newId(), change: change))
+        dockBadge = saved.dockBadge
+        return saved
     }
 
     /// Marks notices read or unread, archives them or snoozes them until
@@ -1311,6 +1319,30 @@ final class WorkStore {
                 mutationError = error.localizedDescription
             }
         }
+    }
+
+    /// Opening a task marks every notice about it read.
+    func markTaskRead(_ itemId: String) {
+        guard notifications.contains(where: { $0.itemId == itemId && $0.readAtMs == nil }) else { return }
+        let before = notifications
+        let now = TaskDates.now()
+        for index in notifications.indices where notifications[index].itemId == itemId {
+            notifications[index].readAtMs = notifications[index].readAtMs ?? now
+        }
+        Task {
+            do {
+                let _: Int = try await core.request(
+                    "work_inbox_mark_task", TaskReadParams(operationId: Self.newId(), taskId: itemId))
+            } catch {
+                notifications = before
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    private func updateDockBadge() {
+        let count = unread
+        NSApplication.shared.dockTile.badgeLabel = dockBadge && count > 0 ? "\(count)" : nil
     }
 
     func descriptionVersions(_ id: String) async -> [WorkDescriptionVersion] {
@@ -1541,8 +1573,9 @@ final class WorkStore {
             async let followedSubjects: [WorkFollow] = core.request("work_follows")
             async let heard: WorkInbox = core.request("work_inbox", InboxParams(snoozed: true))
             async let trashed: [WorkBinned] = core.request("work_bin")
-            let (starredList, followedList, subjectList, inboxRead, binList)
-                = try await (starred, followed, followedSubjects, heard, trashed)
+            async let docked: WorkInboxSettings = core.request("work_inbox_settings")
+            let (starredList, followedList, subjectList, inboxRead, binList, docking)
+                = try await (starred, followed, followedSubjects, heard, trashed, docked)
             if pending > 0 {
                 reloadWhenIdle = true
             } else {
@@ -1551,6 +1584,7 @@ final class WorkStore {
                 subscriptions = Dictionary(followedList.map { ($0.itemId, $0) }) { first, _ in first }
                 follows = subjectList
                 notifications = inboxRead.notifications
+                dockBadge = docking.dockBadge
                 binned = Dictionary(binList.map { ($0.id, $0) }) { first, _ in first }
                 keepTime()
             }
@@ -2199,6 +2233,10 @@ private struct InboxMarkParams: Encodable {
     let ids: [String]
     let mark: WorkInboxMark
     let untilMs: Int64?
+}
+private struct TaskReadParams: Encodable {
+    let operationId: String
+    let taskId: String
 }
 private struct DescriptionRestoreParams: Encodable {
     let operationId: String

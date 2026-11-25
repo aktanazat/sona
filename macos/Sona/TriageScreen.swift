@@ -34,16 +34,30 @@ private struct TriageList: View {
         let now = store.now
         let waiting = Self.waiting(store.items ?? [], now: now)
         let split = focus.triageSplit
-        let groups = Self.groups(waiting.filter { row in split.map { $0 == row.source } ?? true },
+        let found = Self.searched(waiting, focus.inboxSearch, projects: store.projects)
+        let groups = Self.groups(found.filter { row in split.map { $0 == row.source } ?? true },
                                  byMeeting: split.map { $0 == .meeting } ?? true)
         VStack(spacing: 0) {
             WorkBar {
                 InboxTabs()
             } trailing: {
+                Button {
+                    focus.inboxSearching.toggle()
+                    if !focus.inboxSearching { focus.inboxSearch = "" }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(IconButton(on: focus.inboxSearching))
+                .keyboardShortcut("f", modifiers: .command)
+                .help("Search  ⌘F")
+                .accessibilityLabel("Search triage")
                 let targets = model.workTargets
                 if !targets.isEmpty {
                     TriageBarActions(ids: targets)
                 }
+            }
+            if focus.inboxSearching {
+                InboxSearchField(prompt: "Search triage")
             }
             TriageSplits(rows: waiting)
             if let error = store.listError, store.items != nil {
@@ -89,7 +103,7 @@ private struct TriageList: View {
                 TaskSkeleton(rows: 6, twoLine: true)
             }
         } else if groups.isEmpty, proposed.isEmpty, documents.isEmpty {
-            TaskEmpty(line: split.map { "Nothing \($0.split.lowercased()) to triage." } ?? "Triage is clear.") {
+            TaskEmpty(line: !focus.inboxSearch.trimmingCharacters(in: .whitespaces).isEmpty ? "Nothing matches." : split.map { "Nothing \($0.split.lowercased()) to triage." } ?? "Triage is clear.") {
                 TaskKeyButton(title: "Tasks", keys: "g t") { model.go(.tasks) }
             }
             .onAppear { focus.show([]) }
@@ -113,6 +127,17 @@ private struct TriageList: View {
     static func waiting(_ items: [WorkItemRow], now: Int64) -> [WorkItemRow] {
         let shown = TaskListing.Filter(WorkQuery(), now: now)
         return items.filter { $0.status == .triage && shown.matches($0) }
+    }
+
+    /// Matches the inbox search: title, project, priority and number.
+    static func searched(_ rows: [WorkItemRow], _ text: String, projects: [WorkProjectChoice]) -> [WorkItemRow] {
+        let query = text.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return rows }
+        let titles = Dictionary(projects.map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first })
+        return rows.filter { row in
+            let texts = [row.title, row.projectId.flatMap { titles[$0] }, TaskPriority(row.priority).label, "#\(row.number)"]
+            return texts.contains { $0?.lowercased().contains(query) == true }
+        }
     }
 
     /// One group per meeting, the latest meeting first; inside a meeting,

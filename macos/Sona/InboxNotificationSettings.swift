@@ -32,6 +32,10 @@ struct InboxNotificationSettings: View {
             if let settings {
                 Card {
                     ToggleRow(
+                        title: "Dock badge",
+                        detail: "Show the unread count on the Dock icon.",
+                        isOn: Binding(get: { settings.dockBadge }, set: { setDockBadge($0) }))
+                    ToggleRow(
                         title: "Quiet hours",
                         detail: "Banners wait until they end. Notices still reach the inbox.",
                         isOn: Binding(get: { settings.quietHours != nil },
@@ -109,6 +113,12 @@ struct InboxNotificationSettings: View {
         guard var next = settings, next.quietHours != hours else { return }
         next.quietHours = hours
         save(WorkInboxSettingsChange(quietHours: .some(hours)), showing: next)
+    }
+
+    private func setDockBadge(_ on: Bool) {
+        guard var next = settings, next.dockBadge != on else { return }
+        next.dockBadge = on
+        save(WorkInboxSettingsChange(dockBadge: on), showing: next)
     }
 
     private func save(_ change: WorkInboxSettingsChange, showing next: WorkInboxSettings) {

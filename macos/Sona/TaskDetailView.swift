@@ -86,6 +86,7 @@ struct TaskDetailView: View {
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .task(id: "\(id):\(row?.revision ?? -1)") { await store.loadDetail(id) }
+        .task(id: id) { store.markTaskRead(id) }
         .environment(\.openURL, OpenURLAction { url in
             guard url.scheme == TaskMention.scheme else { return .systemAction }
             guard let number = Int64(url.host() ?? ""),

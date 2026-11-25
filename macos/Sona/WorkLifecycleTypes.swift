@@ -71,6 +71,7 @@ struct WorkSubscription: Codable, Equatable {
 enum WorkNotificationKind: String, Codable, Hashable {
     case status, comment, mention, assigned, changed, reminder, due, automation, digest
     case question, project, view, note, housekeeping
+    case unblocked
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -80,7 +81,7 @@ enum WorkNotificationKind: String, Codable, Hashable {
     /// Every kind the core posts, in the order its settings list them.
     static let listed: [WorkNotificationKind] = [
         .status, .comment, .mention, .assigned, .changed, .reminder, .due, .automation, .digest,
-        .question, .project, .view, .note, .housekeeping,
+        .question, .project, .view, .note, .housekeeping, .unblocked,
     ]
 
     var label: String {
@@ -99,6 +100,7 @@ enum WorkNotificationKind: String, Codable, Hashable {
         case .view: "Followed views"
         case .note: "Followed notes"
         case .housekeeping: "Housekeeping"
+        case .unblocked: "Unblocked tasks"
         case .unknown: "Other"
         }
     }
@@ -164,6 +166,7 @@ struct WorkQuietHours: Codable, Equatable {
 struct WorkInboxSettings: Codable, Equatable {
     var kinds: [WorkInboxKindSetting]
     var quietHours: WorkQuietHours?
+    var dockBadge: Bool
 }
 
 /// A change to the inbox settings. `inbox` and `banners` name every kind
@@ -173,15 +176,17 @@ struct WorkInboxSettingsChange: Encodable {
     var inbox: [WorkNotificationKind]?
     var banners: [WorkNotificationKind]?
     var quietHours: WorkQuietHours??
+    var dockBadge: Bool?
 
     private enum CodingKeys: String, CodingKey {
-        case inbox, banners, quietHours
+        case inbox, banners, quietHours, dockBadge
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(inbox, forKey: .inbox)
         try container.encodeIfPresent(banners, forKey: .banners)
+        try container.encodeIfPresent(dockBadge, forKey: .dockBadge)
         switch quietHours {
         case let .some(.some(hours)): try container.encode(hours, forKey: .quietHours)
         case .some(.none): try container.encodeNil(forKey: .quietHours)
@@ -271,6 +276,8 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
     var priority: Bool
     /// Earlier notices of the same failure this one stands for.
     var earlier: [String]
+    /// The start of the comment the notice is about.
+    var excerpt: String?
 
     /// "Claude Code", "Sona", or "An agent" when it gave no name.
     var who: String {
@@ -307,6 +314,7 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
                 return automation?.error.map { "\(failed): \($0)" } ?? failed
             }
             return "finished"
+        case .unblocked: return "unblocked it"
         case .unknown: return "changed it"
         }
     }
