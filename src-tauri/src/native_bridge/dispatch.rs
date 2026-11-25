@@ -820,6 +820,35 @@ pub(super) async fn call(
             })
             .await?
         }
+        "change_meeting_vocabulary_enabled_setting" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(
+                    crate::commands::vocabulary::change_meeting_vocabulary_enabled_setting(
+                        handle.clone(),
+                        enabled,
+                    ),
+                )
+            })
+            .await?
+        }
+        "meeting_vocabulary_words" => {
+            reply(crate::commands::vocabulary::meeting_vocabulary_words(app.clone()).await)
+        }
+        "undo_learned_word" => {
+            let mut args = Args::parse(params)?;
+            let word = args.take("word")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::vocabulary::undo_learned_word(
+                    handle.clone(),
+                    word,
+                ))
+            })
+            .await?
+        }
         "get_text_replacements" => {
             let handle = app.clone();
             on_main_thread(app, move || {
@@ -1108,82 +1137,6 @@ pub(super) async fn call(
                 reply(crate::settings::change_external_mutations_enabled_setting(
                     handle.clone(),
                     enabled,
-                ))
-            })
-            .await?
-        }
-        "change_work_close_parents_setting" => {
-            let mut args = Args::parse(params)?;
-            let enabled = args.take("enabled")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(crate::settings::change_work_close_parents_setting(
-                    handle.clone(),
-                    enabled,
-                ))
-            })
-            .await?
-        }
-        "change_work_digest_setting" => {
-            let mut args = Args::parse(params)?;
-            let enabled = args.take("enabled")?;
-            let day = args.take("day")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(crate::settings::change_work_digest_setting(
-                    handle.clone(),
-                    enabled,
-                    day,
-                ))
-            })
-            .await?
-        }
-        "change_work_close_subtasks_setting" => {
-            let mut args = Args::parse(params)?;
-            let enabled = args.take("enabled")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(crate::settings::change_work_close_subtasks_setting(
-                    handle.clone(),
-                    enabled,
-                ))
-            })
-            .await?
-        }
-        "change_work_start_parent_setting" => {
-            let mut args = Args::parse(params)?;
-            let enabled = args.take("enabled")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(crate::settings::change_work_start_parent_setting(
-                    handle.clone(),
-                    enabled,
-                ))
-            })
-            .await?
-        }
-        "change_work_housekeeping_setting" => {
-            let mut args = Args::parse(params)?;
-            let auto_close_stale_days = args.take("autoCloseStaleDays")?;
-            let auto_archive_days = args.take("autoArchiveDays")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(crate::settings::change_work_housekeeping_setting(
-                    handle.clone(),
-                    auto_close_stale_days,
-                    auto_archive_days,
-                ))
-            })
-            .await?
-        }
-        "change_work_triage_auto_apply_setting" => {
-            let mut args = Args::parse(params)?;
-            let fields = args.take("fields")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(crate::settings::change_work_triage_auto_apply_setting(
-                    handle.clone(),
-                    fields,
                 ))
             })
             .await?
@@ -3744,15 +3697,6 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::people::person_rename(app.state(), request).await)
         }
-        "person_emails_set" => {
-            let mut args = Args::parse(params)?;
-            let person_id = args.take("personId")?;
-            let calendar_emails = args.take("calendarEmails")?;
-            reply(
-                crate::commands::people::person_emails_set(app.state(), person_id, calendar_emails)
-                    .await,
-            )
-        }
         "person_merge" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
@@ -4009,13 +3953,17 @@ pub(super) async fn call(
             let promise_id = args.take("promiseId")?;
             let what = args.take("what")?;
             let due_at_ms = args.take("dueAtMs")?;
-            reply(crate::commands::live_card::meeting_live_card_edit(
-                app.state(),
-                session_id,
-                promise_id,
-                what,
-                due_at_ms,
-            ))
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::live_card::meeting_live_card_edit(
+                    handle.state(),
+                    session_id,
+                    promise_id,
+                    what,
+                    due_at_ms,
+                ))
+            })
+            .await?
         }
         "meeting_live_doc" => {
             let mut args = Args::parse(params)?;
@@ -4097,20 +4045,6 @@ pub(super) async fn call(
                     preferences,
                 )
                 .await,
-            )
-        }
-        "profile_photo_get" => reply(
-            crate::portable::app_data_dir(app)
-                .map_err(|error| error.to_string())
-                .and_then(|dir| crate::profile_photo::read(&dir)),
-        ),
-        "profile_photo_set" => {
-            let mut args = Args::parse(params)?;
-            let png: Option<String> = args.take("png")?;
-            reply(
-                crate::portable::app_data_dir(app)
-                    .map_err(|error| error.to_string())
-                    .and_then(|dir| crate::profile_photo::write(&dir, png.as_deref())),
             )
         }
         "meeting_mail_context_check" => {
@@ -4196,35 +4130,6 @@ pub(super) async fn call(
                         enabled,
                     ),
                 )
-            })
-            .await?
-        }
-        "change_meeting_vocabulary_enabled_setting" => {
-            let mut args = Args::parse(params)?;
-            let enabled = args.take("enabled")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(
-                    crate::commands::vocabulary::change_meeting_vocabulary_enabled_setting(
-                        handle.clone(),
-                        enabled,
-                    ),
-                )
-            })
-            .await?
-        }
-        "meeting_vocabulary_words" => {
-            reply(crate::commands::vocabulary::meeting_vocabulary_words(app.clone()).await)
-        }
-        "undo_learned_word" => {
-            let mut args = Args::parse(params)?;
-            let word = args.take("word")?;
-            let handle = app.clone();
-            on_main_thread(app, move || {
-                reply(crate::commands::vocabulary::undo_learned_word(
-                    handle.clone(),
-                    word,
-                ))
             })
             .await?
         }
@@ -5005,28 +4910,33 @@ pub(super) async fn call(
             })
             .await?
         }
-        "scratchpad_link_cycle" | "scratchpad_unlink_cycle" => {
+        "scratchpad_link_cycle" => {
             let mut args = Args::parse(params)?;
             let id = args.take("id")?;
             let number = args.take("number")?;
             let handle = app.clone();
-            let link = method == "scratchpad_link_cycle";
             off_main_thread(move || {
-                reply(if link {
-                    crate::scratchpad::documents::scratchpad_link_cycle(
-                        handle.clone(),
-                        handle.state(),
-                        id,
-                        number,
-                    )
-                } else {
-                    crate::scratchpad::documents::scratchpad_unlink_cycle(
-                        handle.clone(),
-                        handle.state(),
-                        id,
-                        number,
-                    )
-                })
+                reply(crate::scratchpad::documents::scratchpad_link_cycle(
+                    handle.clone(),
+                    handle.state(),
+                    id,
+                    number,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_unlink_cycle" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let number = args.take("number")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::documents::scratchpad_unlink_cycle(
+                    handle.clone(),
+                    handle.state(),
+                    id,
+                    number,
+                ))
             })
             .await?
         }
@@ -5039,19 +4949,6 @@ pub(super) async fn call(
                     handle.clone(),
                     handle.state(),
                     body,
-                ))
-            })
-            .await?
-        }
-        "scratchpad_make_personal" => {
-            let mut args = Args::parse(params)?;
-            let id = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::scratchpad::personal::scratchpad_make_personal(
-                    handle.clone(),
-                    handle.state(),
-                    id,
                 ))
             })
             .await?
@@ -5081,6 +4978,19 @@ pub(super) async fn call(
                     id,
                     agent,
                     role,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_make_personal" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::personal::scratchpad_make_personal(
+                    handle.clone(),
+                    handle.state(),
+                    id,
                 ))
             })
             .await?
@@ -5488,20 +5398,6 @@ pub(super) async fn call(
             let query = args.take("query")?;
             reply(crate::planning::work::work_list(app.state(), app.state(), query).await)
         }
-        "work_insights" => {
-            let mut args = Args::parse(params)?;
-            let query = args.take("query")?;
-            let days = args.take("days")?;
-            reply(
-                crate::planning::work::insights::work_insights(
-                    app.state(),
-                    app.state(),
-                    query,
-                    days,
-                )
-                .await,
-            )
-        }
         "work_item" => {
             let mut args = Args::parse(params)?;
             let id = args.take("id")?;
@@ -5599,36 +5495,6 @@ pub(super) async fn call(
                 .await,
             )
         }
-        "work_suggestion_accept" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let suggestion_id: String = args.take("suggestionId")?;
-            reply(
-                crate::planning::work::triage_hints::accept(
-                    app,
-                    &operation_id,
-                    &id,
-                    &suggestion_id,
-                )
-                .await,
-            )
-        }
-        "work_suggestion_dismiss" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let suggestion_id: String = args.take("suggestionId")?;
-            reply(
-                crate::planning::work::triage_hints::dismiss(
-                    app,
-                    &operation_id,
-                    &id,
-                    &suggestion_id,
-                )
-                .await,
-            )
-        }
         "work_triage_decline" => {
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;
@@ -5696,22 +5562,6 @@ pub(super) async fn call(
                 .await,
             )
         }
-        "work_set_parent" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let id = args.take("id")?;
-            let parent_id = args.take("parentId")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::work_set_parent(
-                    handle.clone(),
-                    operation_id,
-                    id,
-                    parent_id,
-                ))
-            })
-            .await?
-        }
         "work_copy" => {
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;
@@ -5728,40 +5578,18 @@ pub(super) async fn call(
             })
             .await?
         }
-        "work_reactions" => {
+        "work_set_parent" => {
             let mut args = Args::parse(params)?;
-            let subject: crate::planning::work::types::WorkReactionSubject =
-                args.take("subject")?;
-            let id: String = args.take("id")?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let parent_id = args.take("parentId")?;
             let handle = app.clone();
             off_main_thread(move || {
-                reply(crate::planning::work::reactions::listed(
-                    &handle, subject, &id,
-                ))
-            })
-            .await?
-        }
-        "work_react" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let subject: crate::planning::work::types::WorkReactionSubject =
-                args.take("subject")?;
-            let id: String = args.take("id")?;
-            let emoji: String = args.take("emoji")?;
-            let on: bool = args.take("on")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::reactions::react_as(
-                    &handle,
-                    crate::planning::work::comments::Author {
-                        actor: crate::planning::work::types::WorkActor::Me,
-                        agent: None,
-                    },
-                    &operation_id,
-                    subject,
-                    &id,
-                    &emoji,
-                    on,
+                reply(crate::planning::work::work_set_parent(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    parent_id,
                 ))
             })
             .await?
@@ -5783,6 +5611,13 @@ pub(super) async fn call(
                 )
                 .await,
             )
+        }
+        "work_guidance" => reply(crate::planning::work::work_guidance(app.state()).await),
+        "work_guidance_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let text = args.take("text")?;
+            reply(crate::planning::work::work_guidance_save(app.clone(), operation_id, text).await)
         }
         "work_comment_add" => {
             let mut args = Args::parse(params)?;
@@ -5866,11 +5701,7 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let operation_id = args.take("operationId")?;
             let item_id = args.take("itemId")?;
-            let file = crate::planning::work::types::WorkAttachmentFile {
-                path: args.take("path")?,
-                data: args.take("data")?,
-                file_name: args.take("fileName")?,
-            };
+            let file = args.take("file")?;
             let title = args.take("title")?;
             let subtitle = args.take("subtitle")?;
             let comment_id = args.take("commentId")?;
@@ -5949,7 +5780,7 @@ pub(super) async fn call(
             let id = args.take("id")?;
             let name = args.take("name")?;
             let hue = args.take("hue")?;
-            let description: Option<String> = args.take("description")?;
+            let description = args.take("description")?;
             let handle = app.clone();
             off_main_thread(move || {
                 reply(crate::planning::work::work_label_save(
@@ -5977,348 +5808,6 @@ pub(super) async fn call(
             })
             .await?
         }
-        "work_label_group" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let group: Option<String> = args.take("group")?;
-            let multi: Option<bool> = args.take("multi")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(
-                    crate::planning::work::routines::label_group_as(
-                        &handle,
-                        &operation_id,
-                        &id,
-                        group.as_deref(),
-                        multi,
-                    )
-                    .map(|(label, _)| label),
-                )
-            })
-            .await?
-        }
-        "work_label_merge" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let from_id: String = args.take("fromId")?;
-            let into_id: String = args.take("intoId")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(
-                    crate::planning::work::routines::label_merge_as(
-                        &handle,
-                        &operation_id,
-                        &from_id,
-                        &into_id,
-                    )
-                    .map(|(label, _)| label),
-                )
-            })
-            .await?
-        }
-        "work_label_retire" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let retired: bool = args.take("retired")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::label_retire_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                    retired,
-                ))
-            })
-            .await?
-        }
-        "work_loops" => {
-            let handle = app.clone();
-            off_main_thread(move || reply(crate::planning::work::loops::loops_read(&handle)))
-                .await?
-        }
-        "work_loop" => {
-            let mut args = Args::parse(params)?;
-            let id: String = args.take("loopId")?;
-            let handle = app.clone();
-            off_main_thread(move || reply(crate::planning::work::loops::loop_read(&handle, &id)))
-                .await?
-        }
-        "work_loop_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: Option<String> = args.take("loopId")?;
-            let input: crate::planning::work::loops::LoopInput = args.take("input")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::loops::save_as(
-                    &handle,
-                    &operation_id,
-                    id.as_deref(),
-                    &input,
-                    "you",
-                ))
-            })
-            .await?
-        }
-        "work_loop_run" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("loopId")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::loops::run_now_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "work_loop_enable" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("loopId")?;
-            let enabled: bool = args.take("enabled")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::loops::enable_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                    enabled,
-                ))
-            })
-            .await?
-        }
-        "work_loop_restore_version" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("loopId")?;
-            let version: i64 = args.take("version")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::loops::restore_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                    version,
-                    "you",
-                ))
-            })
-            .await?
-        }
-        "work_loop_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("loopId")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::loops::delete_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "work_loop_copy" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("loopId")?;
-            let name: Option<String> = args.take("name")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::loops::copy_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                    name.as_deref(),
-                    "you",
-                ))
-            })
-            .await?
-        }
-        "work_doc_proposal_accept" | "work_doc_proposal_reject" => {
-            let accepting = method == "work_doc_proposal_accept";
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(if accepting {
-                    crate::planning::work::doc_proposals::accept_as(&handle, &operation_id, &id)
-                } else {
-                    crate::planning::work::doc_proposals::reject_as(&handle, &operation_id, &id)
-                })
-            })
-            .await?
-        }
-        "work_triage_rules" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::triage_auto::rules_read(&handle))
-            })
-            .await?
-        }
-        "work_triage_rule_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: Option<String> = args.take("id")?;
-            let input: crate::planning::work::triage_auto::TriageRuleInput = args.take("input")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::triage_auto::rule_save_as(
-                    &handle,
-                    &operation_id,
-                    id.as_deref(),
-                    &input,
-                ))
-            })
-            .await?
-        }
-        "work_triage_rule_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::triage_auto::rule_delete_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "work_triage_undo" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            reply(
-                crate::planning::work::triage_auto::undo_as(
-                    app,
-                    crate::planning::work::types::WorkActor::Me,
-                    &operation_id,
-                    &id,
-                )
-                .await,
-            )
-        }
-        "work_housekeeping_undo" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            reply(
-                crate::planning::work::batches::undo_as(
-                    app,
-                    crate::planning::work::types::WorkActor::Me,
-                    &operation_id,
-                    &id,
-                )
-                .await,
-            )
-        }
-        "work_templates" => {
-            let handle = app.clone();
-            off_main_thread(move || reply(crate::planning::work::routines::templates_read(&handle)))
-                .await?
-        }
-        "work_template_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: Option<String> = args.take("id")?;
-            let name: String = args.take("name")?;
-            let fields: crate::planning::work::routines::WorkTemplateFields =
-                args.take("fields")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::template_save_as(
-                    &handle,
-                    &operation_id,
-                    id.as_deref(),
-                    &name,
-                    &fields,
-                ))
-            })
-            .await?
-        }
-        "work_template_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::template_delete_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "work_template_use" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let using: Option<crate::planning::work::routines::WorkTemplateUse> =
-                args.take("using")?;
-            reply(
-                crate::planning::work::routines::template_use_as(
-                    app,
-                    crate::planning::work::types::WorkActor::Me,
-                    &operation_id,
-                    &id,
-                    &using.unwrap_or_default(),
-                )
-                .await,
-            )
-        }
-        "work_reminders" => {
-            let mut args = Args::parse(params)?;
-            let due_only: Option<bool> = args.take("dueOnly")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::reminders_read(
-                    &handle,
-                    due_only.unwrap_or(false),
-                ))
-            })
-            .await?
-        }
-        "work_reminder_set" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let at_ms: Option<i64> = args.take("atMs")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::reminder_set_as(
-                    &handle,
-                    crate::planning::work::types::WorkActor::Me,
-                    None,
-                    &operation_id,
-                    &id,
-                    at_ms,
-                ))
-            })
-            .await?
-        }
-        "work_reminders_notified" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let ids: Vec<String> = args.take("ids")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::reminders_notified(
-                    &handle,
-                    &operation_id,
-                    &ids,
-                ))
-            })
-            .await?
-        }
         "work_views" => {
             let handle = app.clone();
             off_main_thread(move || reply(crate::planning::work::work_views(handle.state())))
@@ -6336,6 +5825,20 @@ pub(super) async fn call(
                     operation_id,
                     id,
                     view,
+                ))
+            })
+            .await?
+        }
+        "work_view_delete" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::work_view_delete(
+                    handle.clone(),
+                    operation_id,
+                    id,
                 ))
             })
             .await?
@@ -6381,20 +5884,6 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let ids = args.take("ids")?;
             reply(crate::planning::work::work_csv(app.state(), app.state(), ids).await)
-        }
-        "work_view_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let id = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::work_view_delete(
-                    handle.clone(),
-                    operation_id,
-                    id,
-                ))
-            })
-            .await?
         }
         "work_counts" => {
             let handle = app.clone();
@@ -6445,15 +5934,6 @@ pub(super) async fn call(
             })
             .await?
         }
-        "work_cycle_calendar" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::cycles::work_cycle_calendar(
-                    handle.clone(),
-                ))
-            })
-            .await?
-        }
         "work_cycle" => {
             let mut args = Args::parse(params)?;
             let number = args.take("number")?;
@@ -6462,6 +5942,15 @@ pub(super) async fn call(
                 reply(crate::planning::work::cycles::work_cycle(
                     handle.clone(),
                     number,
+                ))
+            })
+            .await?
+        }
+        "work_cycle_calendar" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::cycles::work_cycle_calendar(
+                    handle.clone(),
                 ))
             })
             .await?
@@ -6529,6 +6018,20 @@ pub(super) async fn call(
                 ))
             })
             .await?
+        }
+        "work_insights" => {
+            let mut args = Args::parse(params)?;
+            let query = args.take("query")?;
+            let days = args.take("days")?;
+            reply(
+                crate::planning::work::insights::work_insights(
+                    app.state(),
+                    app.state(),
+                    query,
+                    days,
+                )
+                .await,
+            )
         }
         "planning_project_updates" => {
             let mut args = Args::parse(params)?;
@@ -6610,6 +6113,72 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "planning_project_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let id = args.take("id")?;
+            let input = args.take("input")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::plans::planning_project_save(
+                    handle.clone(),
+                    operation_id,
+                    id,
+                    input,
+                ))
+            })
+            .await?
+        }
+        "planning_milestone_save" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let project_id = args.take("projectId")?;
+            let id = args.take("id")?;
+            let input = args.take("input")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::plans::planning_milestone_save(
+                    handle.clone(),
+                    operation_id,
+                    project_id,
+                    id,
+                    input,
+                ))
+            })
+            .await?
+        }
+        "planning_milestone_reorder" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let project_id = args.take("projectId")?;
+            let milestone_ids = args.take("milestoneIds")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::plans::planning_milestone_reorder(
+                    handle.clone(),
+                    operation_id,
+                    project_id,
+                    milestone_ids,
+                ))
+            })
+            .await?
+        }
+        "planning_project_move" => {
+            let mut args = Args::parse(params)?;
+            let operation_id = args.take("operationId")?;
+            let project_id = args.take("projectId")?;
+            let before = args.take("before")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::work::plans::planning_project_move(
+                    handle.clone(),
+                    operation_id,
+                    project_id,
+                    before,
+                ))
+            })
+            .await?
+        }
         "planning_project_status_names" => {
             let handle = app.clone();
             off_main_thread(move || {
@@ -6681,393 +6250,6 @@ pub(super) async fn call(
                     handle.clone(),
                     operation_id,
                     id,
-                ))
-            })
-            .await?
-        }
-        "planning_project_dependencies" => {
-            let handle = app.clone();
-            off_main_thread(move || reply(crate::planning::dependencies::listed(&handle))).await?
-        }
-        "planning_project_dependency_add" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let blocker_id: String = args.take("blockerId")?;
-            let blocked_id: String = args.take("blockedId")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::catalog_dependency_add(
-                    &handle,
-                    &operation_id,
-                    &blocker_id,
-                    &blocked_id,
-                ))
-            })
-            .await?
-        }
-        "planning_project_dependency_remove" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::catalog_dependency_remove(
-                    &handle,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "planning_initiatives" => {
-            let handle = app.clone();
-            off_main_thread(move || reply(crate::planning::work::initiatives::listed(&handle)))
-                .await?
-        }
-        "planning_initiative_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: Option<String> = args.take("id")?;
-            let input: crate::planning::work::initiatives::InitiativeSaveInput =
-                args.take("input")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::initiatives::save_written(
-                    &handle,
-                    &operation_id,
-                    id.as_deref(),
-                    &input,
-                ))
-            })
-            .await?
-        }
-        "planning_initiative_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::initiatives::delete_written(
-                    &handle,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "planning_initiative_add_project" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let initiative_id: String = args.take("initiativeId")?;
-            let project_id: String = args.take("projectId")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::initiatives::add_project_written(
-                    &handle,
-                    &operation_id,
-                    &initiative_id,
-                    &project_id,
-                ))
-            })
-            .await?
-        }
-        "planning_initiative_remove_project" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let project_id: String = args.take("projectId")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::initiatives::remove_project_written(
-                    &handle,
-                    &operation_id,
-                    &project_id,
-                ))
-            })
-            .await?
-        }
-        "planning_initiative_updates" => {
-            let mut args = Args::parse(params)?;
-            let initiative_id: String = args.take("initiativeId")?;
-            let limit: Option<u32> = args.take("limit")?;
-            let cursor: Option<String> = args.take("cursor")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::initiatives::updates_listed(
-                    &handle,
-                    &initiative_id,
-                    limit,
-                    cursor.as_deref(),
-                ))
-            })
-            .await?
-        }
-        "planning_initiative_update_add" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let initiative_id: String = args.take("initiativeId")?;
-            let health: crate::planning::ProjectHealth = args.take("health")?;
-            let body: String = args.take("body")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::initiatives::update_add_written(
-                    &handle,
-                    crate::planning::work::comments::Author {
-                        actor: crate::planning::work::types::WorkActor::Me,
-                        agent: None,
-                    },
-                    &operation_id,
-                    &initiative_id,
-                    health,
-                    &body,
-                ))
-            })
-            .await?
-        }
-        "planning_initiative_update_edit" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let health: Option<crate::planning::ProjectHealth> = args.take("health")?;
-            let body: Option<String> = args.take("body")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::initiatives::update_edit_written(
-                    &handle,
-                    crate::planning::work::comments::Author {
-                        actor: crate::planning::work::types::WorkActor::Me,
-                        agent: None,
-                    },
-                    &operation_id,
-                    &id,
-                    health,
-                    body.as_deref(),
-                ))
-            })
-            .await?
-        }
-        "planning_initiative_update_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::initiatives::update_delete_written(
-                    &handle,
-                    crate::planning::work::comments::Author {
-                        actor: crate::planning::work::types::WorkActor::Me,
-                        agent: None,
-                    },
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "planning_project_templates" => {
-            reply(crate::planning::work::project_templates::templates_read(app).await)
-        }
-        "planning_project_template_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let name: String = args.take("name")?;
-            let project_id: String = args.take("projectId")?;
-            reply(
-                crate::planning::work::project_templates::template_save_as(
-                    app,
-                    &operation_id,
-                    &name,
-                    &project_id,
-                )
-                .await,
-            )
-        }
-        "planning_project_template_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(
-                    crate::planning::work::project_templates::template_delete_as(
-                        &handle,
-                        &operation_id,
-                        &id,
-                    ),
-                )
-            })
-            .await?
-        }
-        "planning_project_from_template" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let template_id: String = args.take("templateId")?;
-            let title: String = args.take("title")?;
-            let start_at_ms: i64 = args.take("startAtMs")?;
-            reply(
-                crate::planning::work::project_templates::project_from_template_as(
-                    app,
-                    crate::planning::work::types::WorkActor::Me,
-                    &operation_id,
-                    &template_id,
-                    &title,
-                    start_at_ms,
-                )
-                .await,
-            )
-        }
-        "work_import_preview" | "work_import" => {
-            use crate::planning::work::import;
-            let mut args = Args::parse(params)?;
-            let source = args.take("source")?;
-            let paths: Vec<std::path::PathBuf> =
-                args.take::<Option<_>>("paths")?.unwrap_or_default();
-            let map: import::sheets::CsvMap = args.take::<Option<_>>("map")?.unwrap_or_default();
-            let live: bool = args.take::<Option<_>>("live")?.unwrap_or(false);
-            let options: import::ImportOptions = args.take("options")?;
-            let origin = import::Origin::of(&paths, &map, live);
-            if method == "work_import" {
-                let operation_id: String = args.take("operationId")?;
-                reply(
-                    import::import_as(
-                        app,
-                        crate::planning::work::types::WorkActor::Me,
-                        &operation_id,
-                        source,
-                        origin,
-                        &options,
-                    )
-                    .await,
-                )
-            } else {
-                reply(import::preview(app, source, origin, &options).await)
-            }
-        }
-        "work_import_linear_key" => reply(Ok::<_, String>(
-            crate::planning::work::import::linear_key_state(app).await,
-        )),
-        "work_import_linear_key_set" => {
-            let mut args = Args::parse(params)?;
-            let token: String = args.take("token")?;
-            reply(crate::planning::work::import::linear_key_set(app, token).await)
-        }
-        "work_import_linear_key_remove" => {
-            reply(crate::planning::work::import::linear_key_remove(app).await)
-        }
-        "work_imports" => {
-            let handle = app.clone();
-            off_main_thread(move || reply(crate::planning::work::import::imports_read(&handle)))
-                .await?
-        }
-        "work_import_revert" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::import::revert_as(
-                    &handle,
-                    crate::planning::work::types::WorkActor::Me,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "work_import_template" => reply(Ok::<_, String>(
-            crate::planning::work::import::sheets::template(),
-        )),
-        "work_label_scope" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let scope = args.take("scope")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::label_scope_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                    scope,
-                ))
-            })
-            .await?
-        }
-        "planning_project_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let id = args.take("id")?;
-            let input = args.take("input")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::plans::planning_project_save(
-                    handle.clone(),
-                    operation_id,
-                    id,
-                    input,
-                ))
-            })
-            .await?
-        }
-        "planning_milestone_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let project_id = args.take("projectId")?;
-            let id = args.take("id")?;
-            let input = args.take("input")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::plans::planning_milestone_save(
-                    handle.clone(),
-                    operation_id,
-                    project_id,
-                    id,
-                    input,
-                ))
-            })
-            .await?
-        }
-        "planning_milestone_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::catalog_milestone_delete(
-                    &handle,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "planning_milestone_reorder" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let project_id = args.take("projectId")?;
-            let milestone_ids = args.take("milestoneIds")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::plans::planning_milestone_reorder(
-                    handle.clone(),
-                    operation_id,
-                    project_id,
-                    milestone_ids,
-                ))
-            })
-            .await?
-        }
-        "planning_project_move" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let project_id = args.take("projectId")?;
-            let before: Option<String> = args.take("before")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::plans::planning_project_move(
-                    handle.clone(),
-                    operation_id,
-                    project_id,
-                    before,
                 ))
             })
             .await?
@@ -7289,434 +6471,6 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let hit_id = args.take("hitId")?;
             reply(crate::planning::work::watch::work_watch_task(app.clone(), hit_id).await)
-        }
-        "work_sessions" => {
-            let mut args = Args::parse(params)?;
-            let item_id = args.take("itemId")?;
-            let open: Option<bool> = args.take("open")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::sessions::work_sessions(
-                    handle.clone(),
-                    item_id,
-                    open.unwrap_or(false),
-                ))
-            })
-            .await?
-        }
-        "work_session" => {
-            let mut args = Args::parse(params)?;
-            let id = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::sessions::work_session(
-                    handle.clone(),
-                    id,
-                ))
-            })
-            .await?
-        }
-        "work_session_stop" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let id = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::sessions::work_session_stop(
-                    handle.clone(),
-                    operation_id,
-                    id,
-                ))
-            })
-            .await?
-        }
-        "work_session_reply" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let id = args.take("id")?;
-            let body = args.take("body")?;
-            let value = args.take("value")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::sessions::work_session_reply(
-                    handle.clone(),
-                    operation_id,
-                    id,
-                    body,
-                    value,
-                ))
-            })
-            .await?
-        }
-        "work_changes" => {
-            let mut args = Args::parse(params)?;
-            let since = args.take("since")?;
-            let limit = args.take("limit")?;
-            let latest = args.take::<Option<bool>>("latest")?.unwrap_or(false);
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::changes::work_changes(
-                    handle.clone(),
-                    since,
-                    limit,
-                    latest,
-                ))
-            })
-            .await?
-        }
-        "work_delete" | "work_undelete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let ids = args.take("ids")?;
-            let handle = app.clone();
-            let delete = method == "work_delete";
-            off_main_thread(move || {
-                if delete {
-                    reply(crate::planning::work::bin::work_delete(
-                        handle.clone(),
-                        operation_id,
-                        ids,
-                    ))
-                } else {
-                    reply(crate::planning::work::bin::work_undelete(
-                        handle.clone(),
-                        operation_id,
-                        ids,
-                    ))
-                }
-            })
-            .await?
-        }
-        "work_bin" => {
-            let handle = app.clone();
-            off_main_thread(move || reply(crate::planning::work::bin::work_bin(handle.clone())))
-                .await?
-        }
-        "work_archive_list" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::bin::work_archive_list(
-                    handle.clone(),
-                ))
-            })
-            .await?
-        }
-        "work_description_versions" => {
-            let mut args = Args::parse(params)?;
-            let id = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::versions::work_description_versions(
-                    handle.clone(),
-                    id,
-                ))
-            })
-            .await?
-        }
-        "work_description_restore" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let id = args.take("id")?;
-            let expected_revision = args.take("expectedRevision")?;
-            let version_id = args.take("versionId")?;
-            reply(
-                crate::planning::work::versions::work_description_restore(
-                    app.clone(),
-                    operation_id,
-                    id,
-                    expected_revision,
-                    version_id,
-                )
-                .await,
-            )
-        }
-        "work_favorite_set" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let kind = args.take("kind")?;
-            let id = args.take("id")?;
-            let on = args.take("on")?;
-            reply(
-                crate::planning::work::favorites::work_favorite_set(
-                    app.clone(),
-                    operation_id,
-                    kind,
-                    id,
-                    on,
-                )
-                .await,
-            )
-        }
-        "work_favorite_folder_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let save = crate::planning::work::favorites::FolderSave {
-                id: args.take("id")?,
-                name: args.take("name")?,
-                index: args.take("index")?,
-            };
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::favorites::work_favorite_folder_save(
-                    handle.clone(),
-                    operation_id,
-                    save,
-                ))
-            })
-            .await?
-        }
-        "work_favorite_folder_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let id = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(
-                    crate::planning::work::favorites::work_favorite_folder_delete(
-                        handle.clone(),
-                        operation_id,
-                        id,
-                    ),
-                )
-            })
-            .await?
-        }
-        "work_favorite_move" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let moving = crate::planning::work::favorites::FavoriteMove {
-                entry: args.take("entry")?,
-                into: args.take("into")?,
-                index: args.take("index")?,
-            };
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::favorites::work_favorite_move(
-                    handle.clone(),
-                    operation_id,
-                    moving,
-                ))
-            })
-            .await?
-        }
-        "work_favorites" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::favorites::work_favorites(
-                    handle.clone(),
-                ))
-            })
-            .await?
-        }
-        "work_subscribe" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let ids = args.take("ids")?;
-            let on = args.take("on")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::inbox::work_subscribe(
-                    handle.clone(),
-                    operation_id,
-                    ids,
-                    on,
-                ))
-            })
-            .await?
-        }
-        "work_subscriptions" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::inbox::work_subscriptions(
-                    handle.clone(),
-                ))
-            })
-            .await?
-        }
-        "work_inbox" => {
-            let mut args = Args::parse(params)?;
-            let unread_only: Option<bool> = args.take("unreadOnly")?;
-            let snoozed: Option<bool> = args.take("snoozed")?;
-            let archived: Option<bool> = args.take("archived")?;
-            let priority_only: Option<bool> = args.take("priorityOnly")?;
-            let filter: Option<crate::planning::work::inbox::InboxFilter> = args.take("filter")?;
-            let shown = crate::planning::work::inbox::Shown {
-                unread_only: unread_only.unwrap_or(false),
-                snoozed: snoozed.unwrap_or(false),
-                archived: archived.unwrap_or(false),
-                priority_only: priority_only.unwrap_or(false),
-                by_task: false,
-            };
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::inbox::work_inbox(
-                    handle.clone(),
-                    shown,
-                    filter.unwrap_or_default(),
-                ))
-            })
-            .await?
-        }
-        "work_inbox_settings" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::inbox_settings::work_inbox_settings(
-                    handle.clone(),
-                ))
-            })
-            .await?
-        }
-        "work_inbox_settings_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let change: crate::planning::work::inbox_settings::InboxSettingsChange =
-                args.take("change")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::inbox_settings::save_as(
-                    &handle,
-                    &operation_id,
-                    &change,
-                ))
-            })
-            .await?
-        }
-        "work_follow" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let kind: crate::planning::work::inbox::SubjectKind = args.take("kind")?;
-            let id: String = args.take("id")?;
-            let on: bool = args.take("on")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::follows::follow_as(
-                    &handle,
-                    &operation_id,
-                    kind,
-                    &id,
-                    on,
-                ))
-            })
-            .await?
-        }
-        "work_follows" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::follows::work_follows(handle.clone()))
-            })
-            .await?
-        }
-        "work_subject_reminders" => {
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::subject_reminders_read(
-                    &handle,
-                ))
-            })
-            .await?
-        }
-        "work_subject_reminder_set" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let kind: crate::planning::work::inbox::SubjectKind = args.take("kind")?;
-            let id: String = args.take("id")?;
-            let at_ms: Option<i64> = args.take("atMs")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::routines::subject_reminder_set_as(
-                    &handle,
-                    crate::planning::work::types::WorkActor::Me,
-                    None,
-                    &operation_id,
-                    kind,
-                    &id,
-                    at_ms,
-                ))
-            })
-            .await?
-        }
-        "work_updates" => {
-            let mut args = Args::parse(params)?;
-            let filter: Option<crate::planning::work::feed::FeedFilter> = args.take("filter")?;
-            let limit: Option<usize> = args.take("limit")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::feed::work_updates(
-                    handle.clone(),
-                    filter.unwrap_or_default(),
-                    limit,
-                ))
-            })
-            .await?
-        }
-        "work_feeds" => {
-            let handle = app.clone();
-            off_main_thread(move || reply(crate::planning::work::feed::work_feeds(handle.clone())))
-                .await?
-        }
-        "work_feed_save" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: Option<String> = args.take("id")?;
-            let name: String = args.take("name")?;
-            let filter: crate::planning::work::feed::FeedFilter = args.take("filter")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::feed::feed_save_as(
-                    &handle,
-                    &operation_id,
-                    id.as_deref(),
-                    &name,
-                    &filter,
-                ))
-            })
-            .await?
-        }
-        "work_feed_delete" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let id: String = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::feed::feed_delete_as(
-                    &handle,
-                    &operation_id,
-                    &id,
-                ))
-            })
-            .await?
-        }
-        "work_inbox_mark" => {
-            let mut args = Args::parse(params)?;
-            let operation_id = args.take("operationId")?;
-            let ids = args.take("ids")?;
-            let mark: String = args.take("mark")?;
-            let until_ms = args.take("untilMs")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::inbox::work_inbox_mark(
-                    handle.clone(),
-                    operation_id,
-                    ids,
-                    &mark,
-                    until_ms,
-                ))
-            })
-            .await?
-        }
-        "work_inbox_mark_task" => {
-            let mut args = Args::parse(params)?;
-            let operation_id: String = args.take("operationId")?;
-            let task_id: String = args.take("taskId")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::planning::work::inbox::mark_task_read(
-                    &handle,
-                    &operation_id,
-                    &task_id,
-                ))
-            })
-            .await?
         }
         other => Err(Fault::unknown_method(other)),
     }

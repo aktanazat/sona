@@ -1076,6 +1076,24 @@ fn edit(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn work_guidance(
+    history_state: State<'_, Arc<HistoryManager>>,
+) -> Result<agents::WorkGuidance, String> {
+    super::history(&history_state, |conn| agents::guidance(conn))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn work_guidance_save(
+    app: AppHandle,
+    operation_id: String,
+    text: String,
+) -> Result<agents::WorkGuidance, String> {
+    agents::guidance_save_as(&app, &operation_id, &text, "me")
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn work_list(
     history_state: State<'_, Arc<HistoryManager>>,
     meetings: State<'_, Arc<MeetingSessionManager>>,

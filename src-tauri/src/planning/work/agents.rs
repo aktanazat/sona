@@ -985,7 +985,7 @@ pub(crate) const GUIDANCE_MIGRATION: &str = "CREATE TABLE planning_guidance (
 const GUIDANCE_CHARS: usize = 2_000;
 
 /// One saved version of the guidance. Version 0 with no text means none saved.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, specta::Type)]
 pub struct WorkGuidance {
     pub version: i64,
     pub text: String,

@@ -12,6 +12,7 @@ struct AgentBridgeView: View {
             ErrorNote(store.error)
             controls
             taskChanges
+            AgentGuidanceEditor(store: store)
             mcpServers
             projects
             hook
@@ -464,6 +465,35 @@ private struct AgentBridgePendingRow: View {
                         .buttonStyle(.quiet)
                 }
             }
+        }
+    }
+}
+
+private struct AgentGuidanceEditor: View {
+    @Bindable var store: AgentBridgeStore
+
+    var body: some View {
+        AgentBridgeSection(
+            "Standing guidance",
+            meta: "Sent with every agent task, Talk to Sona answer and automation. 2000 characters at most."
+        ) {
+            Button("Save") { Task { await store.saveGuidance() } }
+                .buttonStyle(.compact)
+                .disabled(store.guidanceBusy || store.guidanceDraft == store.guidanceSaved)
+        } content: {
+            ErrorNote(store.guidanceError)
+            TextEditor(text: $store.guidanceDraft)
+                .font(TypeScale.body())
+                .foregroundStyle(Theme.ink)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(height: 140)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .strokeBorder(Theme.border, lineWidth: 1)
+                )
+            Text("\(store.guidanceDraft.count) of 2000 characters").metaText()
         }
     }
 }

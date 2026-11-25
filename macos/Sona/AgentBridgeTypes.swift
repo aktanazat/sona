@@ -371,3 +371,8 @@ struct AgentMcpToolSummary: Decodable, Identifiable, Equatable, Sendable {
 
     var id: String { name }
 }
+
+/// The standing guidance text: what every agent task and Talk to Sona answer is told to follow.
+struct AgentGuidance: Decodable {
+    let text: String
+}
