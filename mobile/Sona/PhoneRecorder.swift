@@ -12,6 +12,7 @@ enum RecorderNotice {
     case interrupted
     case activityClosed
     case notSaved
+    case keptForRetry
     case bookmarkNotSaved
 
     var key: LocalizedStringKey {
@@ -21,6 +22,7 @@ enum RecorderNotice {
         case .interrupted: return "status.interrupted"
         case .activityClosed: return "status.activityClosed"
         case .notSaved: return "status.notSaved"
+        case .keptForRetry: return "status.keptForRetry"
         case .bookmarkNotSaved: return "status.bookmarkNotSaved"
         }
     }
@@ -83,6 +85,12 @@ final class PhoneRecorder: ObservableObject {
     private var capture: PhoneCaptureJournal?
     private(set) var capturesStartedThisRun: Set<UUID> = []
     private(set) var mostRecentCaptureID: UUID?
+
+    /// A capture this run started that could not be saved, so recovery takes it like one
+    /// from an earlier run.
+    func retryLater(_ id: UUID) {
+        capturesStartedThisRun.remove(id)
+    }
     private var ticker: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
     private var activity: Activity<RecordingActivityAttributes>?

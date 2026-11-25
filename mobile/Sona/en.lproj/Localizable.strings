@@ -6,6 +6,7 @@
 "status.waiting" = "Waiting for network";
 "status.saved" = "Saved to your Mac";
 "status.notSaved" = "Recording not saved";
+"status.keptForRetry" = "Couldn’t save the recording. It’s kept on this iPhone and Sona will try again.";
 "status.bookmarkNotSaved" = "Bookmark not saved";
 "title.recoveredRecording" = "Recovered recording";
 "library.recordingStillSaving" = "Try again when the recording finishes saving.";

@@ -691,7 +691,7 @@ private struct TaskBoardBody: View {
                                     HStack(spacing: 8) {
                                         TaskGroupMarkView(mark: header.mark, revision: model.people.photoRevision)
                                         Text(header.title).font(TypeScale.listTitle).foregroundStyle(Theme.ink)
-                                        Text("\(header.rows.count)").font(TypeScale.label(12)).monospacedDigit()
+                                        Text(header.rowSummary).font(TypeScale.label(12)).monospacedDigit()
                                             .foregroundStyle(Theme.inkTertiary)
                                     }
                                     .padding(.horizontal, 6)

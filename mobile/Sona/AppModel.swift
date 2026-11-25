@@ -465,6 +465,7 @@ final class AppModel: NSObject, ObservableObject {
     ) -> Bool {
         do {
             try recorder.start(requiringActivity: requiringActivity)
+            UserDefaults.standard.set(recorder.mostRecentCaptureID?.uuidString, forKey: Self.draftCaptureKey)
             recordingAfterCall = afterCall
             recordingEvent = event
             readPlace(unless: event)
@@ -556,8 +557,12 @@ final class AppModel: NSObject, ObservableObject {
                 library.error = error.localizedDescription
                 kept = false
             }
-            if !kept, !recorder.isRecording, recorder.mostRecentCaptureID == finished.journal.id, recorder.notice == nil {
-                recorder.notice = .notSaved
+            if !kept {
+                /* The audio stays on the iPhone; the next recovery tries it again. */
+                recorder.retryLater(finished.journal.id)
+                if !recorder.isRecording, recorder.mostRecentCaptureID == finished.journal.id, recorder.notice == nil {
+                    recorder.notice = .keptForRetry
+                }
             }
             if saving != .invalid { UIApplication.shared.endBackgroundTask(saving) }
             await drain()
@@ -565,9 +570,14 @@ final class AppModel: NSObject, ObservableObject {
                 && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
                 meetingTitle = ""
                 meetingNotes = ""
+                UserDefaults.standard.removeObject(forKey: Self.draftCaptureKey)
             }
         }
     }
+
+    /// The recording the title and notes being typed belong to, so a recording recovered
+    /// after the app was killed takes them instead of leaving them for the next one.
+    private static let draftCaptureKey = "sona.meeting.captureID"
 
     func recoverRecordings() async {
         guard consentAccepted, UIApplication.shared.isProtectedDataAvailable, !recoveringRecordings else { return }
@@ -583,9 +593,21 @@ final class AppModel: NSObject, ObservableObject {
                 else { continue }
                 do {
                     let journal = try await Task.detached { try PhoneCaptureJournal.load(from: folder) }.value
-                    let title = AppModel.title(prefix: NSLocalizedString("title.recoveredRecording", comment: ""),
-                                               utcMs: journal.recordedAtUtcMs)
-                    if try await keepCapture(journal, audio: nil, title: title) { queuedRecovery = true }
+                    let ownsDraft = UserDefaults.standard.string(forKey: Self.draftCaptureKey) == id.uuidString
+                    let typed = ownsDraft ? meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+                    let title = typed.isEmpty
+                        ? AppModel.title(prefix: NSLocalizedString("title.recoveredRecording", comment: ""),
+                                         utcMs: journal.recordedAtUtcMs)
+                        : typed
+                    let notes = ownsDraft ? meetingNotes : ""
+                    if try await keepCapture(journal, audio: nil, title: title, notes: notes) {
+                        queuedRecovery = true
+                        if ownsDraft {
+                            meetingTitle = ""
+                            meetingNotes = ""
+                            UserDefaults.standard.removeObject(forKey: Self.draftCaptureKey)
+                        }
+                    }
                 } catch { library.error = error.localizedDescription }
             }
         } catch { library.error = error.localizedDescription }
