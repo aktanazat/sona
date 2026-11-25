@@ -2579,13 +2579,18 @@ pub fn run(cli_args: CliArgs) {
 
                 let handle = app_handle.clone();
                 let args = cli_args.clone();
-                std::thread::spawn(move || {
-                    let code = run_headless_guarded(|| query::external::run_cli(&handle, &args));
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                    let _ = std::io::stderr().flush();
-                    std::process::exit(code);
-                });
+                std::thread::Builder::new()
+                    .name("sona-cli".to_owned())
+                    .stack_size(query::external::CLI_STACK_BYTES)
+                    .spawn(move || {
+                        let code =
+                            run_headless_guarded(|| query::external::run_cli(&handle, &args));
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                        let _ = std::io::stderr().flush();
+                        std::process::exit(code);
+                    })
+                    .expect("the command-line thread starts");
                 return Ok(());
             }
 

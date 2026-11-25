@@ -4117,6 +4117,11 @@ fn terminal_safe(text: String) -> String {
     safe
 }
 
+/// The stack of the thread the headless CLI answers on: a main thread's 8 MiB.
+/// A spawned thread's 2 MiB default left the deepest requests, such as a
+/// loop resolve, within a few percent of overflowing in a debug build.
+pub(crate) const CLI_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 /// Run one external request for the headless CLI, and report a process exit
 /// code.
 ///

@@ -995,7 +995,11 @@ fn an_external_loop_resolve_refuses_each_missing_consent_before_mutating() {
 #[test]
 fn an_external_loop_resolve_replays_the_receipt_and_closes_a_reopened_loop() {
     let corpus = corpus();
-    tauri::async_runtime::block_on(async {
+    // The request runs on a thread with the CLI's stack, as the command line runs it.
+    let request = std::thread::Builder::new()
+        .stack_size(crate::query::external::CLI_STACK_BYTES);
+    std::thread::scope(|scope| {
+        let answered = request.spawn_scoped(scope, || tauri::async_runtime::block_on(async {
         let meetings = headless_manager(&corpus);
         let already_closed = loop_row(&meetings, &corpus.done_commitment).await;
         let persisted_operation_id = MeetingOperationId::from_uuid(
@@ -1095,6 +1099,12 @@ fn an_external_loop_resolve_replays_the_receipt_and_closes_a_reopened_loop() {
         let closed_again = loop_row(&meetings, &corpus.open_loop).await;
         assert_eq!(closed_again.status, MeetingLoopStatus::Done);
         assert_eq!(closed_again.revision, reopened_row.revision + 1);
+        }))
+        .expect("the request thread starts")
+        .join();
+        if let Err(panic) = answered {
+            std::panic::resume_unwind(panic);
+        }
     });
 }
 
