@@ -183,10 +183,11 @@ struct ProjectPropertiesPanel: View {
 
     private func statusMenu(_ project: PlanningProject) -> some View {
         let progress = Double(detail.progress?.percent ?? 0) / 100
+        let statusName = model.projects.statusName(of: project)
         return ProjectStatusPicker(project: project, progress: progress, pick: save) {
             HStack(spacing: 6) {
-                ProjectStatusIcon(status: project.status, progress: progress)
-                menuLabel(model.projects.statusTitle(of: project))
+                ProjectStatusIcon(status: project.status, progress: progress, hue: statusName?.hue)
+                menuLabel(statusName?.name ?? project.status.label)
             }
         }
     }
@@ -1177,8 +1178,9 @@ struct ProjectStatusPicker<Label: View>: View {
                                 status: category, statusNameId: project.statusNameId == nil ? nil : .clear))
                         }
                         ForEach(store.statusNames.filter { $0.category == category }) { name in
-                            ProjectStatusRow(title: name.name, selected: named?.id == name.id, nested: true) {
-                                ProjectStatusIcon(status: category, progress: progress)
+                            ProjectStatusRow(title: name.name, selected: named?.id == name.id, nested: true,
+                                             description: name.description) {
+                                ProjectStatusIcon(status: category, progress: progress, hue: name.hue)
                             } action: {
                                 choose(named?.id == name.id ? nil : PlanningProjectSave(statusNameId: .set(name.id)))
                             }
@@ -1195,7 +1197,7 @@ struct ProjectStatusPicker<Label: View>: View {
                     }
                 }
                 .padding(5)
-                .frame(minWidth: 190)
+                .frame(minWidth: 190, maxWidth: 300)
             }
             .sheet(isPresented: $editing) { ProjectStatusNamesSheet(store: store) }
     }
@@ -1211,6 +1213,7 @@ private struct ProjectStatusRow<Icon: View>: View {
     let title: String
     let selected: Bool
     var nested = false
+    var description: String?
     @ViewBuilder let icon: () -> Icon
     let action: () -> Void
     @State private var hovering = false
@@ -1219,7 +1222,10 @@ private struct ProjectStatusRow<Icon: View>: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 icon().frame(width: 16)
-                Text(title).font(TypeScale.label(13)).foregroundStyle(Theme.ink).lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(TypeScale.label(13)).foregroundStyle(Theme.ink).lineLimit(1)
+                    if let description { Text(description).metaText().lineLimit(2) }
+                }
                 Spacer(minLength: 12)
                 if selected {
                     Image(systemName: "checkmark")
@@ -1229,7 +1235,8 @@ private struct ProjectStatusRow<Icon: View>: View {
             }
             .padding(.leading, nested ? 24 : 8)
             .padding(.trailing, 8)
-            .frame(height: 26)
+            .padding(.vertical, description == nil ? 0 : 4)
+            .frame(minHeight: 26)
             .background(hovering ? Theme.wash : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusRow))
             .contentShape(Rectangle())
         }
@@ -1240,69 +1247,33 @@ private struct ProjectStatusRow<Icon: View>: View {
     }
 }
 
-/// The owner's names for statuses, each under its category: add one, rename
-/// it, move it to another category or remove it.
 struct ProjectStatusNamesSheet: View {
     let store: ProjectsStore
     @Environment(\.dismiss) private var dismiss
-    @State private var newName = ""
-    @State private var newCategory = PlanningProjectStatus.active
+    @State private var initialDraft: ProjectStatusNameDraft?
+    @State private var saving = false
     @State private var error: String?
     @State private var removing: PlanningProjectStatusName?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Statuses").titleText().accessibilityAddTraits(.isHeader)
-            HStack(spacing: 8) {
-                InputField(prompt: "New status name", text: $newName)
-                    .onSubmit(add)
-                    .accessibilityLabel("New status name")
-                Picker("Category", selection: $newCategory) {
-                    ForEach(PlanningProjectStatus.allCases) { Text($0.label).tag($0) }
-                }
-                .labelsHidden()
-                .fixedSize()
-                Button("Add", action: add)
-                    .buttonStyle(.secondary)
-                    .disabled(store.mutating || newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(PlanningProjectStatus.allCases) { category in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 8) {
-                                ProjectStatusIcon(status: category, progress: 0.5)
-                                Text(category.label)
-                                    .font(TypeScale.label(13).weight(.medium))
-                                    .foregroundStyle(Theme.ink)
-                            }
-                            ForEach(store.statusNames.filter { $0.category == category }) { name in
-                                ProjectStatusNameRow(name: name, busy: store.mutating) { category, text in
-                                    run { try await store.saveStatusName(id: name.id, category: category, name: text) }
-                                } remove: {
-                                    if uses(name) > 0 {
-                                        removing = name
-                                    } else {
-                                        run { try await store.deleteStatusName(name) }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                .padding(2)
+        VStack(alignment: .leading, spacing: 16) {
+            if let initialDraft {
+                ProjectStatusNameEditor(initial: initialDraft, cancel: {
+                    self.initialDraft = nil
+                    error = nil
+                }, save: save)
+            } else {
+                ProjectStatusNamesList(names: store.statusNames, add: { initialDraft = ProjectStatusNameDraft(nil) },
+                                       edit: { initialDraft = ProjectStatusNameDraft($0) }, remove: remove,
+                                       done: { dismiss() })
             }
             if let message = error ?? store.statusNamesError { ErrorNote(message) }
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }
-                    .buttonStyle(.primary)
-                    .keyboardShortcut(.cancelAction)
-            }
         }
+        .disabled(saving || store.mutating)
         .padding(24)
-        .frame(width: 460, height: 540)
+        .frame(width: 460)
         .background(Theme.page)
+        .interactiveDismissDisabled(saving || store.mutating)
         .confirmationDialog("Remove “\(removing?.name ?? "")”?",
                             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             presenting: removing) { name in
@@ -1318,20 +1289,31 @@ struct ProjectStatusNamesSheet: View {
         (store.projects ?? []).filter { $0.project.statusNameId == name.id }.count
     }
 
-    private func add() {
-        let text = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !store.mutating else { return }
+    private func remove(_ name: PlanningProjectStatusName) {
+        if uses(name) > 0 {
+            removing = name
+        } else {
+            run { try await store.deleteStatusName(name) }
+        }
+    }
+
+    private func save(_ draft: ProjectStatusNameDraft) {
+        guard draft.canSave else { return }
         run {
-            try await store.saveStatusName(id: nil, category: newCategory, name: text)
-            newName = ""
+            try await store.saveStatusName(id: draft.original?.id, category: draft.category,
+                                           name: draft.title, appearance: draft.appearance)
+            initialDraft = nil
         }
     }
 
     private func run(_ change: @escaping @MainActor () async throws -> Void) {
+        guard !saving, !store.mutating else { return }
+        saving = true
+        error = nil
         Task {
+            defer { saving = false }
             do {
                 try await change()
-                error = nil
             } catch {
                 self.error = error.localizedDescription
             }
@@ -1339,53 +1321,178 @@ struct ProjectStatusNamesSheet: View {
     }
 }
 
-/// One status name in the sheet: renamed in place, moved to another
-/// category from its menu, or removed.
-private struct ProjectStatusNameRow: View {
-    let name: PlanningProjectStatusName
-    let busy: Bool
-    let save: (PlanningProjectStatus, String) -> Void
-    let remove: () -> Void
-    @State private var draft: String?
-    @FocusState private var focused: Bool
+private struct ProjectStatusNamesList: View {
+    let names: [PlanningProjectStatusName]
+    let add: () -> Void
+    let edit: (PlanningProjectStatusName) -> Void
+    let remove: (PlanningProjectStatusName) -> Void
+    let done: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            TextField("Name", text: Binding(get: { draft ?? name.name }, set: { draft = $0 }))
-                .textFieldStyle(.roundedBorder)
-                .focused($focused)
-                .onSubmit(commit)
-                .onChange(of: focused) { _, inside in
-                    if !inside { commit() }
-                }
-                .accessibilityLabel("Name of \(name.name)")
-            Menu(name.category.label) {
-                Picker("Category", selection: Binding(get: { name.category }, set: { save($0, name.name) })) {
-                    ForEach(PlanningProjectStatus.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
+        let groups = Dictionary(grouping: names, by: \.category)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Statuses").titleText().accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button("New status", systemImage: "plus", action: add).buttonStyle(.secondary)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .frame(width: 100, alignment: .trailing)
-            .disabled(busy)
-            .help("Category")
-            .accessibilityLabel("Category of \(name.name)")
-            Button(action: remove) { Image(systemName: "trash") }
-                .buttonStyle(.icon)
-                .disabled(busy)
-                .help("Remove \(name.name)")
-                .accessibilityLabel("Remove \(name.name)")
+            if names.isEmpty {
+                Text("No custom statuses").metaText().frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(PlanningProjectStatus.allCases) { category in
+                            if let group = groups[category] {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(category.label).sectionLabel().accessibilityAddTraits(.isHeader)
+                                        .padding(.leading, 8)
+                                    ForEach(group) { name in
+                                        HStack(spacing: 4) {
+                                            ProjectStatusRow(title: name.name, selected: false,
+                                                             description: name.description) {
+                                                ProjectStatusIcon(status: category, progress: 0.5, hue: name.hue)
+                                            } action: { edit(name) }
+                                            .accessibilityHint("Edit status")
+                                            Button { remove(name) } label: { Image(systemName: "trash") }
+                                                .buttonStyle(.icon)
+                                                .help("Remove \(name.name)")
+                                                .accessibilityLabel("Remove \(name.name)")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(height: min(360, CGFloat(names.count * 52 + groups.count * 24)))
+            }
+            HStack {
+                Spacer()
+                Button("Done", action: done).buttonStyle(.primary).keyboardShortcut(.cancelAction)
+            }
         }
-        .padding(.leading, 24)
+    }
+}
+
+private struct ProjectStatusNameDraft {
+    let original: PlanningProjectStatusName?
+    var name: String
+    var category: PlanningProjectStatus
+    var description: String
+    var hue: Int?
+
+    init(_ original: PlanningProjectStatusName?) {
+        self.original = original
+        name = original?.name ?? ""
+        category = original?.category ?? .active
+        description = original?.description ?? ""
+        hue = original?.hue
     }
 
-    private func commit() {
-        guard let editing = draft else { return }
-        draft = nil
-        let text = editing.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty, text != name.name { save(name.category, text) }
+    var title: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var detail: String { description.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var descriptionTooLong: Bool { detail.utf8.count > 512 }
+    var canSave: Bool {
+        !title.isEmpty && !descriptionTooLong
+            && (title != original?.name || category != original?.category
+                || detail != (original?.description ?? "") || hue != original?.hue)
+    }
+    var appearance: PlanningStatusAppearanceEdit {
+        PlanningStatusAppearanceEdit(
+            description: detail == (original?.description ?? "") ? nil : .some(detail.isEmpty ? nil : detail),
+            hue: hue == original?.hue ? nil : .some(hue)
+        )
+    }
+}
+
+private struct ProjectStatusNameEditor: View {
+    @State private var draft: ProjectStatusNameDraft
+    let cancel: () -> Void
+    let save: (ProjectStatusNameDraft) -> Void
+    @FocusState private var nameFocused: Bool
+    private struct ColorChoice {
+        let hue: Int
+        let label: String
+    }
+
+    private static let colors = [
+        ColorChoice(hue: 210, label: "Teal"), ColorChoice(hue: 260, label: "Blue"),
+        ColorChoice(hue: 300, label: "Purple"), ColorChoice(hue: 340, label: "Pink"),
+        ColorChoice(hue: 20, label: "Red"), ColorChoice(hue: 40, label: "Orange"),
+        ColorChoice(hue: 130, label: "Green"), ColorChoice(hue: 170, label: "Mint"),
+    ]
+
+    init(initial: ProjectStatusNameDraft, cancel: @escaping () -> Void,
+         save: @escaping (ProjectStatusNameDraft) -> Void) {
+        _draft = State(initialValue: initial)
+        self.cancel = cancel
+        self.save = save
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(draft.original == nil ? "New status" : "Edit status")
+                .titleText().accessibilityAddTraits(.isHeader)
+            HStack(alignment: .lastTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Name").sectionLabel()
+                    InputField(prompt: "Status name", text: $draft.name)
+                        .accessibilityLabel("Name")
+                        .focused($nameFocused)
+                }
+                Picker("Category", selection: $draft.category) {
+                    ForEach(PlanningProjectStatus.allCases) { Text($0.label).tag($0) }
+                }
+                .fixedSize()
+                .accessibilityLabel("Category")
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Description").sectionLabel()
+                TextField("Description", text: $draft.description, axis: .vertical)
+                    .lineLimit(2...4)
+                    .textFieldStyle(.roundedBorder)
+                    .font(TypeScale.body())
+                    .accessibilityLabel("Description")
+                if draft.descriptionTooLong { ErrorNote("Shorten the description.") }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Color").sectionLabel()
+                HStack(spacing: 4) {
+                    swatch(nil, label: "Category color")
+                    ForEach(Self.colors, id: \.hue) { choice in
+                        swatch(choice.hue, label: choice.label)
+                    }
+                    if let hue = draft.hue, !Self.colors.contains(where: { $0.hue == hue }) {
+                        swatch(hue, label: "Hue \(hue) degrees")
+                    }
+                }
+            }
+            HStack {
+                Button("Cancel", action: cancel).buttonStyle(.quiet).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Save") { save(draft) }
+                    .buttonStyle(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!draft.canSave)
+            }
+        }
+        .onAppear { nameFocused = true }
+    }
+
+    private func swatch(_ hue: Int?, label: String) -> some View {
+        let active = draft.hue == hue
+        return Button { draft.hue = hue } label: {
+            ProjectStatusIcon(status: draft.category, progress: 0.5, size: 16, hue: hue)
+                .frame(width: 28, height: 28)
+                .overlay {
+                    Circle().strokeBorder(active ? Theme.ink : .clear, lineWidth: 1.5)
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 }
 

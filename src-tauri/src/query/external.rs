@@ -227,6 +227,14 @@ pub struct ExternalError {
     pub settings_path: Option<&'static str>,
 }
 
+impl std::fmt::Display for ExternalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ExternalError {}
+
 impl ExternalError {
     fn new(error: ExternalErrorCode, message: impl Into<String>) -> Self {
         Self {

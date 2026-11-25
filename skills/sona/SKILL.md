@@ -231,7 +231,9 @@ them within a second or two.
 ```bash
 sona work project-save "Q1 launch" --summary "Ship the beta to ten venues"   # none clears it
 sona work project-statuses                       # status names inside the six categories
-sona work project-status-save "In review" --category active [--status "Review"]   # make, rename or move one
+sona work project-status-save "In review" --category active --description "Waiting for review" --hue 210
+sona work project-status-save "Approved" --status "In review"   # rename without changing appearance
+sona work project-status-save "Approved" --description= --hue none   # clear both
 sona work project-status-delete "In review"      # its projects keep the category
 sona work project-save "Q1 launch" --status-name "In review"   # none clears the name
 sona work project-save "Q1 launch" --patch-json '[{"field":"description","op":"insert_after","anchor":"## Scope","value":"Adds export."}]'
@@ -1053,7 +1055,7 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_project_history`            | `project`, `limit?`                                          |
 | `sona_project_save`               | `name`, `project?`, `details?`, `summary?`, `status?`, `status_name?`, `priority?`, `lead?`, `members?`, `start?`, `start_resolution?`, `target?`, `target_resolution?`, `hue?`, `icon?`, `labels?`, `links?`, `patch?`, `dry_run?` — writes |
 | `sona_project_status_list`        | —                                                            |
-| `sona_project_status_save`        | `name`, `category`, `status?`, `dry_run?` — writes           |
+| `sona_project_status_save`        | `name`, `category?` (required for new statuses), `status?`, `description?`, `hue?`, `dry_run?` — writes |
 | `sona_project_status_delete`      | `name`, `dry_run?` — writes                                  |
 | `sona_project_delete`             | `project`, `restore?`, `dry_run?` — writes                   |
 | `sona_project_archive`            | `project`, `restore?` — writes                               |

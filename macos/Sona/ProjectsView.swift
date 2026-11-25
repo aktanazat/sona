@@ -471,7 +471,8 @@ struct ProjectsView: View {
             PriorityIcon(priority: priority)
                 .frame(width: 16)
                 .help(priority.label)
-            ProjectStatusIcon(status: summary.project.status, progress: Double(percent) / 100)
+            ProjectStatusIcon(status: summary.project.status, progress: Double(percent) / 100,
+                              hue: store.statusName(of: summary.project)?.hue)
             if let icon = summary.project.icon { Text(icon).font(.system(size: 13)) }
             Text(summary.project.title)
                 .font(TypeScale.body(13.5).weight(.medium))
@@ -562,7 +563,8 @@ struct ProjectsView: View {
                 let members = visible.filter { $0.project.status == status }
                 BoardColumn(status: status, count: members.count) {
                     ForEach(members) { summary in
-                        BoardCard(summary: summary, faces: store.details[summary.id].map(owners) ?? [],
+                        BoardCard(summary: summary, statusHue: store.statusName(of: summary.project)?.hue,
+                                  faces: store.details[summary.id].map(owners) ?? [],
                                   revision: photoRevision, now: now) { store.open(summary.id) }
                             .contextMenu { moveMenu(summary.project) }
                     }
@@ -794,7 +796,8 @@ struct ProjectsView: View {
                             Task { await store.saveProject(project, change) }
                         } label: {
                             HStack(spacing: 6) {
-                                ProjectStatusIcon(status: project.status, progress: fraction)
+                                ProjectStatusIcon(status: project.status, progress: fraction,
+                                                  hue: store.statusName(of: project)?.hue)
                                 Text(store.statusTitle(of: project))
                                     .font(TypeScale.label(12.5))
                                     .foregroundStyle(Theme.ink)
@@ -1360,6 +1363,7 @@ private struct BoardColumn<Cards: View>: View {
 
 private struct BoardCard: View {
     let summary: PlanningProjectSummary
+    let statusHue: Int?
     let faces: [AvatarFace]
     let revision: UInt64
     let now: Int64
@@ -1371,7 +1375,7 @@ private struct BoardCard: View {
         let fraction = total > 0 ? Double(summary.completedTaskCount) / Double(total) : 0
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 8) {
-                ProjectStatusIcon(status: summary.project.status, progress: fraction)
+                ProjectStatusIcon(status: summary.project.status, progress: fraction, hue: statusHue)
                     .padding(.top, 2)
                 Text(summary.project.title)
                     .font(TypeScale.body(13.5).weight(.medium))

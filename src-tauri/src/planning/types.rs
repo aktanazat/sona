@@ -189,6 +189,48 @@ pub struct ProjectStatusName {
     pub category: ProjectStatus,
     pub name: String,
     pub position: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hue: Option<u16>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProjectStatusAppearanceEdit {
+    #[serde(
+        deserialize_with = "super::work::types::nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<Option<String>>,
+    #[serde(
+        deserialize_with = "super::work::types::nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hue: Option<Option<u16>>,
+}
+
+impl ProjectStatusAppearanceEdit {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.description.is_none() && self.hue.is_none()
+    }
+
+    pub(crate) fn resolved_against<'a>(
+        &'a self,
+        previous: Option<&'a ProjectStatusName>,
+    ) -> (Option<&'a str>, Option<u16>) {
+        let description = match self.description.as_ref() {
+            Some(value) => value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            None => previous.and_then(|status| status.description.as_deref()),
+        };
+        let hue = self
+            .hue
+            .unwrap_or_else(|| previous.and_then(|status| status.hue));
+        (description, hue)
+    }
 }
 
 /// One change to a project's properties, milestones, dependencies or

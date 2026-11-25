@@ -224,31 +224,33 @@ struct ProjectStatusIcon: View {
     let status: PlanningProjectStatus
     let progress: Double
     var size: CGFloat = 14
+    var hue: Int?
 
     var body: some View {
+        let tint = hue.map { Theme.label(hue: Double($0)) }
         ZStack {
             switch status {
             case .backlog:
-                Circle().strokeBorder(Theme.inkTertiary, style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
+                Circle().strokeBorder(tint ?? Theme.inkTertiary, style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
             case .planned:
-                Circle().strokeBorder(Theme.inkSecondary, lineWidth: 1.5)
+                Circle().strokeBorder(tint ?? Theme.inkSecondary, lineWidth: 1.5)
             case .canceled:
-                Circle().fill(Theme.inkTertiary)
+                Circle().fill(tint ?? Theme.inkTertiary)
                 Image(systemName: "xmark")
                     .font(.system(size: size * 0.45, weight: .heavy))
                     .foregroundStyle(Theme.onAccent)
             case .active:
-                Circle().strokeBorder(Theme.accent, lineWidth: 1.5)
+                Circle().strokeBorder(tint ?? Theme.accent, lineWidth: 1.5)
                 PieShape(fraction: progress)
-                    .fill(Theme.accent)
+                    .fill(tint ?? Theme.accent)
                     .padding(size * 0.25)
             case .paused:
-                Circle().strokeBorder(Theme.inkSecondary, lineWidth: 1.5)
+                Circle().strokeBorder(tint ?? Theme.inkSecondary, lineWidth: 1.5)
                 Image(systemName: "pause.fill")
                     .font(.system(size: size * 0.4, weight: .bold))
-                    .foregroundStyle(Theme.inkSecondary)
+                    .foregroundStyle(tint ?? Theme.inkSecondary)
             case .completed:
-                Circle().fill(Theme.accent)
+                Circle().fill(tint ?? Theme.accent)
                 Image(systemName: "checkmark")
                     .font(.system(size: size * 0.5, weight: .heavy))
                     .foregroundStyle(Theme.onAccent)

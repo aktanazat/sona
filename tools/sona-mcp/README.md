@@ -338,7 +338,7 @@ goes by, or its id.
 | `sona_project_history`       | `project`, `limit?`                                                    | `sona work project-history`              |
 | `sona_project_save`          | `name`, `project?`, `details?`, `summary?`, `status?`, `status_name?`, `priority?`, `lead?`, `members?`, `start?`, `start_resolution?`, `target?`, `target_resolution?`, `hue?`, `icon?`, `labels?`, `links?`, `patch?`, `dry_run?` | `sona work project-save` — **writes** |
 | `sona_project_status_list`   |                                                                        | `sona work project-statuses`             |
-| `sona_project_status_save`   | `name`, `category`, `status?`, `dry_run?`                              | `sona work project-status-save` — **writes** |
+| `sona_project_status_save`   | `name`, `category?` (required for new statuses), `status?`, `description?`, `hue?`, `dry_run?` | `sona work project-status-save` — **writes** |
 | `sona_project_status_delete` | `name`, `dry_run?`                                                     | `sona work project-status-delete` — **writes** |
 | `sona_project_delete`        | `project`, `restore?`, `dry_run?`                                      | `sona work project-delete` — **writes**  |
 | `sona_project_archive`       | `project`, `restore?`                                                  | `sona work project-archive` — **writes** |

@@ -4,7 +4,7 @@
 use super::super::catalog::{self, LinkEdit, ProjectEdit};
 use super::super::types::{
     DateResolution, Milestone, Project, ProjectActivity, ProjectHealth, ProjectStatus,
-    ProjectStatusName, ProjectUpdate, ProjectUpdatePage, TaskStatus,
+    ProjectStatusAppearanceEdit, ProjectStatusName, ProjectUpdate, ProjectUpdatePage, TaskStatus,
 };
 use super::super::updates;
 use super::comments::Author;
@@ -227,8 +227,16 @@ pub fn planning_project_status_name_save(
     id: Option<String>,
     category: ProjectStatus,
     name: String,
+    appearance: Option<ProjectStatusAppearanceEdit>,
 ) -> Result<ProjectStatusName, String> {
-    super::catalog_status_name_save(&app, &operation_id, id, category, &name)
+    super::catalog_status_name_save(
+        &app,
+        &operation_id,
+        id,
+        category,
+        &name,
+        &appearance.unwrap_or_default(),
+    )
 }
 
 /// Deletes a custom status name; its projects keep their status.

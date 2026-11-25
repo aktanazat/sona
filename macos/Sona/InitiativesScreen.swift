@@ -227,7 +227,8 @@ private struct InitiativePage: View {
         let fraction = total == 0 ? 0 : Double(done) / Double(total)
         return CardRow(action: { openProject(summary.id) }) {
             HStack(spacing: 8) {
-                ProjectStatusIcon(status: summary.project.status, progress: fraction)
+                ProjectStatusIcon(status: summary.project.status, progress: fraction,
+                                  hue: store.statusName(of: summary.project)?.hue)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(summary.project.title).bodyText(13)
                     Text(store.statusTitle(of: summary.project)).metaText().lineLimit(1)

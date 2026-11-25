@@ -6071,15 +6071,19 @@ pub(super) async fn call(
             let id = args.take("id")?;
             let category = args.take("category")?;
             let name = args.take("name")?;
+            let appearance = args.take("appearance")?;
             let handle = app.clone();
             off_main_thread(move || {
-                reply(crate::planning::work::plans::planning_project_status_name_save(
-                    handle.clone(),
-                    operation_id,
-                    id,
-                    category,
-                    name,
-                ))
+                reply(
+                    crate::planning::work::plans::planning_project_status_name_save(
+                        handle.clone(),
+                        operation_id,
+                        id,
+                        category,
+                        name,
+                        appearance,
+                    ),
+                )
             })
             .await?
         }

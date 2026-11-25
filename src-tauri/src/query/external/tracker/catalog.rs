@@ -18,10 +18,8 @@ use crate::planning::catalog::{LinkEdit, MilestoneEdit, ProjectEdit};
 use crate::planning::store as plans;
 use crate::planning::work;
 use crate::planning::work::types::{WorkOwner, WorkStatus};
-use crate::planning::{
-    DateResolution, Milestone, Project, ProjectLink, ProjectStatus, TaskStatus,
-};
-use crate::planning::ProjectStatusName;
+use crate::planning::{DateResolution, Milestone, Project, ProjectLink, ProjectStatus, TaskStatus};
+use crate::planning::{ProjectStatusAppearanceEdit, ProjectStatusName};
 use crate::query::external::{
     meeting_detail, meeting_summaries, session_id, store, transcript, ExternalError,
     ExternalErrorCode, ExternalMeetingDetail, ExternalTranscript,
@@ -30,7 +28,7 @@ use crate::query::{QueryError, QUERY_SCHEMA_VERSION};
 use chrono::NaiveDate;
 use clap::{Args, ValueEnum};
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -322,6 +320,12 @@ pub struct ProjectStatusSaveArgs {
     /// Rename this existing status to NAME.
     #[arg(long, value_name = "STATUS")]
     pub status: Option<String>,
+    /// A short description. An empty value clears it; omission keeps it.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// A hue in degrees (0 to 360), or "none" for the category's color.
+    #[arg(long, value_name = "HUE")]
+    pub hue: Option<String>,
     /// Show the status as it would be saved; nothing changes.
     #[arg(long)]
     pub dry_run: bool,
@@ -560,13 +564,17 @@ pub struct ExternalWorkMilestoneConverted {
     pub moved_tasks: u32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExternalWorkProjectStatus {
     pub id: String,
     pub name: String,
     /// The built-in status it is a kind of.
     pub category: ProjectStatus,
     pub position: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hue: Option<u16>,
     /// Projects that show it, the bin left out.
     pub projects: u32,
 }
@@ -577,7 +585,7 @@ pub struct ExternalWorkProjectStatuses {
     pub statuses: Vec<ExternalWorkProjectStatus>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExternalWorkProjectStatusChange {
     pub schema_version: u32,
     pub dry_run: bool,
@@ -1738,6 +1746,37 @@ fn pick_status<'a>(
         .map_err(|refusal| refusal.hint("List them with: sona work project-statuses"))
 }
 
+fn status_save_target<'a>(
+    args: &ProjectStatusSaveArgs,
+    name: &str,
+    names: &'a [ProjectStatusName],
+) -> Result<(Option<&'a ProjectStatusName>, ProjectStatus), ExternalError> {
+    let folded = name.to_lowercase();
+    let with_name = names
+        .iter()
+        .find(|status| status.name.to_lowercase() == folded);
+    let existing = match &args.status {
+        Some(value) => Some(pick_status(value, names)?),
+        None => with_name,
+    };
+    if let Some(taken) = with_name.filter(|taken| existing.is_none_or(|old| old.id != taken.id)) {
+        return Err(ExternalError::invalid(format!(
+            "A status called {:?} already exists.",
+            taken.name
+        )));
+    }
+    let category = match (args.category, existing) {
+        (Some(category), _) => category.into(),
+        (None, Some(existing)) => existing.category,
+        (None, None) => {
+            return Err(ExternalError::invalid(
+                "A new status needs --category: backlog, planned, active, paused, completed or canceled.",
+            ))
+        }
+    };
+    Ok((existing, category))
+}
+
 fn using(projects: &[Project], status: &ProjectStatusName) -> Vec<String> {
     projects
         .iter()
@@ -1759,6 +1798,8 @@ fn status_row(name: &ProjectStatusName, projects: &[Project]) -> ExternalWorkPro
         name: name.name.clone(),
         category: name.category,
         position: name.position,
+        description: name.description.clone(),
+        hue: name.hue,
         projects: u32::try_from(shown).unwrap_or(u32::MAX),
     }
 }
@@ -1858,31 +1899,39 @@ impl Tracker<'_> {
         args: &ProjectStatusSaveArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let name = args.name.trim();
-        let names = self.status_names()?;
-        let existing = match &args.status {
-            Some(value) => Some(pick_status(value, &names)?),
-            None => names
-                .iter()
-                .find(|status| status.name.to_lowercase() == name.to_lowercase()),
+        let appearance = ProjectStatusAppearanceEdit {
+            description: args.description.as_ref().map(|value| Some(value.clone())),
+            hue: args
+                .hue
+                .as_deref()
+                .map(|value| match value {
+                    "none" => Ok(None),
+                    _ => value
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|hue| *hue <= 360)
+                        .map(Some)
+                        .ok_or_else(|| {
+                            ExternalError::invalid("--hue takes a number from 0 to 360, or none.")
+                        }),
+                })
+                .transpose()?,
         };
-        if let Some(taken) = names.iter().find(|status| {
-            status.name.to_lowercase() == name.to_lowercase()
-                && existing.is_none_or(|existing| existing.id != status.id)
-        }) {
-            return Err(ExternalError::invalid(format!(
-                "A status called {:?} already exists.",
-                taken.name
-            )));
+        if !args.dry_run && !appearance.is_empty() {
+            return self.project_status_appearance_save(args, name, &appearance);
         }
-        let category = match (args.category, existing) {
-            (Some(category), _) => category.into(),
-            (None, Some(existing)) => existing.category,
-            (None, None) => {
-                return Err(ExternalError::invalid(
-                    "A new status needs --category: backlog, planned, active, paused, completed or canceled.",
-                ))
+        if !args.dry_run {
+            if let Some(operation_id) = args.write.operation_id {
+                let operation_id = operation_id.to_string();
+                if work::has_status_appearance_cli_receipt(self.history, &operation_id)
+                    .map_err(|message| self.write_refusal(message, &operation_id, "The status"))?
+                {
+                    return self.project_status_appearance_save(args, name, &appearance);
+                }
             }
-        };
+        }
+        let names = self.status_names()?;
+        let (existing, category) = status_save_target(args, name, &names)?;
         let projects = self.every_project()?;
         let change = |dry_run, operation_id, status: &ProjectStatusName, changed_projects| {
             admin(ProjectAdminAnswer::Status(ExternalWorkProjectStatusChange {
@@ -1896,7 +1945,9 @@ impl Tracker<'_> {
             }))
         };
         if let Some(current) = existing {
-            if current.name == name && current.category == category {
+            let appearance_matches = appearance.resolved_against(Some(current))
+                == (current.description.as_deref(), current.hue);
+            if current.name == name && current.category == category && appearance_matches {
                 return Ok(change(args.dry_run, None, current, Vec::new()));
             }
         }
@@ -1914,15 +1965,69 @@ impl Tracker<'_> {
         let id = existing.map(|status| status.id.clone());
         let saved = if args.dry_run {
             self.rehearse(|conn| {
-                planning::catalog::save_status_name(conn, id.as_deref(), category, name, now_ms())
+                planning::catalog::save_status_name(
+                    conn,
+                    id.as_deref(),
+                    category,
+                    name,
+                    &appearance,
+                    now_ms(),
+                )
             })?
             .0
         } else {
             self.applies("saving a project status")?;
-            work::catalog_status_name_save(self.app, &operation_id, id, category, name)
+            work::catalog_status_name_save(self.app, &operation_id, id, category, name, &appearance)
                 .map_err(|message| self.write_refusal(message, &operation_id, "The status"))?
         };
         Ok(change(args.dry_run, Some(operation_id), &saved, moved))
+    }
+
+    fn project_status_appearance_save(
+        &self,
+        args: &ProjectStatusSaveArgs,
+        name: &str,
+        appearance: &ProjectStatusAppearanceEdit,
+    ) -> Result<WorkAnswer, ExternalError> {
+        self.applies("saving a project status")?;
+        let operation_id = args.write.fresh_operation_id();
+        let request = (
+            args.status.as_deref(),
+            args.category.map(ProjectStatus::from),
+            name,
+            appearance,
+        );
+        let result = work::catalog_status_appearance_cli_save(
+            self.history,
+            &operation_id,
+            &request,
+            |conn, now| {
+                let names = planning::catalog::status_names(conn)?;
+                let (existing, category) = status_save_target(args, name, &names)?;
+                let projects = plans::all_projects(conn)?;
+                let moved = existing
+                    .filter(|current| current.category != category)
+                    .map(|current| using(&projects, current))
+                    .unwrap_or_default();
+                let id = existing.map(|status| status.id.as_str());
+                let (saved, _) =
+                    planning::catalog::save_status_name(conn, id, category, name, appearance, now)?;
+                Ok(ExternalWorkProjectStatusChange {
+                    schema_version: QUERY_SCHEMA_VERSION,
+                    dry_run: false,
+                    operation_id: Some(operation_id.clone()),
+                    created: existing.is_none(),
+                    deleted: false,
+                    status: status_row(&saved, &projects),
+                    changed_projects: moved,
+                })
+            },
+        );
+        let saved = result.map_err(|error| match error.downcast::<ExternalError>() {
+            Ok(error) => error,
+            Err(error) => self.write_refusal(planning::failure(error), &operation_id, "The status"),
+        })?;
+        Ok(admin(ProjectAdminAnswer::Status(saved)))
     }
 
     pub(super) fn project_status_delete(
@@ -2150,6 +2255,15 @@ fn converted_milestone(
     sent_before(conn, operation_id, MILESTONE_TO_PROJECT_ASKED, asked)
 }
 
+fn status_appearance_text(status: &ExternalWorkProjectStatus, text: &mut String) {
+    if let Some(description) = &status.description {
+        let _ = writeln!(text, "  {description}");
+    }
+    if let Some(hue) = status.hue {
+        let _ = writeln!(text, "  Hue: {hue}°");
+    }
+}
+
 pub(super) fn admin_text(answer: &ProjectAdminAnswer, text: &mut String) {
     let dry = |text: &mut String, dry_run: bool| {
         if dry_run {
@@ -2169,6 +2283,7 @@ pub(super) fn admin_text(answer: &ProjectAdminAnswer, text: &mut String) {
                     "{}  · kind of {:?} · {} projects",
                     status.name, status.category, status.projects
                 );
+                status_appearance_text(status, text);
             }
         }
         ProjectAdminAnswer::Status(change) => {
@@ -2184,6 +2299,9 @@ pub(super) fn admin_text(answer: &ProjectAdminAnswer, text: &mut String) {
                 "{verb} status {} (kind of {:?}).",
                 change.status.name, change.status.category
             );
+            if !change.deleted {
+                status_appearance_text(&change.status, text);
+            }
             if !change.changed_projects.is_empty() {
                 let _ = writeln!(text, "Projects changed: {}.", change.changed_projects.join(", "));
             }

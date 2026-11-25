@@ -155,6 +155,8 @@ struct PlanningProjectStatusName: Decodable, Identifiable, Equatable {
     let category: PlanningProjectStatus
     let name: String
     let position: Int64
+    let description: String?
+    let hue: Int?
 }
 
 /// A project kept to start new ones from: its milestones and tasks, by title.
@@ -814,11 +816,17 @@ private struct PlanningFromTemplate: Decodable {
     let project: PlanningProject
 }
 
+struct PlanningStatusAppearanceEdit: Encodable {
+    let description: String??
+    let hue: Int??
+}
+
 private struct PlanningStatusNameSaveParams: Encodable {
     let operationId: String
     let id: String?
     let category: PlanningProjectStatus
     let name: String
+    let appearance: PlanningStatusAppearanceEdit
 }
 
 private struct PlanningUpdateEditParams: Encodable {
@@ -1332,11 +1340,13 @@ final class ProjectsStore {
 
     /// Adds a status name, or renames one or moves it to another category;
     /// the projects under a moved name move with it.
-    func saveStatusName(id: String?, category: PlanningProjectStatus, name: String) async throws {
+    func saveStatusName(id: String?, category: PlanningProjectStatus, name: String,
+                        appearance: PlanningStatusAppearanceEdit) async throws {
         try await write {
             let _: PlanningProjectStatusName = try await self.core.request(
                 "planning_project_status_name_save",
-                PlanningStatusNameSaveParams(operationId: UUID().uuidString, id: id, category: category, name: name))
+                PlanningStatusNameSaveParams(operationId: UUID().uuidString, id: id, category: category,
+                                             name: name, appearance: appearance))
         }
         await refresh()
     }
