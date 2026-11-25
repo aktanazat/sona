@@ -235,14 +235,16 @@ final class AppModel: NSObject, ObservableObject {
         publishKeyboardState()
     }
 
-    private func startKeyboardDictation(requestID: UUID, documentID: UUID?, language: TypingLanguage?, style: String? = nil) {
+    private func startKeyboardDictation(requestID: UUID, documentID: UUID?, language: TypingLanguage?,
+                                        style: String? = nil, fromWarmKeyboard: Bool = false) {
         guard canStartDictation, !dictation.isBusy else { return }
         keyboardRequestID = requestID
         keyboardRequestDocumentID = documentID
         lastKeyboardRequestID = requestID
         keyboardDocumentID = documentID
         keyboardLanguage = language
-        dictation.start(keyboard: true, language: language?.rawValue, style: style)
+        dictation.start(keyboard: true, language: language?.rawValue, style: style,
+                        warmStyleRequestID: fromWarmKeyboard ? requestID : nil)
     }
 
     private func receiveKeyboardCommand() {
@@ -255,7 +257,8 @@ final class AppModel: NSObject, ObservableObject {
                 guard dictation.isWarm else { publishKeyboardState(); return }
                 startKeyboardDictation(
                     requestID: command.requestID, documentID: command.documentID,
-                    language: command.language.flatMap(TypingLanguage.init(rawValue:)), style: command.style
+                    language: command.language.flatMap(TypingLanguage.init(rawValue:)), style: command.style,
+                    fromWarmKeyboard: true
                 )
             case .stop:
                 guard command.requestID == keyboardRequestID else { return }

@@ -58,7 +58,8 @@ final class KeyboardTools {
     var snippets: [DictationProfile.Snippet] { didSet { save(snippets, Self.snippetsKey); snippetsChanged() } }
     var reviewsDictation: Bool { didSet { defaults.set(reviewsDictation, forKey: Self.reviewKey) } }
     /// One recording's style id: nil keeps the chosen style, empty is no style.
-    var recordingStyle: String?
+    private(set) var recordingStyle: String?
+    @ObservationIgnored var recordingStyleChosen: ((String?) -> Void)?
     /// One recording's language, a locale identifier: nil keeps the typing language.
     var recordingLanguage: String?
     /// The typing language, which a recording with no language picked listens in.
@@ -115,6 +116,11 @@ final class KeyboardTools {
     var effectiveStyle: DictationProfile.Style? {
         let id = recordingStyle ?? DictationPreferences.style
         return profile.styles.first { $0.id == id }
+    }
+
+    func chooseRecordingStyle(_ style: String?) {
+        recordingStyle = style
+        recordingStyleChosen?(style)
     }
 
     // MARK: Navigation

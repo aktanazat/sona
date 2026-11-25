@@ -87,6 +87,7 @@ final class PhoneDictation: ObservableObject {
     private let rewrite = BoundedRewrite()
     private var sessionProfile = DictationProfile.empty
     private var sessionStyle: DictationProfile.Style?
+    private var warmStyleRequestID: UUID?
     private var sessionLanguage = DictationPreferences.activeLanguage
     #if DEBUG
     private var script: Task<Void, Never>?
@@ -113,7 +114,8 @@ final class PhoneDictation: ObservableObject {
 
     /// `language` is the keyboard's typing language when the keyboard asked for this dictation;
     /// `style` is a style id one recording asked for, empty for none, nil for the chosen style.
-    func start(keepingAudio: Bool = false, keyboard: Bool = false, language: String? = nil, style: String? = nil) {
+    func start(keepingAudio: Bool = false, keyboard: Bool = false, language: String? = nil,
+               style: String? = nil, warmStyleRequestID: UUID? = nil) {
         guard !isBusy else { return }
         let id = UUID()
         sessionID = id
@@ -125,10 +127,8 @@ final class PhoneDictation: ObservableObject {
         startedAt = Date()
         sessionProfile = profile
         sessionLanguage = DictationPreferences.recognitionLanguage(for: language)
-        let styleID = style ?? DictationPreferences.style
-        sessionStyle = profile.styles.first { $0.id == styleID }.map {
-            DictationProfile.Style(id: $0.id, name: $0.name, prompt: DictationTone.prompt(of: $0))
-        }
+        sessionStyle = styleForSession(style ?? DictationPreferences.style)
+        self.warmStyleRequestID = warmStyleRequestID
         onStateChanged?()
         preparation = Task { [weak self] in
             guard let self else { return }
@@ -326,7 +326,8 @@ final class PhoneDictation: ObservableObject {
         let corrected = sessionProfile.apply(to: DictationCleanup.clean(insertableText, language: language))
         text = corrected
         onStateChanged?()
-        guard error == nil, notice == nil, !corrected.isEmpty, let style = sessionStyle else {
+        let style = latestSessionStyle()
+        guard error == nil, notice == nil, !corrected.isEmpty, let style else {
             settle(error: error, styleNotice: notice)
             return
         }
@@ -359,6 +360,18 @@ final class PhoneDictation: ObservableObject {
             case .cancelled:
                 break
             }
+        }
+    }
+
+    private func latestSessionStyle() -> DictationProfile.Style? {
+        guard let requestID = warmStyleRequestID,
+              let selected = try? KeyboardSessionStore.shared().takeStyle(for: requestID) else { return sessionStyle }
+        return styleForSession(selected)
+    }
+
+    private func styleForSession(_ id: String) -> DictationProfile.Style? {
+        sessionProfile.styles.first { $0.id == id }.map {
+            DictationProfile.Style(id: $0.id, name: $0.name, prompt: DictationTone.prompt(of: $0))
         }
     }
 
@@ -398,6 +411,7 @@ final class PhoneDictation: ObservableObject {
         script = nil
         #endif
         sessionID = nil
+        warmStyleRequestID = nil
         preparation?.cancel()
         preparation = nil
         finishDeadline?.cancel()

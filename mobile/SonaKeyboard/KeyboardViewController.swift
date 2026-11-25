@@ -56,6 +56,7 @@ final class KeyboardViewController: UIInputViewController {
     private var visible = false
     private var requestedAt: Date?
     private var requestedID: UUID?
+    private var warmStyleRequestID: UUID?
     private var wantedHeight: CGFloat { traitCollection.verticalSizeClass == .compact ? 200 : 280 }
 
     /// The system plays its key click only for an input view that asks for it.
@@ -93,6 +94,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         tools.canCopy = { [weak self] in self?.hasFullAccess ?? false }
         tools.snippetsChanged = { [weak self] in self?.applySnippets() }
+        tools.recordingStyleChosen = { [weak self] style in self?.chooseWarmStyle(style) }
         #if DEBUG
         tools.toggled = { [weak self] in
             guard let self else { return }
@@ -484,7 +486,15 @@ final class KeyboardViewController: UIInputViewController {
                 documentID: documentID, createdAt: Date(),
                 language: tools.recordingLanguage ?? typing.language.rawValue, style: tools.recordingStyle
             ))
+            warmStyleRequestID = id
         } catch { state.waiting = false; show(error) }
+    }
+
+    private func chooseWarmStyle(_ style: String?) {
+        guard hasFullAccess, state.route != .keyboard, let requestID = warmStyleRequestID else { return }
+        do {
+            try KeyboardSessionStore.shared().chooseStyle(style ?? DictationPreferences.style, for: requestID)
+        } catch { show(error) }
     }
 
     private func finish() {

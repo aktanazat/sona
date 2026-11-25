@@ -495,7 +495,7 @@ private struct RecordingOptions: View {
                     HStack(spacing: toolGap) {
                         ForEach(styles) { choice in
                             Chip(selected: (tools.recordingStyle ?? "default") == choice.id) { choice.name } action: {
-                                tools.recordingStyle = choice.id == "default" ? nil : choice.id
+                                tools.chooseRecordingStyle(choice.id == "default" ? nil : choice.id)
                             }
                             .fixedSize()
                         }
