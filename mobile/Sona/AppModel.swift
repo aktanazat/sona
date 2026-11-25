@@ -538,8 +538,14 @@ final class AppModel: NSObject, ObservableObject {
         }
         AppModel.tap()
         /* A stop pressed with the phone locked has turned the audio session off, so
-         * nothing else keeps Sona running until the recording is queued. */
-        let saving = UIApplication.shared.beginBackgroundTask(withName: "Save recording")
+         * nothing else keeps Sona running until the recording is queued and its upload
+         * has had its chance. An upload cut off when the time runs out resumes later. */
+        var saving = UIBackgroundTaskIdentifier.invalid
+        let release = {
+            if saving != .invalid { UIApplication.shared.endBackgroundTask(saving) }
+            saving = .invalid
+        }
+        saving = UIApplication.shared.beginBackgroundTask(withName: "Save recording") { release() }
         Task {
             let kept: Bool
             /* A save that threw left the audio on the iPhone; one that found no audio
@@ -565,8 +571,8 @@ final class AppModel: NSObject, ObservableObject {
             if !kept, !recorder.isRecording, recorder.mostRecentCaptureID == finished.journal.id, recorder.notice == nil {
                 recorder.notice = failedToSave ? .keptForRetry : .notSaved
             }
-            if saving != .invalid { UIApplication.shared.endBackgroundTask(saving) }
             await drain()
+            release()
             if kept && !recorder.isRecording && recorder.mostRecentCaptureID == finished.journal.id
                 && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
                 meetingTitle = ""
@@ -1164,15 +1170,24 @@ extension AppModel: WCSessionDelegate {
         let recordedAtUtcMs =
             (file.metadata?["recorded_at_utc_ms"] as? NSNumber)?.int64Value
             ?? Int64(Date().timeIntervalSince1970 * 1000)
+        let destination = FileManager.default.temporaryDirectory
+            .appending(path: "watch-\(UUID().uuidString).pcm")
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let destination = FileManager.default.temporaryDirectory
-                .appending(path: "watch-\(UUID().uuidString).pcm")
-            guard let audio = try? transcodeToCaptureFormat(
-                source: source, destination: destination
-            ) else { return }
+            /* The watch's file can arrive with Sona in the background, which would be
+             * suspended before the recording is converted, queued and uploaded. */
+            var working = UIBackgroundTaskIdentifier.invalid
+            let release = {
+                if working != .invalid { UIApplication.shared.endBackgroundTask(working) }
+                working = .invalid
+            }
+            working = UIApplication.shared.beginBackgroundTask(withName: "Save watch recording") { release() }
+            defer { release() }
+            guard let audio = try? await Task.detached(priority: .utility, operation: {
+                try transcodeToCaptureFormat(source: source, destination: destination)
+            }).value else { return }
             try? FileManager.default.removeItem(at: source)
-            await self.enqueue(
+            let kept = await self.enqueue(
                 audio: audio,
                 recordedAtUtcMs: recordedAtUtcMs,
                 title: AppModel.title(
@@ -1180,6 +1195,7 @@ extension AppModel: WCSessionDelegate {
                     utcMs: recordedAtUtcMs
                 )
             )
+            if kept { await self.drain() }
         }
     }
 }

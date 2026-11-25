@@ -43,8 +43,12 @@ final class WatchRecorder: NSObject, ObservableObject {
         do {
             try session.setCategory(.record, mode: .default)
             try session.setActive(true, options: [])
-            let url = FileManager.default.temporaryDirectory
-                .appending(path: "watch-\(UUID().uuidString).wav")
+            /* Kept outside the temporary folder, which the system may empty while the
+             * phone is still out of reach and the transfer waits. */
+            let folder = try FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+            )
+            let url = folder.appending(path: "watch-\(UUID().uuidString).wav")
             /* 16 kHz mono is what the phone uploads, so asking for it here avoids a
              * resample; the phone resamples whatever actually arrives regardless. */
             let recorder = try AVAudioRecorder(
