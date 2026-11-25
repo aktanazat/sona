@@ -37,6 +37,7 @@ final class KeyboardViewController: UIInputViewController {
     private let typing = TypingModel()
     private let tools = KeyboardTools()
     private var corrector: TypingCorrector?
+    private var emojiCatalog: EmojiCatalog?
     private var session = TypingSession(corrector: nil)
     /// How many times Reset in the app had run when the learning was read, so a reset made
     /// while the keyboard was open is not undone by saving what it had before.
@@ -51,6 +52,8 @@ final class KeyboardViewController: UIInputViewController {
     private var ownEditInFlight = false
     private var editedField: UUID?
     private var lastReloadedDocumentID: UUID?
+    /// Counts applied reloads, so a slower read that finishes after a newer one is dropped.
+    private var reloads = 0
     /// Counts the keyboard showing and hiding, which may bring it to another field.
     private var shownCount = 0
     private let haptic = UIImpactFeedbackGenerator(style: .light)
@@ -224,7 +227,7 @@ final class KeyboardViewController: UIInputViewController {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
-                self?.reload()
+                await self?.reloadOffMain()
             }
         }
     }
@@ -311,26 +314,28 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     /// Letters, spelling, next words and the language dictation listens in all follow the
-    /// typing language. Emoji found by word need English words. The next-word table and the
-    /// common words come in a moment later, read off the main thread the first time.
+    /// typing language. Emoji found by word need English words. The next-word table, the
+    /// common words and the emoji come in a moment later, read off the main thread the first
+    /// time.
     private func setLanguage(_ language: TypingLanguage) {
         typing.language = language
         let corrector = TypingCorrector(language: language.rawValue, grid: typing.letterGrid)
         self.corrector = corrector
-        let catalog = language == .english ? EmojiCatalog.shared : nil
         session = TypingSession(
             corrector: corrector, lexicon: session.lexicon, learning: session.learning,
-            emoji: { catalog?.emoji(for: $0) }
+            emoji: language == .english ? { [weak self] in self?.emojiCatalog?.emoji(for: $0) } : { _ in nil }
         )
         applySnippets()
         session.hostChanged(field: documentID, text: fieldText)
         Task { [weak self] in
             async let table = NextWords.table(for: language)
             async let common = CommonWords.list(for: language)
-            let (loadedTable, loadedCommon) = await (table, common)
+            async let emoji = language == .english ? EmojiCatalog.shared.value : nil
+            let (loadedTable, loadedCommon, loadedEmoji) = await (table, common, emoji)
             corrector?.common = loadedCommon
             guard let self, typing.language == language else { return }
             session.predictor = loadedTable
+            if let loadedEmoji { emojiCatalog = loadedEmoji }
             refreshSuggestions()
             /* Apple's checker loads its dictionary on its first call, which would otherwise
              * be the first space: 4 to 23 ms in a fresh keyboard on the simulator. So it is
@@ -660,12 +665,36 @@ final class KeyboardViewController: UIInputViewController {
         session.snippets = Dictionary(tools.snippets.map { ($0.trigger.lowercased(), $0.expansion) }) { _, newer in newer }
     }
 
+    /// What the app last left for the keyboard: its dictation session and a draft.
+    private typealias Stored = (session: KeyboardSessionState, draft: KeyboardDraftState)
+
+    private nonisolated static func readStored() throws -> Stored {
+        (try KeyboardSessionStore.shared().state(), try KeyboardDraftStore.shared().load())
+    }
+
     private func reload() {
         guard visible else { return }
+        reload(hasFullAccess ? Result { try Self.readStored() } : nil)
+    }
+
+    /// The ticker's reload. Its two coordinated reads held the main thread for about 3 ms
+    /// each second on the simulator, so they run off it; a reload that lands meanwhile is
+    /// newer, and this one is dropped.
+    private func reloadOffMain() async {
+        guard visible, hasFullAccess else { return reload() }
+        let reloadsBefore = reloads
+        let stored = await Task.detached(priority: .userInitiated) { Result { try Self.readStored() } }.value
+        guard reloads == reloadsBefore else { return }
+        reload(stored)
+    }
+
+    private func reload(_ stored: Result<Stored, Error>?) {
+        guard visible else { return }
+        reloads += 1
         lastReloadedDocumentID = documentID
         state.hasFullAccess = hasFullAccess
         state.startURL = DictationLink.keyboardURL(documentID: lastReloadedDocumentID, language: typing.language)
-        guard hasFullAccess else {
+        guard hasFullAccess, let stored else {
             state.draft = nil
             state.session = KeyboardSessionState()
             state.notice = nil
@@ -674,7 +703,8 @@ final class KeyboardViewController: UIInputViewController {
         }
         state.needsSetup = !DictationPreferences.keyboardEnabled || !DictationPreferences.keyboardMicrophoneAllowed
         do {
-            state.session = try KeyboardSessionStore.shared().state()
+            let (session, draft) = try stored.get()
+            state.session = session
             if let requestedAt {
                 if state.session.requestID == requestedID {
                     self.requestedAt = nil
@@ -692,7 +722,7 @@ final class KeyboardViewController: UIInputViewController {
                state.session.phase == .listening || state.session.phase == .finishing {
                 state.route = .appSession
             }
-            switch try KeyboardDraftStore.shared().load() {
+            switch draft {
             case .waiting(let draft):
                 state.draft = draft
                 // Never send a delayed result to a different text field or app.
@@ -762,6 +792,15 @@ final class KeyboardViewController: UIInputViewController {
         }
         microphone.attach(to: view)
         self.microphone = microphone
+    }
+
+    /// A keyboard over its memory limit is ended by the system, so under pressure the page
+    /// is let go unless it is listening. The next appear or Dictate sets it up again.
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        guard let microphone, dictation.phase == .idle else { return }
+        microphone.detach()
+        self.microphone = nil
     }
 
     /// Sona's own draft errors say what happened; anything else from the shared storage
@@ -967,7 +1006,7 @@ private struct KeyboardView: View {
 
     private func keys(_ rows: [[KeyCap]]) -> some View {
         KeyRows(model: typing, rows: rows)
-            .overlay { SwipeTrail(points: typing.trail) }
+            .overlay { SwipeTrail(model: typing) }
             .overlay {
                 KeySurface(
                     model: typing, rows: rows,
@@ -1280,11 +1319,13 @@ private struct MicControl: View {
     }
 }
 
-/// The path a swipe has drawn so far.
+/// The path a swipe has drawn so far. It reads the trail itself, so a finger moving redraws
+/// only the trail and not the keys under it.
 private struct SwipeTrail: View {
-    let points: [CGPoint]
+    let model: TypingModel
 
     var body: some View {
+        let points = model.trail
         Canvas { context, _ in
             guard let first = points.first else { return }
             var path = Path()

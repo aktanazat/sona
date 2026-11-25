@@ -13,6 +13,7 @@ struct KeyboardMicrophoneTests {
         var onReload: (() -> Void)?
         private(set) var calls: [String] = []
         func attach(to view: UIView) { onMessage?(["type": "ready"]) }
+        func detach() {}
         func run(_ call: String) { calls.append(call) }
     }
 

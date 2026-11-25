@@ -100,6 +100,9 @@ enum UploadQueueError: Error, Equatable {
 /// a queued object's lifetime.
 actor UploadQueue {
     private static let recordingAudioFile = "audio.pcm"
+    /// Chunks of one upload sent at once, so a long recording or a thought with several
+    /// photos does not wait a round trip per chunk.
+    private static let chunksInFlight = 3
 
     private let root: URL
     private let identity: DeviceIdentity
@@ -307,18 +310,28 @@ actor UploadQueue {
         let accepted = Set(created.acceptedIndexes)
         let committed: UploadCommittedResponse
         do {
-            for index in item.chunkSizes.indices where !accepted.contains(index) {
-                let ciphertext = try Data(contentsOf: chunkURL(item, index: index))
-                _ = try await client.putChunk(
-                    identity: identity,
-                    vaultId: credentials.vaultId,
-                    idempotencyKey: stableIdempotencyKey([
-                        scope, item.objectId, item.revisionId, "chunk-\(index)",
-                    ]),
-                    uploadId: item.uploadId,
-                    index: index,
-                    ciphertext: ciphertext
-                )
+            let identity = identity
+            let vaultId = credentials.vaultId
+            let uploadId = item.uploadId
+            let chunks = item.chunkSizes.indices.filter { !accepted.contains($0) }.map { index in
+                (index: index, url: chunkURL(item, index: index),
+                 key: stableIdempotencyKey([scope, item.objectId, item.revisionId, "chunk-\(index)"]))
+            }
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for (sent, chunk) in chunks.enumerated() {
+                    if sent >= Self.chunksInFlight { try await group.next() }
+                    group.addTask {
+                        _ = try await client.putChunk(
+                            identity: identity,
+                            vaultId: vaultId,
+                            idempotencyKey: chunk.key,
+                            uploadId: uploadId,
+                            index: chunk.index,
+                            ciphertext: try Data(contentsOf: chunk.url)
+                        )
+                    }
+                }
+                try await group.waitForAll()
             }
             committed = try await client.commitUpload(
                 identity: identity,

@@ -18,6 +18,8 @@ protocol CapturePage: AnyObject {
     /// The page's process ended and the page is loading again; it posts `ready` once loaded.
     var onReload: (() -> Void)? { get set }
     func attach(to view: UIView)
+    /// Takes the page out of the view it was attached to, so it can be let go.
+    func detach()
     func run(_ call: String)
 }
 
@@ -97,6 +99,13 @@ final class KeyboardMicrophone {
     /// WebKit throttles a web view outside a window, so the page stays in the keyboard's view.
     func attach(to view: UIView) {
         page.attach(to: view)
+    }
+
+    /// Stops anything under way and takes the page out of the keyboard's view.
+    func detach() {
+        abandon()
+        discardAudio()
+        page.detach()
     }
 
     func start(language: String, hints: [String]) {
@@ -372,6 +381,11 @@ final class WebCapturePage: NSObject, CapturePage, WKUIDelegate, WKNavigationDel
         guard webView.superview == nil else { return }
         view.insertSubview(webView, at: 0)
         webView.loadHTMLString(Self.page, baseURL: Self.origin)
+    }
+
+    func detach() {
+        webView.stopLoading()
+        webView.removeFromSuperview()
     }
 
     func run(_ call: String) {
