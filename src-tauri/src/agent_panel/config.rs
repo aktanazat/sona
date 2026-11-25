@@ -8,7 +8,7 @@ use super::protocol::{
 };
 use crate::audio_toolkit::audio::{list_input_devices, list_output_devices};
 use crate::managers::model::ModelManager;
-use crate::settings::{self, AppSettings, RecordingRetentionPeriod};
+use crate::settings::{self, AppSettings, MicrophoneConfiguration, RecordingRetentionPeriod};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
@@ -84,7 +84,6 @@ enum ResolvedChange {
     AudioVolume(f32),
     PlaybackWhileRecording(crate::settings::PlaybackWhileRecording),
     OutputDevice(Option<String>),
-    Microphone(Option<String>),
     DefaultModel(String),
     Language(String),
     Spelling(crate::settings::EnglishSpelling),
@@ -96,6 +95,13 @@ enum ResolvedChange {
     UpdateNoteVisibility(bool),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MicrophoneProposal {
+    selected: Option<Option<String>>,
+    priority: Option<Vec<String>>,
+    excluded: Option<Vec<String>>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SettingUndo {
     Theme(crate::settings::Theme),
@@ -105,7 +111,10 @@ pub(crate) enum SettingUndo {
     AudioVolume(f32),
     PlaybackWhileRecording(crate::settings::PlaybackWhileRecording),
     OutputDevice(Option<String>),
-    Microphone(Option<String>, bool),
+    Microphone {
+        configuration: MicrophoneConfiguration,
+        clamshell: Option<String>,
+    },
     DefaultModel {
         model_id: String,
         onboarding_completed: bool,
@@ -137,7 +146,7 @@ impl SettingUndo {
             Self::AudioVolume(_) => SettingKind::AudioVolume,
             Self::PlaybackWhileRecording(_) => SettingKind::PlaybackWhileRecording,
             Self::OutputDevice(_) => SettingKind::OutputDevice,
-            Self::Microphone(..) => SettingKind::Microphone,
+            Self::Microphone { .. } => SettingKind::Microphone,
             Self::DefaultModel { .. } => SettingKind::DefaultModel,
             Self::Language { .. } => SettingKind::Language,
             Self::Spelling(_) => SettingKind::Spelling,
@@ -483,8 +492,14 @@ pub(super) fn apply_changes_to_settings(
     changes: &[SonaSettingChangeV1],
     allowed: &SonaAllowedValuesV1,
 ) -> Result<Vec<SettingUndo>, ConfigError> {
-    let resolved = resolve_changes(changes, allowed)?;
-    mutate_settings(settings, expected_revision, &resolved)
+    let (changes, microphone) = resolve_changes(changes, allowed)?;
+    mutate_settings(
+        settings,
+        expected_revision,
+        &changes,
+        microphone,
+        &allowed.input_device_names,
+    )
 }
 
 /// The undo beside whether it reached the disk; like an apply, it is live
@@ -510,14 +525,6 @@ pub(super) fn undo_changes_to_settings(
     if settings.settings_revision != expected_revision {
         return Err(ConfigError::StaleRevision);
     }
-    for change in undo {
-        if let SettingUndo::Microphone(value, _) = change {
-            settings
-                .microphone_preferences
-                .validate_selected(value.as_deref())
-                .map_err(|_| ConfigError::InvalidSetting)?;
-        }
-    }
     for change in undo.iter().rev() {
         restore_setting(settings, change)?;
     }
@@ -527,9 +534,10 @@ pub(super) fn undo_changes_to_settings(
 fn resolve_changes(
     changes: &[SonaSettingChangeV1],
     allowed: &SonaAllowedValuesV1,
-) -> Result<Vec<ResolvedChange>, ConfigError> {
+) -> Result<(Vec<ResolvedChange>, Option<MicrophoneProposal>), ConfigError> {
     let mut keys = BTreeSet::new();
     let mut resolved = Vec::with_capacity(changes.len());
+    let mut microphone = None;
     for change in changes {
         if !keys.insert(change.key_name()) {
             return Err(ConfigError::InvalidProposal);
@@ -551,7 +559,27 @@ fn resolve_changes(
                 ResolvedChange::OutputDevice(resolve_device(id, &allowed.output_device_names)?)
             }
             SonaSettingChangeV1::MicrophoneId(id) => {
-                ResolvedChange::Microphone(resolve_device(id, &allowed.input_device_names)?)
+                microphone
+                    .get_or_insert_with(MicrophoneProposal::default)
+                    .selected = Some(resolve_device(id, &allowed.input_device_names)?);
+                continue;
+            }
+            SonaSettingChangeV1::MicrophoneFavoriteOrder(ids)
+            | SonaSettingChangeV1::MicrophoneExcludedIds(ids) => {
+                change
+                    .validate(allowed)
+                    .map_err(|_| ConfigError::InvalidSetting)?;
+                let names = ids
+                    .iter()
+                    .map(|id| allowed.input_device_names[id].clone())
+                    .collect();
+                let microphone = microphone.get_or_insert_with(MicrophoneProposal::default);
+                if matches!(change, SonaSettingChangeV1::MicrophoneFavoriteOrder(_)) {
+                    microphone.priority = Some(names);
+                } else {
+                    microphone.excluded = Some(names);
+                }
+                continue;
             }
             SonaSettingChangeV1::DefaultTranscriptionModel(id)
                 if allowed.model_ids.contains(id) =>
@@ -585,7 +613,7 @@ fn resolve_changes(
         };
         resolved.push(value);
     }
-    Ok(resolved)
+    Ok((resolved, microphone))
 }
 
 fn resolve_device(
@@ -602,23 +630,102 @@ fn resolve_device(
         .ok_or(ConfigError::InvalidSetting)
 }
 
+fn replace_connected_names(
+    saved: &[String],
+    replacement: Vec<String>,
+    connected: &BTreeSet<&str>,
+) -> Vec<String> {
+    let mut replacement = replacement.into_iter();
+    let mut names = Vec::with_capacity(saved.len().max(replacement.len()));
+    for name in saved {
+        if connected.contains(name.as_str()) {
+            names.extend(replacement.next());
+        } else {
+            names.push(name.clone());
+        }
+    }
+    names.extend(replacement);
+    names
+}
+
+impl MicrophoneProposal {
+    fn apply(
+        self,
+        settings: &mut AppSettings,
+        input_device_names: &BTreeMap<String, String>,
+    ) -> Result<SettingUndo, ConfigError> {
+        let prefer = self.priority.is_some();
+        let current = &settings.microphone_preferences;
+        let connected = if prefer || self.excluded.is_some() {
+            input_device_names
+                .values()
+                .map(String::as_str)
+                .filter(|name| !name.is_empty())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let priority = match self.priority {
+            Some(order) => replace_connected_names(&current.priority, order, &connected),
+            None => current.priority.clone(),
+        };
+        let excluding = self.excluded.is_some();
+        let excluded = match self.excluded {
+            Some(names) => replace_connected_names(&current.excluded, names, &connected),
+            None => current.excluded.clone(),
+        };
+        let use_system_default = match &self.selected {
+            Some(None) => true,
+            _ => !prefer && current.use_system_default,
+        };
+        let preferences = settings::MicrophonePreferences {
+            use_system_default,
+            priority,
+            excluded,
+        };
+        let selected = match self.selected {
+            Some(selected) => selected,
+            None if prefer => None,
+            None => settings
+                .selected_microphone
+                .as_ref()
+                .filter(|name| !excluding || !preferences.excludes(name))
+                .cloned(),
+        };
+        let clamshell = settings.clamshell_microphone.clone();
+        let configuration = MicrophoneConfiguration {
+            selected,
+            preferences,
+        }
+        .replace(settings)
+        .map_err(|_| ConfigError::InvalidSetting)?;
+        Ok(SettingUndo::Microphone {
+            configuration,
+            clamshell,
+        })
+    }
+}
+
 fn mutate_settings(
     settings: &mut AppSettings,
     expected_revision: u64,
     changes: &[ResolvedChange],
+    microphone: Option<MicrophoneProposal>,
+    input_device_names: &BTreeMap<String, String>,
 ) -> Result<Vec<SettingUndo>, ConfigError> {
     if settings.settings_revision != expected_revision {
         return Err(ConfigError::StaleRevision);
     }
-    for change in changes {
-        if let ResolvedChange::Microphone(value) = change {
-            settings
-                .microphone_preferences
-                .validate_selected(value.as_deref())
-                .map_err(|_| ConfigError::InvalidSetting)?;
-        }
+    if changes.iter().any(|change| {
+        matches!(change, ResolvedChange::ModeSelection(id)
+            if !settings.modes.iter().any(|mode| mode.id == *id))
+    }) {
+        return Err(ConfigError::InvalidSetting);
     }
-    let mut undo = Vec::with_capacity(changes.len());
+    let mut undo = Vec::with_capacity(changes.len() + usize::from(microphone.is_some()));
+    if let Some(microphone) = microphone {
+        undo.push(microphone.apply(settings, input_device_names)?);
+    }
     for change in changes {
         let prior = match change {
             ResolvedChange::Theme(value) => {
@@ -654,17 +761,6 @@ fn mutate_settings(
             ResolvedChange::OutputDevice(value) => {
                 let prior = SettingUndo::OutputDevice(settings.selected_output_device.clone());
                 settings.selected_output_device = value.clone();
-                prior
-            }
-            ResolvedChange::Microphone(value) => {
-                let prior = SettingUndo::Microphone(
-                    settings.selected_microphone.clone(),
-                    settings.microphone_preferences.use_system_default,
-                );
-                if value.is_none() {
-                    settings.microphone_preferences.use_system_default = true;
-                }
-                settings.selected_microphone = value.clone();
                 prior
             }
             ResolvedChange::DefaultModel(value) => {
@@ -717,9 +813,6 @@ fn mutate_settings(
                 prior
             }
             ResolvedChange::ModeSelection(value) => {
-                if !settings.modes.iter().any(|mode| mode.id == *value) {
-                    return Err(ConfigError::InvalidSetting);
-                }
                 let prior = SettingUndo::ModeSelection(settings.active_mode_id.clone());
                 settings.active_mode_id = value.clone();
                 prior
@@ -782,9 +875,13 @@ fn restore_setting(settings: &mut AppSettings, undo: &SettingUndo) -> Result<(),
         SettingUndo::AudioVolume(value) => settings.audio_feedback_volume = *value,
         SettingUndo::PlaybackWhileRecording(value) => settings.playback_while_recording = *value,
         SettingUndo::OutputDevice(value) => settings.selected_output_device = value.clone(),
-        SettingUndo::Microphone(value, use_system_default) => {
-            settings.selected_microphone = value.clone();
-            settings.microphone_preferences.use_system_default = *use_system_default;
+        SettingUndo::Microphone {
+            configuration,
+            clamshell,
+        } => {
+            settings.selected_microphone = configuration.selected.clone();
+            settings.microphone_preferences = configuration.preferences.clone();
+            settings.clamshell_microphone = clamshell.clone();
         }
         SettingUndo::DefaultModel {
             model_id,
@@ -970,6 +1067,8 @@ mod tests {
             &mut settings,
             expected_revision,
             &[ResolvedChange::Theme(Theme::Dark)],
+            None,
+            &BTreeMap::new(),
         );
         assert_eq!(result, Err(ConfigError::StaleRevision));
         assert_eq!(settings.theme, before.theme);
@@ -989,6 +1088,8 @@ mod tests {
                 ResolvedChange::Theme(Theme::Dark),
                 ResolvedChange::OverlayStyle(OverlayStyle::Minimal),
             ],
+            None,
+            &BTreeMap::new(),
         )
         .expect("settings mutate");
         settings.settings_revision = settings.settings_revision.saturating_add(1);
@@ -1022,6 +1123,70 @@ mod tests {
             ),
             Err(ConfigError::InvalidSetting)
         );
+    }
+
+    #[test]
+    fn microphone_list_proposal_reorders_known_choices_and_undo_restores_closed_lid_input() {
+        let mut settings = get_default_settings();
+        settings.clamshell_microphone = Some("Microphone".into());
+        settings.microphone_preferences.priority = vec!["Offline headset".into()];
+        settings.microphone_preferences.excluded = vec!["Offline loopback".into()];
+        let names = device_names();
+        let allowed = snapshot_from_parts(&settings, &[], &names).allowed_values(&names);
+        let changes = serde_json::from_value::<Vec<SonaSettingChangeV1>>(serde_json::json!([
+            {"key": "microphone_favorite_order", "value": ["input-1"]},
+            {"key": "microphone_excluded_ids", "value": ["input-1"]}
+        ]))
+        .expect("the advertised microphone proposal decodes");
+
+        let revision = settings.settings_revision;
+        let undo = apply_changes_to_settings(&mut settings, revision, &changes, &allowed)
+            .expect("the reviewed microphone proposal applies");
+        assert_eq!(
+            settings.microphone_preferences.priority,
+            ["Offline headset", "Microphone"]
+        );
+        assert_eq!(
+            settings.microphone_preferences.excluded,
+            ["Offline loopback", "Microphone"]
+        );
+        assert!(!settings.microphone_preferences.use_system_default);
+        assert_eq!(settings.clamshell_microphone, None);
+
+        undo_changes_to_settings(&mut settings, revision, &undo).expect("undo restores the offer");
+        assert_eq!(settings.clamshell_microphone.as_deref(), Some("Microphone"));
+        assert_eq!(
+            settings.microphone_preferences.priority,
+            ["Offline headset"]
+        );
+        assert_eq!(
+            settings.microphone_preferences.excluded,
+            ["Offline loopback"]
+        );
+        assert!(settings.microphone_preferences.use_system_default);
+    }
+
+    #[test]
+    fn selecting_and_excluding_the_same_microphone_refuses_the_whole_proposal() {
+        let mut settings = get_default_settings();
+        settings.theme = Theme::Light;
+        let names = device_names();
+        let allowed = snapshot_from_parts(&settings, &[], &names).allowed_values(&names);
+        let changes = serde_json::from_value::<Vec<SonaSettingChangeV1>>(serde_json::json!([
+            {"key": "theme", "value": "dark"},
+            {"key": "microphone_id", "value": "input-1"},
+            {"key": "microphone_excluded_ids", "value": ["input-1"]}
+        ]))
+        .expect("the advertised microphone proposal decodes");
+
+        let revision = settings.settings_revision;
+        assert_eq!(
+            apply_changes_to_settings(&mut settings, revision, &changes, &allowed),
+            Err(ConfigError::InvalidSetting)
+        );
+        assert_eq!(settings.theme, Theme::Light);
+        assert_eq!(settings.selected_microphone, None);
+        assert!(settings.microphone_preferences.excluded.is_empty());
     }
 
     /// A settings save that failed still left the change live, because the

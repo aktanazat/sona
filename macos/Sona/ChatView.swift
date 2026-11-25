@@ -583,7 +583,7 @@ private struct ChatProposalCard: View {
                     .bodyText(14)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(proposal.actions) { change in
-                    Text(change.line)
+                    Text(change.line(microphoneNames: proposal.microphoneNames ?? [:]))
                         .metaText()
                         .fixedSize(horizontal: false, vertical: true)
                 }

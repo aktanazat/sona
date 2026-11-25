@@ -753,9 +753,13 @@ enum AgentPanelConfirmation: String, Decodable {
 /// says "make it quieter" is not the same disclosure as "Audio volume: 0.3".
 struct AgentPanelSettingChange: Decodable, Identifiable {
     let key: String
-    /// The target, in the reader's words: a switch says On or Off, a list of
-    /// switches says which, and everything else is what the wire said.
-    let value: String
+    private let target: Target
+
+    private enum Target {
+        case value(String)
+        case microphoneID(String)
+        case microphoneIDs([String])
+    }
 
     var id: String { key }
 
@@ -764,12 +768,32 @@ struct AgentPanelSettingChange: Decodable, Identifiable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Key.self)
         key = try container.decode(String.self, forKey: .key)
-        value = try Self.render(container)
+        switch key {
+        case "microphone_favorite_order", "microphone_excluded_ids":
+            target = .microphoneIDs(try container.decode([String].self, forKey: .value))
+        case "microphone_id":
+            target = .microphoneID(try container.decode(String.self, forKey: .value))
+        default:
+            target = .value(try Self.render(container))
+        }
     }
 
-    /// What the card says: the setting's name as Settings spells it, then
-    /// the target.
-    var line: String { "\(Self.name(key)): \(value)" }
+    func line(microphoneNames: [String: String]) -> String {
+        switch target {
+        case .value(let value):
+            return "\(Self.name(key)): \(value)"
+        case .microphoneID(let id):
+            let name = id == "default" ? String(localized: "System default") : microphoneNames[id] ?? id
+            return String(localized: "Microphone: \(name)")
+        case .microphoneIDs(let ids):
+            let names = ids.map { microphoneNames[$0] ?? $0 }
+            let list = names.isEmpty ? String(localized: "None") : names.formatted()
+            if key == "microphone_favorite_order" {
+                return String(localized: "Connected microphone favourites: \(list)")
+            }
+            return String(localized: "Connected microphones excluded: \(list)")
+        }
+    }
 
     private static func render(_ container: KeyedDecodingContainer<Key>) throws -> String {
         if let flag = try? container.decode(Bool.self, forKey: .value) {
@@ -802,6 +826,7 @@ struct AgentPanelProposal: Decodable {
     let summary: String
     let rationale: String
     let actions: [AgentPanelSettingChange]
+    let microphoneNames: [String: String]?
     let followUpQuestion: String?
     let sourceSettingsRevision: UInt64
     let confirmation: AgentPanelConfirmation

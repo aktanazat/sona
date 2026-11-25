@@ -530,6 +530,8 @@ pub enum SonaSettingChangeV1 {
     PlaybackWhileRecording(PlaybackWhileRecording),
     AudioOutputDeviceId(String),
     MicrophoneId(String),
+    MicrophoneFavoriteOrder(Vec<String>),
+    MicrophoneExcludedIds(Vec<String>),
     DefaultTranscriptionModel(String),
     Language(String),
     SpellingBehavior(EnglishSpelling),
@@ -1337,6 +1339,8 @@ impl SonaSettingChangeV1 {
             | Self::PlaybackWhileRecording(_)
             | Self::AudioOutputDeviceId(_)
             | Self::MicrophoneId(_)
+            | Self::MicrophoneFavoriteOrder(_)
+            | Self::MicrophoneExcludedIds(_)
             | Self::DefaultTranscriptionModel(_)
             | Self::Language(_)
             | Self::SpellingBehavior(_)
@@ -1362,6 +1366,8 @@ impl SonaSettingChangeV1 {
             Self::PlaybackWhileRecording(_) => "playback_while_recording",
             Self::AudioOutputDeviceId(_) => "audio_output_device_id",
             Self::MicrophoneId(_) => "microphone_id",
+            Self::MicrophoneFavoriteOrder(_) => "microphone_favorite_order",
+            Self::MicrophoneExcludedIds(_) => "microphone_excluded_ids",
             Self::DefaultTranscriptionModel(_) => "default_transcription_model",
             Self::Language(_) => "language",
             Self::SpellingBehavior(_) => "spelling_behavior",
@@ -1374,7 +1380,10 @@ impl SonaSettingChangeV1 {
         }
     }
 
-    fn validate(&self, allowed: &SonaAllowedValuesV1) -> Result<(), ProposalValidationError> {
+    pub(super) fn validate(
+        &self,
+        allowed: &SonaAllowedValuesV1,
+    ) -> Result<(), ProposalValidationError> {
         match self {
             Self::AudioVolume(value) if !value.is_finite() || !(0.0..=1.0).contains(value) => {
                 Err(ProposalValidationError::InvalidSettingValue)
@@ -1384,6 +1393,21 @@ impl SonaSettingChangeV1 {
             }
             Self::MicrophoneId(id) if !allowed.input_device_names.contains_key(id) => {
                 Err(ProposalValidationError::UnknownInputDevice)
+            }
+            Self::MicrophoneFavoriteOrder(ids) | Self::MicrophoneExcludedIds(ids) => {
+                if !identifier_list_is_valid(ids) {
+                    return Err(ProposalValidationError::InvalidSettingValue);
+                }
+                if ids.iter().any(|id| {
+                    id == "default"
+                        || allowed
+                            .input_device_names
+                            .get(id)
+                            .is_none_or(|name| name.trim().is_empty())
+                }) {
+                    return Err(ProposalValidationError::UnknownInputDevice);
+                }
+                Ok(())
             }
             Self::DefaultTranscriptionModel(id) if !allowed.model_ids.contains(id) => {
                 Err(ProposalValidationError::UnknownModel)

@@ -380,11 +380,31 @@ struct StoredProposal {
 
 impl StoredProposal {
     fn preview(&self) -> AgentPanelProposalPreviewV1 {
+        let microphone_names = self
+            .proposal
+            .actions
+            .iter()
+            .flat_map(|action| match action {
+                SonaSettingChangeV1::MicrophoneId(id) if id != "default" => {
+                    std::slice::from_ref(id)
+                }
+                SonaSettingChangeV1::MicrophoneFavoriteOrder(ids)
+                | SonaSettingChangeV1::MicrophoneExcludedIds(ids) => ids.as_slice(),
+                _ => &[],
+            })
+            .filter_map(|id| {
+                self.allowed
+                    .input_device_names
+                    .get(id)
+                    .map(|name| (id.clone(), name.clone()))
+            })
+            .collect();
         AgentPanelProposalPreviewV1 {
             proposal_id: self.id.clone(),
             summary: self.proposal.summary.clone(),
             rationale: self.proposal.rationale.clone(),
             actions: self.proposal.actions.clone(),
+            microphone_names,
             follow_up_question: self.proposal.follow_up_question.clone(),
             source_settings_revision: self.proposal.source_settings_revision,
             confirmation: strongest_confirmation(&self.proposal.actions),

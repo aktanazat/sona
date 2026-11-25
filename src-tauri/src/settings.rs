@@ -1328,6 +1328,10 @@ pub struct MicrophoneConfiguration {
 
 impl MicrophoneConfiguration {
     pub fn apply(self, settings: &mut AppSettings) -> Result<(), String> {
+        self.replace(settings).map(drop)
+    }
+
+    pub(crate) fn replace(self, settings: &mut AppSettings) -> Result<Self, String> {
         self.preferences.validate()?;
         self.preferences
             .validate_selected(self.selected.as_deref())?;
@@ -1338,9 +1342,10 @@ impl MicrophoneConfiguration {
         {
             settings.clamshell_microphone = None;
         }
-        settings.selected_microphone = self.selected;
-        settings.microphone_preferences = self.preferences;
-        Ok(())
+        Ok(Self {
+            selected: std::mem::replace(&mut settings.selected_microphone, self.selected),
+            preferences: std::mem::replace(&mut settings.microphone_preferences, self.preferences),
+        })
     }
 }
 
