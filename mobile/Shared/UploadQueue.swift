@@ -647,9 +647,7 @@ actor UploadQueue {
         stored.attempts += 1
         stored.lastError = String(describing: UploadQueueError.uploadGone)
         stored.parked = false
-        /* A second out, so the retry timer, which waits only for deadlines still ahead,
-         * picks the restarted upload up within this run. */
-        stored.nextAttemptUtcMs = Int64(Date().timeIntervalSince1970 * 1000) + 1000
+        stored.nextAttemptUtcMs = 0
         try? save(stored)
     }
 
