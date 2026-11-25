@@ -430,7 +430,9 @@ final class Core: @unchecked Sendable {
         for continuation in waiting {
             continuation.resume(throwing: CoreError.closed)
         }
-        close(socket)
+        // Under the write lock, so a frame being written finishes on this socket before
+        // its number can be reused by the next connection.
+        writeLock.withLock { _ = close(socket) }
         if let closed {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { closed() }

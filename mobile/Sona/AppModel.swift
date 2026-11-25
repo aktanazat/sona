@@ -720,7 +720,19 @@ final class AppModel: NSObject, ObservableObject {
         uploadRetryTimer?.invalidate()
         uploadRetryTimer = nil
         draining = true
-        defer { draining = false }
+        /* The pass holds the time iOS gives a backgrounded app, so a recording queued while
+         * another pass runs (a stop on a locked phone, a watch file) is sent before suspension:
+         * callers that find a pass running return at once and rely on this one. */
+        var working = UIBackgroundTaskIdentifier.invalid
+        let release = {
+            if working != .invalid { UIApplication.shared.endBackgroundTask(working) }
+            working = .invalid
+        }
+        working = UIApplication.shared.beginBackgroundTask(withName: "Upload recordings") { release() }
+        defer {
+            draining = false
+            release()
+        }
         var retryCutoff: Date?
         repeat {
             drainAgain = false

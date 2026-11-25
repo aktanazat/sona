@@ -143,11 +143,17 @@ export function createServer(
 
 /* Run as the binary: take stdio. Imported: do nothing, so a test can hold a
  * server of its own without racing this one for the same file descriptors.
- * Guidance that cannot be read (Sona closed, access off) is left out. */
+ * Guidance that cannot be read in two seconds (Sona closed, access off, a keychain
+ * prompt) is left out, so the handshake is never held up waiting for it. */
 if (import.meta.main) {
-  const guidance = await runSona(["work", "guidance", "--json"]).then(
-    (answer) => GUIDANCE.safeParse(answer).data?.current.text ?? "",
-    () => "",
-  );
+  const deadline = Promise.withResolvers<string>();
+  setTimeout(() => deadline.resolve(""), 2000).unref();
+  const guidance = await Promise.race([
+    runSona(["work", "guidance", "--json"]).then(
+      (answer) => GUIDANCE.safeParse(answer).data?.current.text ?? "",
+      () => "",
+    ),
+    deadline.promise,
+  ]);
   await createServer(undefined, guidance).connect(new StdioServerTransport());
 }

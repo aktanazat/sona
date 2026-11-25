@@ -120,14 +120,12 @@ extension WatchRecorder: WCSessionDelegate {
     ) {}
 
     /// The transfer outlives the recording view, so a failure is reported on the next
-    /// launch rather than lost.
+    /// launch rather than lost. A failed transfer is not tried again, so its file goes too.
     nonisolated func session(
         _ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?
     ) {
-        guard error != nil else {
-            try? FileManager.default.removeItem(at: fileTransfer.file.fileURL)
-            return
-        }
+        try? FileManager.default.removeItem(at: fileTransfer.file.fileURL)
+        guard error != nil else { return }
         Task { @MainActor [weak self] in
             self?.status = "watch.noPhone"
         }
