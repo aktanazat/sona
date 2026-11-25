@@ -245,6 +245,13 @@ pub enum WorkVerb {
     /// Copy an automation under a new name, turned off until you turn it on.
     #[command(name = "automation-copy")]
     LoopCopy(agent_loops::LoopCopyArgs),
+    /// Show the standing guidance that every agent and Talk to Sona answer follows,
+    /// with its earlier versions.
+    #[command(name = "guidance")]
+    Guidance,
+    /// Save the standing guidance. Pass "" to clear it. Each change is a new version.
+    #[command(name = "guidance-save")]
+    GuidanceSave(guidance::GuidanceSaveArgs),
     /// List note additions, project descriptions and project updates that
     /// automations proposed and that wait for you to accept in Triage.
     #[command(name = "doc-proposals")]
@@ -2041,6 +2048,8 @@ impl WorkVerb {
             | Self::Decline(routines::DeclineArgs { dry_run: true, .. })
             | Self::Templates
             | Self::LoopList
+            | Self::Guidance
+            | Self::GuidanceSave(guidance::GuidanceSaveArgs { dry_run: true, .. })
             | Self::LoopShow(_)
             | Self::LoopSave(agent_loops::LoopSaveArgs { dry_run: true, .. })
             | Self::LoopRun(agent_loops::LoopArgs { dry_run: true, .. })
@@ -2283,6 +2292,7 @@ impl WorkVerb {
             | Self::TemplateDelete(_)
             | Self::TemplateUse(_)
             | Self::LoopSave(_)
+            | Self::GuidanceSave(_)
             | Self::LoopRun(_)
             | Self::LoopEnable(_)
             | Self::LoopDisable(_)
@@ -2573,6 +2583,8 @@ pub enum WorkAnswer {
     AgentLoop(Box<agent_loops::ExternalAgentLoop>),
     AgentLoopChange(Box<agent_loops::ExternalAgentLoopChange>),
     AgentLoopRun(Box<agent_loops::ExternalAgentLoopRun>),
+    Guidance(guidance::ExternalGuidance),
+    GuidanceChange(Box<guidance::ExternalGuidanceChange>),
     Views(ExternalWorkViews),
     View(Box<ExternalWorkViewChange>),
     Export(ExternalWorkExport),
@@ -3434,6 +3446,8 @@ pub(super) async fn answer(
         WorkVerb::LoopList => tracker.loop_list(),
         WorkVerb::LoopShow(args) => tracker.loop_show(args),
         WorkVerb::LoopSave(args) => tracker.loop_save(args).await,
+        WorkVerb::Guidance => tracker.guidance(),
+        WorkVerb::GuidanceSave(args) => tracker.guidance_save(args),
         WorkVerb::LoopRun(args) => tracker.loop_run(args),
         WorkVerb::LoopEnable(args) => tracker.loop_enable(args, true),
         WorkVerb::LoopDisable(args) => tracker.loop_enable(args, false),
@@ -7375,6 +7389,7 @@ impl WorkAnswer {
             | Self::AgentLoop(_)
             | Self::AgentLoopChange(_)
             | Self::AgentLoopRun(_) => agent_loops::text(self, &mut text),
+            Self::Guidance(_) | Self::GuidanceChange(_) => guidance::text(self, &mut text),
             Self::Label(change) => {
                 let verb = match (change.deleted, &change.operation_id) {
                     (true, _) => "Deleted",
@@ -7565,6 +7580,8 @@ impl WorkAnswer {
             | Self::AgentLoops(_)
             | Self::AgentLoop(_)
             | Self::AgentLoopChange(_)
+            | Self::Guidance(_)
+            | Self::GuidanceChange(_)
             | Self::AgentLoopRun(_)
             | Self::Views(_)
             | Self::View(_)
@@ -8206,6 +8223,7 @@ mod roadmap;
 mod save;
 pub(crate) use save::MeetingFence;
 mod agent_loops;
+mod guidance;
 mod automations;
 mod dependencies;
 mod dictations;

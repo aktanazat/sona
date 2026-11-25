@@ -1010,6 +1010,7 @@ pub(crate) fn apply_all(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         crate::planning::work::inbox::UNBLOCKED_NOTICES_MIGRATION,
         crate::planning::work::inbox_settings::DOCK_BADGE_MIGRATION,
         crate::planning::catalog::PROJECT_POSITION_MIGRATION,
+        crate::planning::work::agents::GUIDANCE_MIGRATION,
     ] {
         conn.execute_batch(migration)?;
     }

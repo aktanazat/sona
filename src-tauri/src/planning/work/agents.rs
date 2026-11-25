@@ -972,10 +972,141 @@ fn priority_name(priority: u8) -> Option<&'static str> {
     }
 }
 
+/// The standing guidance the user wrote for every agent and Talk to Sona
+/// answer. Each save is a new version; the latest one is the current one.
+pub(crate) const GUIDANCE_MIGRATION: &str = "CREATE TABLE planning_guidance (
+    version INTEGER PRIMARY KEY CHECK(version > 0),
+    text TEXT NOT NULL,
+    saved_at_ms INTEGER NOT NULL,
+    saved_by TEXT NOT NULL
+);";
+
+/// The longest guidance, in characters: it is sent with every prompt.
+const GUIDANCE_CHARS: usize = 2_000;
+
+/// One saved version of the guidance. Version 0 with no text means none saved.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkGuidance {
+    pub version: i64,
+    pub text: String,
+    pub saved_at_ms: i64,
+    pub saved_by: String,
+}
+
+/// The current guidance, or version 0 with no text when none is saved.
+pub(crate) fn guidance(conn: &Connection) -> StorageResult<WorkGuidance> {
+    let current = conn
+        .query_row(
+            "SELECT version, text, saved_at_ms, saved_by FROM planning_guidance
+             ORDER BY version DESC LIMIT 1",
+            [],
+            guidance_row,
+        )
+        .optional()?;
+    Ok(current.unwrap_or(WorkGuidance {
+        version: 0,
+        text: String::new(),
+        saved_at_ms: 0,
+        saved_by: String::new(),
+    }))
+}
+
+/// Every saved version, newest first.
+pub(crate) fn guidance_history(conn: &Connection) -> StorageResult<Vec<WorkGuidance>> {
+    let mut statement = conn.prepare(
+        "SELECT version, text, saved_at_ms, saved_by FROM planning_guidance
+         ORDER BY version DESC",
+    )?;
+    let versions = statement
+        .query_map([], guidance_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(versions)
+}
+
+fn guidance_row(row: &Row<'_>) -> rusqlite::Result<WorkGuidance> {
+    Ok(WorkGuidance {
+        version: row.get(0)?,
+        text: row.get(1)?,
+        saved_at_ms: row.get(2)?,
+        saved_by: row.get(3)?,
+    })
+}
+
+/// Saves `text`, trimmed, as the next version. Text equal to the current one
+/// saves nothing and returns the current version.
+pub(crate) fn save_guidance(
+    conn: &Connection,
+    text: &str,
+    by: &str,
+    at_ms: i64,
+) -> StorageResult<WorkGuidance> {
+    let text = text.trim();
+    if text.chars().count() > GUIDANCE_CHARS {
+        return Err(Refusal::GuidanceTooLong.into());
+    }
+    let current = guidance(conn)?;
+    if current.text == text {
+        return Ok(current);
+    }
+    let version = current.version + 1;
+    conn.execute(
+        "INSERT INTO planning_guidance (version, text, saved_at_ms, saved_by)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![version, text, at_ms, by],
+    )?;
+    Ok(WorkGuidance {
+        version,
+        text: text.to_owned(),
+        saved_at_ms: at_ms,
+        saved_by: by.to_owned(),
+    })
+}
+
+/// Saves the standing guidance once per operation id. Empty text clears it.
+pub(crate) fn guidance_save_as(
+    app: &AppHandle,
+    operation_id: &str,
+    text: &str,
+    by: &str,
+) -> Result<WorkGuidance, String> {
+    let at_ms = now_ms();
+    app.state::<Arc<HistoryManager>>()
+        .with_connection(|conn| {
+            store::mutate(
+                conn,
+                operation_id,
+                "work_guidance_save",
+                &(text, by),
+                at_ms,
+                |tx| save_guidance(tx, text, by, at_ms),
+            )
+        })
+        .map_err(crate::planning::failure)
+}
+
+/// The guidance as a section of a prompt, or none while nothing is saved.
+pub(crate) fn guidance_block(app: &AppHandle) -> Result<Option<String>, String> {
+    let current = crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+        guidance(conn)
+    })?;
+    Ok((!current.text.is_empty()).then(|| {
+        format!(
+            "\nStanding guidance from the user, for every answer and change. \
+             Follow it unless the request says otherwise:\n{}\n",
+            current.text
+        )
+    }))
+}
+
 /// The words that hand an item to an agent: what to do, what was said, and
 /// the commands that report back. The first line names the item, so Sona
 /// can tell which watched session took it.
-fn prompt(detail: &WorkItemDetail, agent: &str, autonomy: WorkAutonomy) -> String {
+fn prompt(
+    detail: &WorkItemDetail,
+    agent: &str,
+    autonomy: WorkAutonomy,
+    guidance: Option<&str>,
+) -> String {
     let row = &detail.item;
     let item = &row.item;
     let handle = format!("S-{}", item.number);
@@ -1028,6 +1159,7 @@ fn prompt(detail: &WorkItemDetail, agent: &str, autonomy: WorkAutonomy) -> Strin
          - When it is finished: sona work done {handle} --evidence \"<link or one line>\" --agent \"{agent}\"{confirms}\n\
          Sona's MCP tools do the same: sona_work_claim, sona_work_get, sona_work_update, sona_work_done.\n"
     );
+    text.push_str(guidance.unwrap_or_default());
     text
 }
 
@@ -1042,6 +1174,7 @@ pub async fn work_delegate(
     id: String,
     agent: Option<String>,
 ) -> Result<WorkDelegation, String> {
+    let guidance = guidance_block(&app)?;
     let agent = agent.map(|agent| agent_name(Some(&agent)));
     let at_ms = now_ms();
     let doer = run_history(&app, |history| {
@@ -1077,7 +1210,12 @@ pub async fn work_delegate(
     })
     .await?;
     Ok(WorkDelegation {
-        prompt: Some(prompt(&detail, &doer.agent, autonomy(&app))),
+        prompt: Some(prompt(
+            &detail,
+            &doer.agent,
+            autonomy(&app),
+            guidance.as_deref(),
+        )),
         doer: Some(doer),
     })
 }
@@ -1671,5 +1809,19 @@ mod tests {
             [(crate::planning::EvidenceSourceKind::Link, url, true, true)]
         );
         assert_eq!(evidence_link("shipped in the morning build"), None);
+    }
+
+    #[test]
+    fn saved_guidance_keeps_each_version_and_refuses_long_text() {
+        let history = history();
+        assert_eq!(guidance(&history).unwrap().version, 0);
+        let first = save_guidance(&history, " Title tasks as verbs. ", "Aktan", AT).unwrap();
+        assert_eq!((first.version, first.text.as_str()), (1, "Title tasks as verbs."));
+        let same = save_guidance(&history, "Title tasks as verbs.", "Aktan", AT + 1).unwrap();
+        assert_eq!((same.version, same.saved_at_ms), (1, AT));
+        save_guidance(&history, "", "Aktan", AT + 2).unwrap();
+        assert_eq!(guidance(&history).unwrap().text, "");
+        assert_eq!(guidance_history(&history).unwrap().len(), 2);
+        assert!(save_guidance(&history, &"a".repeat(GUIDANCE_CHARS + 1), "Aktan", AT).is_err());
     }
 }
