@@ -1,8 +1,10 @@
 import {
   CHANGE_RETENTION_MS,
+  IDEMPOTENCY_RETENTION_MS,
   JOB_LEASE_MS,
   JOB_RETRY_MS,
   MAINTENANCE_PAGE_SIZE,
+  PURGE_PAGE_SIZE,
   type ApiErrorCode,
 } from "./constants";
 import {
@@ -136,7 +138,7 @@ async function cleanShare(
   env: Env,
   job: MaintenanceJobRow,
   now: number,
-): Promise<void> {
+): Promise<boolean> {
   const share = await env.DB.prepare(
     "SELECT upload_id FROM shares WHERE vault_id = ? AND share_id = ?",
   )
@@ -144,10 +146,10 @@ async function cleanShare(
     .first<{ upload_id: string }>();
   if (share === null) {
     await markDone(env, job, now);
-    return;
+    return false;
   }
   const shareJob: MaintenanceJobRow = { ...job, target_id: share.upload_id };
-  if (!(await cleanUpload(env, shareJob, now))) return;
+  if (!(await cleanUpload(env, shareJob, now))) return true;
   const session = await uploadSession(env, job.vault_id, share.upload_id);
   if (session?.cleanup_accounted === 1) {
     await env.DB.prepare(
@@ -157,13 +159,14 @@ async function cleanShare(
       .run();
   }
   await markDone(env, job, now);
+  return false;
 }
 
 async function cleanObject(
   env: Env,
   job: MaintenanceJobRow,
   now: number,
-): Promise<void> {
+): Promise<boolean> {
   const candidates = await env.DB.prepare(
     "SELECT rc.chunk_index, rc.r2_key, rc.byte_size, rc.digest FROM revision_chunks rc WHERE rc.vault_id = ? AND rc.object_id = ? AND rc.purged_at IS NULL AND rc.revision_id <> COALESCE((SELECT head_revision_id FROM object_heads WHERE vault_id = ? AND object_id = ? AND tombstone = 0), '') ORDER BY rc.revision_id, rc.chunk_index LIMIT ?",
   )
@@ -202,9 +205,10 @@ async function cleanObject(
       ).bind(candidates.results.length, now, now, job.job_id, job.lease_token),
     );
     await env.DB.batch(statements);
-    return;
+    return true;
   }
   await markDone(env, job, now);
+  return false;
 }
 
 async function reconcileUpload(
@@ -281,7 +285,7 @@ async function compactChanges(
   env: Env,
   job: MaintenanceJobRow,
   now: number,
-): Promise<void> {
+): Promise<boolean> {
   const cutoff = now - CHANGE_RETENTION_MS;
   const expired = await env.DB.prepare(
     "SELECT sequence FROM changes WHERE vault_id = ? AND created_at < ? ORDER BY sequence LIMIT ?",
@@ -311,33 +315,32 @@ async function compactChanges(
     ).bind(job.vault_id, job.vault_id, job.job_id, job.lease_token),
     state,
   ]);
+  return hasMore;
 }
 
+/** Process one page of a claimed job; true when another page is due now. */
 async function processClaimedJob(
   env: Env,
   job: MaintenanceJobRow,
   now: number,
-): Promise<void> {
+): Promise<boolean> {
   assertJobPayload(job);
   if (job.job_class === "cleanup_upload") {
-    if (await cleanUpload(env, job, now)) await markDone(env, job, now);
-    return;
+    if (!(await cleanUpload(env, job, now))) return true;
+    await markDone(env, job, now);
+    return false;
   }
-  if (job.job_class === "cleanup_share") {
-    await cleanShare(env, job, now);
-    return;
-  }
-  if (job.job_class === "cleanup_object") {
-    await cleanObject(env, job, now);
-    return;
-  }
+  if (job.job_class === "cleanup_share") return cleanShare(env, job, now);
+  if (job.job_class === "cleanup_object") return cleanObject(env, job, now);
   if (job.job_class === "reconcile_upload") {
     await reconcileUpload(env, job, now);
-    return;
+    return false;
   }
-  await compactChanges(env, job, now);
+  return compactChanges(env, job, now);
 }
 
+/* A job with another page left goes straight back on the queue, so a large
+ * cleanup finishes in seconds instead of one page per cron tick. */
 export async function processMaintenanceJob(
   env: Env,
   jobId: string,
@@ -346,8 +349,10 @@ export async function processMaintenanceJob(
   const job = await claimJob(env, jobId, now, now + JOB_LEASE_MS);
   if (job === null) return;
   try {
-    await processClaimedJob(env, job, now);
+    const continues = await processClaimedJob(env, job, now);
     logMaintenance(env, job.job_class, 200);
+    if (continues)
+      await env.MAINTENANCE.send({ job_id: job.job_id }).catch(() => undefined);
   } catch (error) {
     const code =
       error instanceof ApiProblem ? error.code : "dependency_unavailable";
@@ -450,7 +455,20 @@ async function purgeExpiredMutationNonces(
   await env.DB.prepare(
     "DELETE FROM mutation_nonces WHERE rowid IN (SELECT rowid FROM mutation_nonces WHERE expires_at <= ? ORDER BY expires_at LIMIT ?)",
   )
-    .bind(now, MAINTENANCE_PAGE_SIZE)
+    .bind(now, PURGE_PAGE_SIZE)
+    .run();
+}
+
+/* A retry that arrives after retention runs again instead of replaying; by
+ * then its upload has long expired and the change feed has moved past it. */
+async function purgeExpiredIdempotencyResults(
+  env: Env,
+  now: number,
+): Promise<void> {
+  await env.DB.prepare(
+    "DELETE FROM idempotency_results WHERE rowid IN (SELECT rowid FROM idempotency_results WHERE created_at < ? ORDER BY created_at LIMIT ?)",
+  )
+    .bind(now - IDEMPOTENCY_RETENTION_MS, PURGE_PAGE_SIZE)
     .run();
 }
 
@@ -482,6 +500,7 @@ export async function runMaintenance(
   await expireUploads(env, now);
   await expireShares(env, now);
   await purgeExpiredMutationNonces(env, now);
+  await purgeExpiredIdempotencyResults(env, now);
   await scheduleChangeCompaction(env, now);
   const jobs = await dueJobIds(env, now, MAINTENANCE_PAGE_SIZE);
   await processDueJobsInOrder(env, jobs, now);
