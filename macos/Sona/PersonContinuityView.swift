@@ -57,6 +57,7 @@ struct PersonContinuityView<Profile: View>: View {
                 switch tab {
                 case .profile:
                     PersonEmails(personId: personId)
+                    PersonDetails(personId: personId)
                     profile()
                 case .work: workContent
                 default: memoryContent
@@ -452,7 +453,7 @@ private struct PersonEmails: View {
             Card {
                 ForEach(Array(saved.enumerated()), id: \.element) { index, email in
                     CardRow {
-                        EmailField(prompt: "Email", saved: email) { edited in
+                        ProfileField(prompt: "Email", name: "Email", saved: email) { edited in
                             var next = saved
                             if edited.isEmpty { next.remove(at: index) } else { next[index] = edited }
                             store.setEmails(next)
@@ -468,7 +469,7 @@ private struct PersonEmails: View {
                     }
                 }
                 CardRow {
-                    EmailField(prompt: "Add an email", saved: "") { added in
+                    ProfileField(prompt: "Add an email", name: "Email", saved: "", adds: true) { added in
                         guard !added.isEmpty else { return }
                         store.setEmails(saved + [added])
                     }
@@ -479,19 +480,67 @@ private struct PersonEmails: View {
     }
 }
 
-private struct EmailField: View {
+/// The other names they go by, their role, organization and notes. Each
+/// edits in place and saves when it is left; an emptied one is cleared.
+private struct PersonDetails: View {
+    let personId: String
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let store = model.people
+        let person = store.detail.flatMap { $0.person.id == personId ? $0.person : nil }
+        PageSection("Details") {
+            Card {
+                row("Also known as", prompt: "Other names, separated by commas",
+                    saved: person?.aliases.joined(separator: ", ") ?? "") { text in
+                    let names = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                    store.setProfile(aliases: names.filter { !$0.isEmpty })
+                }
+                row("Role", prompt: "Role", saved: person?.role ?? "") { store.setProfile(role: $0) }
+                row("Organization", prompt: "Organization", saved: person?.organization ?? "") {
+                    store.setProfile(organization: $0)
+                }
+                row("Notes", prompt: "Notes", saved: person?.notes ?? "", axis: .vertical) {
+                    store.setProfile(notes: $0)
+                }
+            }
+        }
+        .disabled(store.busy || person == nil)
+    }
+
+    private func row(
+        _ name: String, prompt: String, saved: String, axis: Axis = .horizontal,
+        commit: @escaping (String) -> Void
+    ) -> some View {
+        CardRow {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(name).metaText(Theme.inkSecondary)
+                    .frame(width: 110, alignment: .leading)
+                    .accessibilityHidden(true)
+                ProfileField(prompt: prompt, name: name, saved: saved, axis: axis, commit: commit)
+            }
+        } trailing: { EmptyView() }
+    }
+}
+
+/// One profile value edited in place, saved when it is left. An adding
+/// field empties itself once it has saved.
+private struct ProfileField: View {
     let prompt: String
+    let name: String
     let saved: String
+    var adds = false
+    var axis: Axis = .horizontal
     let commit: (String) -> Void
     @State private var draft = ""
     @FocusState private var focused: Bool
 
     var body: some View {
-        TextField(prompt, text: $draft)
+        TextField(prompt, text: $draft, axis: axis)
             .textFieldStyle(.plain)
             .font(TypeScale.body(14))
             .focused($focused)
-            .accessibilityLabel(saved.isEmpty ? prompt : "Email \(saved)")
+            .accessibilityLabel(adds ? prompt : saved.isEmpty ? name : "\(name) \(saved)")
             .onAppear { draft = saved }
             .onChange(of: saved) { _, saved in draft = saved }
             .onSubmit { focused = false }
@@ -504,7 +553,7 @@ private struct EmailField: View {
                 let value = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard value != saved else { return }
                 commit(value)
-                if saved.isEmpty { draft = "" }
+                if adds { draft = "" }
             }
     }
 }

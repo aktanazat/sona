@@ -276,9 +276,9 @@ The MCP column says whether an agent over MCP can do it; `—` means no tool.
 | Person history, catch-up, what changed, stats | `person_memory` | `sona --person-catch-up ID`, `--person-changes ID --since-utc-ms`, `--person-stats ID` | `sona_person_catch_up`, `sona_person_changes`, `sona_person_stats` | both |
 | Person's work and open loops | `planning_person_work`, `work_list`, `open_loops_inbox` | `work list --owner PERSON`, `sona --loops [--mine\|--waiting]` | `sona_work_list` (`owner`), `sona_action_items` | both |
 | Person page in one read (summary, meeting links, documents, projects led or joined, contact) | `person_detail`, `planning_projects` (Projects on the Work tab) | `work person NAME` | `sona_person_get` | both |
-| Add a person directly | — (UI adds only through speaker naming or split) | `work person-save NAME` | `sona_person_save` | CLI only |
+| Add a person directly | `person_create` (Add person on People) | `work person-save NAME` | `sona_person_save` | both |
 | Rename | `person_rename` | `work person-save NEW --person OLD` | `sona_person_save` | both |
-| Other names, role, organization, notes | — | `work person-save NAME --aliases --role --org --notes` | `sona_person_save` | CLI only |
+| Other names, role, organization, notes | `person_profile_set` (Details on the Profile tab) | `work person-save NAME --aliases --role --org --notes` | `sona_person_save` | both |
 | Add, edit or remove an email | `person_emails_set` (Emails on the Profile tab) | `work person-save NAME --email` | `sona_person_save` (`email`) | both |
 | Merge into another person | `person_merge` | `work person-merge A --into B` | `sona_person_merge` *(opt-in)* | both |
 | Merge: choose which saved voice survives | `person_merge` (`voiceProfileResolution`) | `work person-merge A --into B --voice into\|from\|both` | `sona_person_merge` (`voice`) | both |

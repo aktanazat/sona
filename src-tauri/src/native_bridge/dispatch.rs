@@ -3753,6 +3753,30 @@ pub(super) async fn call(
                     .await,
             )
         }
+        "person_create" => {
+            let mut args = Args::parse(params)?;
+            let display_name = args.take("displayName")?;
+            reply(crate::commands::people::person_create(app.state(), display_name).await)
+        }
+        "person_profile_set" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            let aliases = args.take("aliases")?;
+            let role = args.take("role")?;
+            let organization = args.take("organization")?;
+            let notes = args.take("notes")?;
+            reply(
+                crate::commands::people::person_profile_set(
+                    app.state(),
+                    person_id,
+                    aliases,
+                    role,
+                    organization,
+                    notes,
+                )
+                .await,
+            )
+        }
         "person_merge" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

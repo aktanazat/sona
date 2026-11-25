@@ -112,6 +112,8 @@ struct PeopleListView: View {
     let store: PeopleStore
     var openMeeting: (String) -> Void = { _ in }
     @Environment(AppModel.self) private var model
+    @State private var adding = false
+    @State private var newName = ""
 
     static func open(_ personId: String, _ model: AppModel) {
         model.workFocus.peeking = false
@@ -129,7 +131,15 @@ struct PeopleListView: View {
                     }
                 }
             } action: {
-                EmptyView()
+                Button {
+                    newName = ""
+                    adding = true
+                } label: {
+                    Label("Add person", systemImage: "person.badge.plus")
+                }
+                .buttonStyle(.secondary)
+                .disabled(store.busy)
+                .help("Add someone before a meeting names them")
             }
             ErrorNote(store.error)
             if store.listFailed {
@@ -170,6 +180,14 @@ struct PeopleListView: View {
                 }
                 PeopleCompaniesSection(store: store)
             }
+        }
+        .alert("Add person", isPresented: $adding) {
+            TextField("Name", text: $newName)
+            Button("Add") {
+                let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !name.isEmpty { store.create(named: name) }
+            }
+            Button("Cancel", role: .cancel) {}
         }
     }
 

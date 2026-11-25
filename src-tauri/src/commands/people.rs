@@ -142,6 +142,36 @@ pub async fn person_emails_set(
     manager.person_profile_update(person_id, edit).await
 }
 
+/// Makes a person by name, before any meeting names them.
+pub async fn person_create(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    display_name: String,
+) -> Result<PeopleMutationResult, MeetingCommandError> {
+    manager
+        .person_profile_create(display_name, Default::default())
+        .await
+}
+
+/// Replaces a person's other names, role, organization or notes; one left
+/// out stays as it is, and an empty one is cleared.
+pub async fn person_profile_set(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    person_id: PersonId,
+    aliases: Option<Vec<String>>,
+    role: Option<String>,
+    organization: Option<String>,
+    notes: Option<String>,
+) -> Result<PeopleMutationResult, MeetingCommandError> {
+    let edit = crate::meeting::store::PersonProfileEdit {
+        aliases,
+        role,
+        organization,
+        notes,
+        ..Default::default()
+    };
+    manager.person_profile_update(person_id, edit).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn person_merge(

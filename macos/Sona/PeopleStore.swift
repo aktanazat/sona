@@ -285,6 +285,35 @@ final class PeopleStore {
         }
     }
 
+    /// Other names, role, organization or notes. A field left nil stays as
+    /// it is; an empty one is cleared.
+    func setProfile(aliases: [String]? = nil, role: String? = nil, organization: String? = nil, notes: String? = nil) {
+        guard case let .person(personId) = route else { return }
+        struct Params: Encodable {
+            let personId: String
+            let aliases: [String]?
+            let role: String?
+            let organization: String?
+            let notes: String?
+        }
+        write { _, core in
+            try await core.request(
+                "person_profile_set",
+                Params(personId: personId, aliases: aliases, role: role, organization: organization, notes: notes))
+        }
+    }
+
+    /// A person made by hand, before any meeting names them; their page
+    /// opens once they exist.
+    func create(named displayName: String) {
+        write(
+            { _, core in try await core.request("person_create", ["displayName": displayName]) },
+            then: { store, result in
+                guard let id = result.person?.id else { return store.reload() }
+                store.openPerson(id)
+            })
+    }
+
     func choosePhotoSource() {
         guard !busy, case let .person(personId) = route,
               let person = detail?.person, person.id == personId else { return }
