@@ -7,6 +7,7 @@ import {
 } from "./objects";
 
 export const PROMPT_VERSION = 1;
+const MODEL_TIMEOUT_MS = 2 * 60 * 1000;
 export const UNSORTED: Cluster = {
   hue: clusterHue("unsorted"),
   key: "unsorted",
@@ -89,6 +90,7 @@ export async function classify(
         response_format: { type: "json_object" },
         temperature: 0.2,
       }),
+      signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
     },
   );
   if (!response.ok) {

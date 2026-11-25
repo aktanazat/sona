@@ -11,6 +11,7 @@ import { signEd25519 } from "./keys";
 
 const AUDIENCE = "sona-companion";
 const PAGE_LIMIT = 100;
+const REQUEST_TIMEOUT_MS = 30 * 1000;
 
 export interface DeviceIdentity {
   deviceId: string;
@@ -158,8 +159,8 @@ function randomNonce(): Uint8Array {
 /**
  * Signed HTTP to one Worker as one device.
  *
- * `syncClock` reads the Worker's `Date` header so timestamps land inside its
- * five-minute skew window even on a VPS with a drifting clock.
+ * Every reply's `Date` header resets the clock offset, so timestamps land inside
+ * the Worker's five-minute skew window even on a VPS whose clock drifts for weeks.
  */
 export class CompanionClient {
   private readonly base: URL;
@@ -180,10 +181,17 @@ export class CompanionClient {
   }
 
   async syncClock(): Promise<void> {
-    const response = await fetch(new URL("/healthz", this.base));
+    const response = await fetch(new URL("/healthz", this.base), {
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!this.followClock(response)) throw new Error("healthz carried no date");
+  }
+
+  private followClock(response: Response): boolean {
     const date = Date.parse(response.headers.get("date") ?? "");
-    if (!Number.isFinite(date)) throw new Error("healthz carried no date");
+    if (!Number.isFinite(date)) return false;
     this.clockOffsetMs = date - Date.now();
+    return true;
   }
 
   selfDevice(): Promise<SelfDevice> {
@@ -331,7 +339,9 @@ export class CompanionClient {
       method,
       headers,
       body: mutation === null ? null : body,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    this.followClock(response);
     if (response.ok) return response;
     const problem = Problem.parse(await response.json().catch(() => ({})));
     throw new ApiError(response.status, problem.code, problem.retryable);
