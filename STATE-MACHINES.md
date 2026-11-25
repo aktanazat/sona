@@ -2087,10 +2087,12 @@ without the report, description or logs in its URL.
 dictation. It does not change a mode's existing automatic-submit setting.
 Import, retry, reprocessing, task and command plans do not enable the keyword.
 
-The local, streaming and cloud finalizers recognize a trailing complete English
-`send` before vocabulary, replacements, snippets or rewriting can author text.
-Only a selected language or the recognition model can establish English for this
-action. Guessed, unknown and translated language cannot enable it.
+The local, streaming and cloud finalizers recognize the complete trailing
+English word chosen when recording began, before any cleanup can author text.
+`spoken_send_keyword` is optional; if missing, the word is `send`. Setting a
+different word replaces `send`. An invalid stored word disables the command.
+Only a selected language or the recognition model can establish English for
+this action. Guessed, unknown and translated language cannot.
 
 | Condition                                                                                          | Result                                                                                                                                      |
 | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -172,9 +172,23 @@ pub fn apply_spoken_edits(text: &str, language: &OutputLanguageEvidence, enabled
     output
 }
 
+pub(crate) const DEFAULT_SPOKEN_SEND_KEYWORD: &str = "send";
+const MAX_SPOKEN_SEND_KEYWORD_LENGTH: usize = 40;
+
+pub(crate) fn normalized_spoken_send_keyword(value: &str) -> Option<&str> {
+    let word = value.trim_matches(|c: char| {
+        c.is_whitespace() || c.is_ascii_punctuation() || "“”‘’".contains(c)
+    });
+    (!word.is_empty()
+        && word.len() <= MAX_SPOKEN_SEND_KEYWORD_LENGTH
+        && word.bytes().all(|c| c.is_ascii_alphabetic()))
+    .then_some(word)
+}
+
 pub(crate) fn spoken_send_prefix<'text>(
     text: &'text str,
     language: &OutputLanguageEvidence,
+    keyword: &str,
 ) -> Option<&'text str> {
     if !matches!(
         language,
@@ -188,8 +202,8 @@ pub(crate) fn spoken_send_prefix<'text>(
     let trimmed = text.trim_end_matches(|character: char| {
         character.is_whitespace() || SEGMENT_BOUNDARY_MARKS.contains(&character)
     });
-    let start = trimmed.len().checked_sub("send".len())?;
-    if !trimmed.get(start..)?.eq_ignore_ascii_case("send") {
+    let start = trimmed.len().checked_sub(keyword.len())?;
+    if !trimmed.get(start..)?.eq_ignore_ascii_case(keyword) {
         return None;
     }
     let prefix = &trimmed[..start];
@@ -582,7 +596,7 @@ mod tests {
             ("The draft is ready,send!", "The draft is ready,"),
         ] {
             assert_eq!(
-                spoken_send_prefix(text, &english),
+                spoken_send_prefix(text, &english, DEFAULT_SPOKEN_SEND_KEYWORD),
                 Some(expected),
                 "{text:?}"
             );
@@ -599,7 +613,32 @@ mod tests {
             "a_send",
             "re-send",
         ] {
-            assert_eq!(spoken_send_prefix(text, &english), None, "{text:?}");
+            assert_eq!(
+                spoken_send_prefix(text, &english, DEFAULT_SPOKEN_SEND_KEYWORD),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chosen_submit_word_replaces_send_without_matching_prose_or_quoted_words() {
+        let english = OutputLanguageEvidence::ModelDetected("en".to_owned());
+        let word = normalized_spoken_send_keyword(" “Dispatch!” ").unwrap();
+        assert_eq!(
+            spoken_send_prefix("The draft is ready. DISPATCH!", &english, word),
+            Some("The draft is ready.")
+        );
+        for text in [
+            "The draft is ready. Send!",
+            "The draft is ready. “dispatch.”",
+            "Please dispatch the draft.",
+            "We should redispatch.",
+        ] {
+            assert_eq!(spoken_send_prefix(text, &english, word), None, "{text:?}");
+        }
+        for invalid in ["", "“!?!”", "send now", "send\nnow", "send2", "отправить"] {
+            assert_eq!(normalized_spoken_send_keyword(invalid), None, "{invalid:?}");
         }
     }
 
@@ -611,7 +650,7 @@ mod tests {
             OutputLanguageEvidence::ModelDetected("en".to_string()),
         ] {
             assert_eq!(
-                spoken_send_prefix("Send.", &language),
+                spoken_send_prefix("Send.", &language, DEFAULT_SPOKEN_SEND_KEYWORD),
                 Some(""),
                 "{language:?}"
             );
@@ -623,7 +662,11 @@ mod tests {
             OutputLanguageEvidence::UserSelected("ru".to_string()),
             OutputLanguageEvidence::ModelDetected("de".to_string()),
         ] {
-            assert_eq!(spoken_send_prefix("Send.", &language), None, "{language:?}");
+            assert_eq!(
+                spoken_send_prefix("Send.", &language, DEFAULT_SPOKEN_SEND_KEYWORD),
+                None,
+                "{language:?}"
+            );
         }
     }
 

@@ -3245,6 +3245,33 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "cloud-realtime", target_os = "macos"))]
+    #[test]
+    fn spoken_send_uses_the_word_chosen_when_recording_began() {
+        use crate::managers::transcription::finalize_cloud_text;
+        use crate::modes::{RunPlan, TranscriptionIntent};
+        use crate::settings::AppSettings;
+
+        let mut settings = cloud_settings(true);
+        settings.spoken_send_enabled = true;
+        settings.modes[0].asr.language = "en".to_owned();
+        settings.spoken_send_keyword =
+            AppSettings::parse_spoken_send_keyword("“Dispatch!”").unwrap();
+        let started = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        settings.spoken_send_keyword = AppSettings::parse_spoken_send_keyword("Submit").unwrap();
+        let next = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        for (run, text, expected, submit) in [
+            (&started, "Ready. Dispatch!", "Ready.", true),
+            (&started, "Ready. Submit!", "Ready. Submit!", false),
+            (&started, "Ready. Send!", "Ready. Send!", false),
+            (&next, "Ready. Submit!", "Ready.", true),
+        ] {
+            let result = finalize_cloud_text(text.to_owned(), run.asr(), run.cloud().unwrap());
+            assert_eq!(result.text, expected, "{text}");
+            assert_eq!(result.spoken_send, submit, "{text}");
+        }
+    }
+
     /// A local run whose model cannot load can only fail after the microphone
     /// has opened and the user has already spoken, so it is refused before
     /// capture, and the refusal says whether a model must be chosen or

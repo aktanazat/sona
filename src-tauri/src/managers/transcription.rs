@@ -4176,8 +4176,13 @@ fn take_spoken_send(
     language: &OutputLanguageEvidence,
     eligible: bool,
 ) -> (String, bool) {
+    use crate::audio_toolkit::spoken_edits::{spoken_send_prefix, DEFAULT_SPOKEN_SEND_KEYWORD};
+    let word = asr
+        .spoken_send_keyword
+        .as_deref()
+        .unwrap_or(DEFAULT_SPOKEN_SEND_KEYWORD);
     let prefix_length = (eligible && asr.spoken_send_enabled && !asr.translate_to_english)
-        .then(|| crate::audio_toolkit::spoken_edits::spoken_send_prefix(&text, language))
+        .then(|| spoken_send_prefix(&text, language, word))
         .flatten()
         .map(str::len);
     if let Some(length) = prefix_length {

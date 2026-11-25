@@ -21,6 +21,7 @@ struct VocabularyView: View {
     @State private var newKind: VocabularyRuleKind = .vocabulary
     @State private var newLeft = ""
     @State private var newRight = ""
+    @State private var submitWordDraft: String?
     @FocusState private var focus: VocabularyFocus?
     @State private var restoreOpen = false
 
@@ -103,13 +104,16 @@ struct VocabularyView: View {
                 )
             )
             ToggleRow(
-                title: "Say “send” to press Enter",
-                detail: "End an English dictation with “send” to press Enter. The word is not typed. Pressing Enter can send a message, submit a form, or run a command.",
+                title: "Submit by voice",
+                detail: "Say the submit word at the end of English dictation to press Enter. This can send a message, submit a form, or run a command.",
                 isOn: Binding(
                     get: { store.spokenSendEnabled },
                     set: { store.setSpokenSend($0) }
                 )
             )
+            if store.spokenSendEnabled {
+                submitWordRow
+            }
             ToggleRow(
                 title: "Write emoji when you name one",
                 detail: "Replace only exact spoken tokens, after vocabulary correction.",
@@ -158,6 +162,39 @@ struct VocabularyView: View {
         let shown = words.prefix(6).joined(separator: ", ")
         let rest = words.count - min(words.count, 6)
         return rest > 0 ? "\(shown) and \(rest) more." : "\(shown)."
+    }
+
+    private var submitWord: Binding<String> {
+        Binding(
+            get: { submitWordDraft ?? store.spokenSendKeyword },
+            set: { submitWordDraft = $0 }
+        )
+    }
+
+    private var submitWordRow: some View {
+        CardRow {
+            Text("Submit word").bodyText().accessibilityHidden(true)
+        } trailing: {
+            HStack(spacing: 8) {
+                TextField("Submit word", text: submitWord)
+                    .accessibilityLabel("Submit word")
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 150)
+                    .onSubmit(saveSubmitWord)
+                    .onExitCommand { submitWordDraft = nil }
+                Button("Save", action: saveSubmitWord)
+                    .buttonStyle(.secondary)
+                    .disabled(submitWordDraft == nil || submitWordDraft == store.spokenSendKeyword)
+            }
+        }
+        .onDisappear { submitWordDraft = nil }
+    }
+
+    private func saveSubmitWord() {
+        guard let submitWordDraft, submitWordDraft != store.spokenSendKeyword else { return }
+        store.setSpokenSendKeyword(submitWordDraft) {
+            self.submitWordDraft = nil
+        }
     }
 
     // MARK: Heard in meetings
