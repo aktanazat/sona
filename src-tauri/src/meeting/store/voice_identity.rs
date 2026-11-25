@@ -1846,23 +1846,37 @@ fn confirmed_voice_owner<'a>(
     known: &KnownVoices,
     user_name: Option<&str>,
 ) -> Option<&'a ConfirmedPersonVoice> {
+    let distances = people
+        .iter()
+        .map(|person| {
+            person
+                .meetings
+                .iter()
+                .map(|confirmed| voice_distance(voice, &confirmed.voice))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let nearest = distances
+        .iter()
+        .map(|own| own.iter().copied().reduce(f32::min))
+        .collect::<Vec<_>>();
+    let unclaimed = known
+        .people
+        .iter()
+        .filter(|(person_id, _, _)| person_id.is_none())
+        .map(|(_, _, other)| voice_distance(voice, other))
+        .reduce(f32::min);
     let mut winner = None;
-    for person in people {
+    for (person, own) in people.iter().zip(&distances) {
         if person.meetings.len() < 2 || names_user(&person.display_name, user_name) {
             continue;
         }
         let rival_distance = people
             .iter()
-            .filter(|other| other.person_id != person.person_id)
-            .flat_map(|other| other.meetings.iter().map(|meeting| &meeting.voice))
-            .chain(
-                known
-                    .people
-                    .iter()
-                    .filter(|(person_id, _, _)| person_id.is_none())
-                    .map(|(_, _, voice)| voice),
-            )
-            .map(|other| voice_distance(voice, other))
+            .zip(&nearest)
+            .filter(|(other, _)| other.person_id != person.person_id)
+            .filter_map(|(_, distance)| *distance)
+            .chain(unclaimed)
             .reduce(f32::min);
         let limit = rival_distance
             .map(|distance| distance * CONFIRMED_VOICE_DISTANCE_RATIO)
@@ -1871,10 +1885,8 @@ fn confirmed_voice_owner<'a>(
         let support = person
             .meetings
             .iter()
-            .filter(|confirmed| {
-                let distance = voice_distance(voice, &confirmed.voice);
-                distance < limit && distance <= confirmed.variation
-            })
+            .zip(own)
+            .filter(|(confirmed, distance)| **distance < limit && **distance <= confirmed.variation)
             .take(2)
             .count();
         if support == 2 {
