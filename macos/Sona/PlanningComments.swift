@@ -248,7 +248,10 @@ private struct PlanningCommentEntry: View {
                     PlanningCommentComposer(threads: threads, subject: subject, editing: comment, prompt: "Edit comment",
                                             autofocus: true) { editing = false }
                 } else if let body = comment.body {
-                    MarkdownBody(source: body, toggle: nil).textSelection(.enabled)
+                    MarkdownBody(source: body) { line in
+                        run { try await threads.edit(comment, on: subject, body: MarkdownBody.toggled(body, line: line)) }
+                    }
+                    .textSelection(.enabled)
                     ReactionStrip(subject: .comment, id: comment.id, reactions: comment.reactions)
                 }
                 if let failure { Text(failure).metaText(Theme.live).lineLimit(2) }

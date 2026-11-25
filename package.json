@@ -28,6 +28,7 @@
     "check:theme": "bash scripts/check-theme.sh",
     "check:meeting-live": "bash scripts/check-meeting-live.sh",
     "check:work-views": "bash scripts/check-work-views.sh",
+    "check:markdown-edit": "bash scripts/check-markdown-edit.sh",
     "check:identity": "bun scripts/ci/check-identity.ts",
     "eval:dictation": "bun scripts/dictation-eval.ts"
   },

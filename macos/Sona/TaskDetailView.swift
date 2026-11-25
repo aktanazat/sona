@@ -323,6 +323,7 @@ private struct DetailNotes: View {
     @State private var editing = false
     @FocusState private var focused: Bool
     @State private var hovering = false
+    @State private var selection: TextSelection?
 
     var body: some View {
         let details = row.details ?? ""
@@ -387,21 +388,17 @@ private struct DetailNotes: View {
                 Text("Add details, a checklist or links").font(TypeScale.body(14)).foregroundStyle(Theme.inkDisabled)
                     .allowsHitTesting(false)
             }
-            TextEditor(text: $text)
+            MarkdownTextEditor(text: $text, selection: $selection, focused: $focused, label: "Details")
                 .font(TypeScale.body(14))
                 .lineSpacing(3)
                 .foregroundStyle(Theme.ink)
                 .textEditorStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .scrollDisabled(true)
                 .padding(.horizontal, -5)
-                .focused($focused)
                 .withoutWritingTools()
                 .onExitCommand {
                     text = row.details ?? ""
                     focused = false
                 }
-                .accessibilityLabel("Details")
         }
         .onChange(of: focused) { _, now in
             if !now {
