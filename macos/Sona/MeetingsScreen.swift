@@ -267,7 +267,9 @@ struct MeetingsFolderBar: View {
                         store.choose(folder: nil)
                     }
                     ForEach(store.folders) { folder in
-                        folderChip("\(folder.name) · \(folder.meetingCount)", selected: store.folderId == folder.folderId) {
+                        folderChip("\(folder.name) · \(folder.meetingCount)",
+                                   icon: MeetingFolderStarter.icon(for: folder.name),
+                                   selected: store.folderId == folder.folderId) {
                             store.choose(folder: folder.folderId)
                         }
                     }
@@ -346,21 +348,45 @@ struct MeetingsFolderBar: View {
         }
     }
 
-    private func folderChip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func folderChip(_ title: String, icon: String? = nil, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title)
-                .font(TypeScale.label(13))
-                .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
-                .lineLimit(1)
-                .padding(.horizontal, 12)
-                .frame(height: Theme.controlHeight)
-                .background(selected ? Theme.selection : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-                .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(selected ? Color.clear : Theme.border, lineWidth: 1))
-                .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+            Group {
+                if let icon {
+                    Label(title, systemImage: icon)
+                } else {
+                    Text(title)
+                }
+            }
+            .font(TypeScale.label(13))
+            .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .frame(height: Theme.controlHeight)
+            .background(selected ? Theme.selection : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(selected ? Color.clear : Theme.border, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .help(title)
+    }
+}
+
+private enum MeetingFolderStarter: String, CaseIterable {
+    case projects = "Projects"
+    case teamMeetings = "Team meetings"
+
+    static let allCases: [Self] = [.projects, .teamMeetings]
+
+    var icon: String {
+        switch self {
+        case .projects: "chart.bar.xaxis"
+        case .teamMeetings: "calendar"
+        }
+    }
+
+    static func icon(for name: String) -> String? {
+        allCases.first { $0.rawValue.caseInsensitiveCompare(name) == .orderedSame }?.icon
     }
 }
 
@@ -377,11 +403,28 @@ private struct MeetingFolderNameSheet: View {
     }
 
     var body: some View {
+        let starters = starters
         VStack(alignment: .leading, spacing: 16) {
             Text(folder == nil ? "New folder" : "Rename folder").titleText().accessibilityAddTraits(.isHeader)
             InputField(prompt: "Folder name", text: $name)
                 .accessibilityLabel("Folder name")
-            Text("Use 1–80 characters and a name no other folder has.").metaText()
+            if !starters.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Suggested folders").metaText()
+                    HStack(spacing: 8) {
+                        ForEach(starters, id: \.self) { starter in
+                            Button {
+                                name = starter.rawValue
+                                store.clearFolderError()
+                            } label: {
+                                Label(starter.rawValue, systemImage: starter.icon)
+                            }
+                            .buttonStyle(.secondary)
+                        }
+                    }
+                }
+                .disabled(store.folderBusy)
+            }
             if let error = store.folderError {
                 ErrorNote(error)
             }
@@ -411,6 +454,11 @@ private struct MeetingFolderNameSheet: View {
         .background(Theme.page)
         .interactiveDismissDisabled(store.folderBusy)
         .onAppear { store.clearFolderError() }
+    }
+
+    private var starters: [MeetingFolderStarter] {
+        guard folder == nil, !store.foldersLoading, store.foldersError == nil else { return [] }
+        return MeetingFolderStarter.allCases.filter { store.folderNameProblem($0.rawValue) == nil }
     }
 }
 
