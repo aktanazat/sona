@@ -1150,7 +1150,7 @@ function lifecycleTools(): ToolDefinition[] {
       name: "sona_work_inbox",
       title: "Read Sona's inbox",
       description:
-        "Read the inbox, newest first, with the unread count: status changes, comments, mentions, assignments and other field changes (kind changed, with field) that Sona or agents made on tasks the user is subscribed to; an agent's question waiting for an answer (question, to holds it); a reminder firing (reminder, on a task or with subject a project, initiative or note) and open work the user owes coming due today (due); an automation run ending (automation, with automation name and error, task null when the run was about no task); a followed project's update or status change (project, field update or status), a task joining a followed view or done or canceled in it (view, field added, done or canceled), an agent editing a followed note (note); what Sona closed or archived by itself (housekeeping, to holds the summary, task null for a day's housekeeping or the parent whose sub-tasks it canceled; undo with sona_housekeeping_undo); and the weekly project digest (digest, task null, with digest holding each project's status, latest update, tasks done and risks, as sona_work_digest shows). Each notice has priority true when it needs the user: mentions, assignments, questions, reminders and due work. The user's own changes never notify. Snoozed ones stay out until they wake, archived ones until asked for.",
+        "Read the inbox, newest first, with the unread count: status changes, comments, mentions, assignments and other field changes (kind changed, with field) that Sona or agents made on tasks the user is subscribed to; an agent's question waiting for an answer (question, to holds it); a reminder firing (reminder, on a task or with subject a project, initiative or note) and open work the user owes coming due today (due); an automation run ending (automation, with automation name and error, task null when the run was about no task); a followed project's update or status change (project, field update or status), a task joining a followed view or done or canceled in it (view, field added, done or canceled), an agent editing a followed note (note); a followed task whose last open blocker is done or canceled (unblocked); what Sona closed or archived by itself (housekeeping, to holds the summary, task null for a day's housekeeping or the parent whose sub-tasks it canceled; undo with sona_housekeeping_undo); and the weekly project digest (digest, task null, with digest holding each project's status, latest update, tasks done and risks, as sona_work_digest shows). Each notice has priority true when it needs the user: mentions, assignments, questions, reminders and due work. The user's own changes never notify. Snoozed ones stay out until they wake, archived ones until asked for.",
       optIn: true,
       inputSchema: {
         type: "object",
@@ -1165,12 +1165,21 @@ function lifecycleTools(): ToolDefinition[] {
           kind: {
             type: "string",
             description:
-              "Only these kinds, comma-separated: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note, housekeeping.",
+              "Only these kinds, comma-separated: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note, housekeeping, unblocked.",
           },
           project: { type: "string", description: "Only notices about tasks in this project, or the project itself, by name or id." },
           task_priority: {
             type: "string",
             description: "Only notices about tasks of these priorities, comma-separated: urgent, high, medium, low, none.",
+          },
+          search: {
+            type: "string",
+            description: "Only notices whose task title, number, kind, project, view or comment text has this.",
+          },
+          group: {
+            type: "string",
+            enum: ["task"],
+            description: "task: one row per task, with its latest change, a count and every notice id it stands for.",
           },
         },
         additionalProperties: false,
@@ -1185,6 +1194,8 @@ function lifecycleTools(): ToolDefinition[] {
         ...assigned("--kind", text(input, "kind")),
         ...assigned("--project", text(input, "project")),
         ...assigned("--task-priority", text(input, "task_priority")),
+        ...assigned("--search", text(input, "search")),
+        ...assigned("--group", text(input, "group")),
         "--json",
       ],
     },
@@ -1197,7 +1208,7 @@ function lifecycleTools(): ToolDefinition[] {
     {
       name: "sona_work_inbox_settings_save",
       title: "Change Sona's inbox settings",
-      description: `Change which notice kinds reach the inbox (kinds: every kind that should, comma-separated, or all; the rest are never posted), which show a banner on the Mac (banners: comma-separated, all or none), and the quiet hours when banners wait (quiet_hours: HH:MM-HH:MM on the Mac's clock, or off). Kinds: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note, housekeeping. Name at least one. ${ORGANIZE_WRITES}`,
+      description: `Change which notice kinds reach the inbox (kinds: every kind that should, comma-separated, or all; the rest are never posted), which show a banner on the Mac (banners: comma-separated, all or none), the quiet hours when banners wait (quiet_hours: HH:MM-HH:MM on the Mac's clock, or off), and whether the unread count shows on the Dock icon (dock_badge: true or false). Kinds: status, comment, mention, assigned, changed, reminder, due, automation, digest, question, project, view, note, housekeeping, unblocked. Name at least one. ${ORGANIZE_WRITES}`,
       mutates: "changes",
       optIn: true,
       inputSchema: {
@@ -1206,6 +1217,7 @@ function lifecycleTools(): ToolDefinition[] {
           kinds: { type: "string", description: "Kinds that reach the inbox, comma-separated, or all." },
           banners: { type: "string", description: "Kinds that show a banner, comma-separated, all or none." },
           quiet_hours: { type: "string", description: "HH:MM-HH:MM, such as 22:00-08:00, or off." },
+          dock_badge: { type: "boolean", description: "Show the unread count on the Mac's Dock icon." },
           dry_run: DRY_RUN,
           operation_id: OPERATION_ID,
         },
@@ -1217,6 +1229,7 @@ function lifecycleTools(): ToolDefinition[] {
         ...assigned("--kinds", text(input, "kinds")),
         ...assigned("--banners", text(input, "banners")),
         ...assigned("--quiet-hours", text(input, "quiet_hours")),
+        ...(input.dock_badge === undefined ? [] : [`--dock-badge=${flag(input, "dock_badge")}`]),
         ...(flag(input, "dry_run") ? ["--dry-run"] : []),
         ...writing(input, agent),
         "--json",
