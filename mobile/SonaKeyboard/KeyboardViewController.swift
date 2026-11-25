@@ -979,7 +979,7 @@ private struct KeyboardView: View {
 
     private func keys(_ rows: [[KeyCap]]) -> some View {
         KeyRows(model: typing, rows: rows)
-            .overlay { SwipeTrail(points: typing.trail) }
+            .overlay { SwipeTrail(model: typing) }
             .overlay {
                 KeySurface(
                     model: typing, rows: rows,
@@ -1292,11 +1292,13 @@ private struct MicControl: View {
     }
 }
 
-/// The path a swipe has drawn so far.
+/// The path a swipe has drawn so far. It reads the trail itself, so a finger moving redraws
+/// only the trail and not the keys under it.
 private struct SwipeTrail: View {
-    let points: [CGPoint]
+    let model: TypingModel
 
     var body: some View {
+        let points = model.trail
         Canvas { context, _ in
             guard let first = points.first else { return }
             var path = Path()
