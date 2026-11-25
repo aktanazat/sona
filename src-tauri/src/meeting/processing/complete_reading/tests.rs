@@ -1834,6 +1834,48 @@ mod tests {
     }
 
     #[test]
+    fn handwritten_outline_parts_keep_heading_order_and_combined_citations() {
+        let mut evidence = evidence();
+        evidence
+            .template
+            .use_handwritten_outline("# Release choices\n# Open items");
+        let section = |index: usize, title: &str| {
+            let id = &evidence.transcript[index].citation.entity_id;
+            let raw: RawArtifactOutput = serde_json::from_value(json!({
+                "summary": [{"text": "The release was discussed.", "citations": [id]}],
+                "outline": [{"title": {"text": title, "citations": [id]}, "detail": null}],
+                "decisions": [], "action_items": [], "key_questions": [], "risks": [],
+                "follow_up_draft": {"text": "Share the plan.", "citations": [id]}
+            }))
+            .expect("section notes");
+            let content = validate_artifact_output(
+                &raw,
+                &evidence.transcript,
+                &HashMap::new(),
+                &evidence.template,
+            )
+            .expect("cited section notes");
+            (raw.summary, content)
+        };
+        let content = joined_as_written(
+            vec![
+                section(0, "Open items"),
+                section(1, "Release choices"),
+                section(2, "Open items"),
+            ],
+            Vec::new(),
+            &evidence,
+        )
+        .expect("notes joined as written");
+        let headings: Vec<_> = content
+            .outline
+            .iter()
+            .map(|topic| (topic.title.text.as_str(), topic.title.citations.len()))
+            .collect();
+        assert_eq!(headings, [("Release choices", 1), ("Open items", 2)]);
+    }
+
+    #[test]
     fn a_notes_row_names_its_speaker_and_not_its_meeting() {
         let mut evidence = evidence();
         evidence.transcript.truncate(2);

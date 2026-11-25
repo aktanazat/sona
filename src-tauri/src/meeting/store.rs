@@ -6140,13 +6140,20 @@ impl MeetingStore {
         // The user's own notes are read first and capped well below the total
         // budget, so a long note can never displace the transcript it steers.
         let notes = user_notes_row(&connection, session_id, default_template)?;
-        let template = match notes.custom_template_id {
+        let mut template = match notes.custom_template_id {
             Some(template_id) => NotesTemplate::Custom(
                 custom_templates::custom_template_in(&connection, template_id)?
                     .ok_or(StoreError::Corrupt)?,
             ),
             None => NotesTemplate::BuiltIn(notes.template),
         };
+        let raw_notes = bounded_str(&notes.body, max_bytes / 8);
+        let raw_notes = if raw_notes.len() < notes.body.len() {
+            raw_notes.rsplit_once('\n').map_or("", |(lines, _)| lines)
+        } else {
+            raw_notes
+        };
+        template.use_handwritten_outline(raw_notes);
         let user_notes = bounded_text(notes.body.trim(), max_bytes / 8);
         let mut used = user_notes.len();
         let mut transcript = Vec::new();
@@ -11898,14 +11905,18 @@ fn meeting_fts_match_query(user_text: &str) -> Option<String> {
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
+    bounded_str(value, limit).to_string()
+}
+
+fn bounded_str(value: &str, limit: usize) -> &str {
     if value.len() <= limit {
-        return value.to_string();
+        return value;
     }
     let mut end = limit;
     while !value.is_char_boundary(end) {
-        end = end.saturating_sub(1);
+        end -= 1;
     }
-    value[..end].to_string()
+    &value[..end]
 }
 
 fn id<T: Into<Uuid>>(value: T) -> String {

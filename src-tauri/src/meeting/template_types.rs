@@ -188,6 +188,10 @@ impl From<MeetingNotesTemplate> for NotesTemplateChoice {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotesTemplate {
     BuiltIn(MeetingNotesTemplate),
+    Handwritten {
+        template: MeetingNotesTemplate,
+        headings: Vec<String>,
+    },
     Custom(MeetingCustomTemplate),
 }
 
@@ -201,10 +205,91 @@ impl NotesTemplate {
     /// The id an artifact revision records and its generation key hashes.
     pub fn artifact_template_id(&self) -> String {
         match self {
-            Self::BuiltIn(template) => template.artifact_template_id().to_string(),
+            Self::BuiltIn(template) | Self::Handwritten { template, .. } => {
+                template.artifact_template_id().to_string()
+            }
             Self::Custom(template) => custom_artifact_template_id(template.template_id),
         }
     }
+
+    pub(super) fn use_handwritten_outline(&mut self, notes: &str) {
+        let Self::BuiltIn(template) = self else {
+            return;
+        };
+        let headings = handwritten_headings(notes);
+        if !headings.is_empty() {
+            *self = Self::Handwritten {
+                template: *template,
+                headings,
+            };
+        }
+    }
+
+    pub(super) fn handwritten_outline(&self) -> Option<&[String]> {
+        match self {
+            Self::Handwritten { headings, .. } => Some(headings),
+            Self::BuiltIn(_) | Self::Custom(_) => None,
+        }
+    }
+
+    pub(super) fn fixed_titles(&self) -> Option<impl Iterator<Item = &str> + Clone> {
+        let (custom, handwritten) = match self {
+            Self::BuiltIn(_) => return None,
+            Self::Custom(template) => (template.sections.as_slice(), &[][..]),
+            Self::Handwritten { headings, .. } => (&[][..], headings.as_slice()),
+        };
+        Some(
+            custom
+                .iter()
+                .map(|section| section.title.as_str())
+                .chain(handwritten.iter().map(String::as_str)),
+        )
+    }
+}
+
+fn handwritten_headings(notes: &str) -> Vec<String> {
+    let mut headings: Vec<String> = Vec::new();
+    let mut fence = None;
+    for line in notes.lines() {
+        let leading = line.trim_start_matches(' ');
+        if line.len() - leading.len() <= 3 {
+            if let Some(marker @ (b'`' | b'~')) = leading.as_bytes().first().copied() {
+                let width = leading.bytes().take_while(|&byte| byte == marker).count();
+                if width >= 3 {
+                    match fence {
+                        None => fence = Some((marker, width)),
+                        Some((open, minimum))
+                            if marker == open
+                                && width >= minimum
+                                && leading[width..].trim().is_empty() =>
+                        {
+                            fence = None;
+                        }
+                        Some(_) => {}
+                    }
+                    continue;
+                }
+            }
+        }
+        let Some(heading) = line.strip_prefix("# ").map(str::trim) else {
+            continue;
+        };
+        if fence.is_some()
+            || heading.is_empty()
+            || heading.len() > MAX_SECTION_TITLE_BYTES
+            || heading.chars().any(char::is_control)
+            || headings
+                .iter()
+                .any(|existing| same_section_title(existing, heading))
+        {
+            continue;
+        }
+        headings.push(heading.to_string());
+        if headings.len() == MAX_TEMPLATE_SECTIONS {
+            break;
+        }
+    }
+    headings
 }
 
 pub fn custom_artifact_template_id(template_id: MeetingTemplateId) -> String {
