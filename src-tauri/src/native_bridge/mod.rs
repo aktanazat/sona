@@ -78,7 +78,8 @@ const NAMED_EVENTS: [&str; 34] = [
     "transcription-error",
 ];
 
-/// How often the core checks that the shell that spawned it is still there.
+/// How often the core checks that the shell that spawned it is still there,
+/// where the kernel cannot say so itself.
 const PARENT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How many frames a connection may leave unread before it is closed. The
@@ -264,14 +265,116 @@ pub fn start(app: &AppHandle, path: &Path) -> io::Result<()> {
 /// Ends the core when the shell that spawned it is gone. A shell that quits
 /// asks for `shutdown` first; this covers the shell that crashed instead.
 pub fn watch_parent(app: AppHandle) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(PARENT_CHECK_INTERVAL);
-        if std::os::unix::process::parent_id() == 1 {
-            log::info!("The native shell is gone; exiting the core");
-            app.exit(0);
-            return;
-        }
+    std::thread::spawn(move || {
+        wait_for_parent_exit();
+        log::info!("The native shell is gone; exiting the core");
+        app.exit(0);
     });
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_parent_exit() {
+    let parent = std::os::unix::process::parent_id();
+    if parent == 1 {
+        return;
+    }
+    let watched = libc::pid_t::try_from(parent)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+        .and_then(ProcessExit::watch);
+    let waited = match watched {
+        // Still our parent after the registration, so the registration
+        // found it alive and not a later process given its PID.
+        Ok(exit) if std::os::unix::process::parent_id() == parent => exit.wait(),
+        Ok(_) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = waited {
+        log::warn!("The native shell's exit cannot be watched, so it is checked instead: {error}");
+        poll_for_parent_exit();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn wait_for_parent_exit() {
+    poll_for_parent_exit();
+}
+
+fn poll_for_parent_exit() {
+    while std::os::unix::process::parent_id() != 1 {
+        std::thread::sleep(PARENT_CHECK_INTERVAL);
+    }
+}
+
+/// One process's exit, as the kernel reports it.
+#[cfg(target_os = "macos")]
+struct ProcessExit(std::os::fd::OwnedFd);
+
+#[cfg(target_os = "macos")]
+impl ProcessExit {
+    fn watch(pid: libc::pid_t) -> io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        // SAFETY: kqueue takes no pointers and returns a new descriptor.
+        let descriptor = unsafe { libc::kqueue() };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: this fresh, nonnegative descriptor has no other owner.
+        let queue = unsafe { OwnedFd::from_raw_fd(descriptor) };
+        let change = libc::kevent {
+            ident: pid
+                .try_into()
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ONESHOT,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: the change outlives this synchronous call; no events are read.
+        let result = unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(queue))
+    }
+
+    fn wait(self) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        loop {
+            // SAFETY: a zeroed kevent is a valid value of this plain C struct.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            // SAFETY: one writable event; a null timeout waits for it.
+            let result = unsafe {
+                libc::kevent(
+                    self.0.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    &mut event,
+                    1,
+                    std::ptr::null(),
+                )
+            };
+            if result >= 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
 }
 
 /// The shell that owns this core, while it remains our parent. Reparenting
@@ -555,5 +658,28 @@ mod tests {
             failure(7, &Fault::Bridge("bad \"quote\"".to_string())),
             r#"{"id":7,"error":"bad \"quote\""}"#
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_watched_process_that_exits_wakes_its_watcher() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("a child process");
+        let pid = libc::pid_t::try_from(child.id()).expect("a pid");
+        let exit = super::ProcessExit::watch(pid).expect("a watched child");
+        let (exited, heard) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = exited.send(exit.wait().is_ok());
+        });
+
+        assert!(
+            heard.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the watcher woke while the child ran"
+        );
+        child.kill().expect("the child stopped");
+        assert_eq!(heard.recv_timeout(Duration::from_secs(5)), Ok(true));
+        child.wait().expect("the child reaped");
     }
 }

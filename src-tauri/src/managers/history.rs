@@ -205,7 +205,7 @@ pub(crate) static MIGRATIONS: &[M] = &[
     // Semantic recall stores one unit vector per row beside the FTS5 index.
     // Both columns are nullable and nothing backfills them here: the vectors
     // need a model that may not be on disk yet, so filling them is a resumable
-    // pass (`backfill_semantic_chunk_with_connection`) rather than migration
+    // pass (`HistoryManager::run_semantic_backfill`) rather than migration
     // SQL that would have to either block startup or invent data.
     //
     // `semantic_model_revision` records which model considered the row.
@@ -1039,9 +1039,17 @@ impl HistoryManager {
     /// model change re-enters every row exactly once.
     fn run_semantic_backfill(storage: &HistoryStorage, model: &SemanticModel) {
         loop {
-            let outcome = storage.with_connection(|conn| {
-                backfill_semantic_chunk_with_connection(conn, model, semantic::BACKFILL_CHUNK_ROWS)
-            });
+            let outcome = storage
+                .with_connection(|conn| {
+                    pending_semantic_rows(conn, model, semantic::BACKFILL_CHUNK_ROWS)
+                })
+                .and_then(|pending| {
+                    if pending.is_empty() {
+                        return Ok(0);
+                    }
+                    let vectors = encode_semantic_rows(model, &pending);
+                    storage.with_connection(|conn| store_semantic_chunk(conn, model, &vectors))
+                });
             match outcome {
                 Ok(0) => return,
                 Ok(rows) => debug!("Embedded {rows} history rows"),
@@ -3629,44 +3637,58 @@ fn store_semantic_vector_with_connection(
     Ok(())
 }
 
-/// Embed up to `chunk` rows the current model has not considered yet.
+/// Up to `chunk` rows the current model has not considered yet.
 ///
-/// Returns the number of rows written, so the caller loops until it gets zero.
 /// The selection predicate — `semantic_model_revision IS NOT ?` — is the whole
 /// progress record: null-safe, so it covers both "never embedded" and
 /// "embedded by an older model", and self-clearing, so there is no separate
 /// cursor or progress table to keep in sync with the rows.
-fn backfill_semantic_chunk_with_connection(
-    conn: &mut Connection,
+fn pending_semantic_rows(
+    conn: &Connection,
     model: &SemanticModel,
     chunk: usize,
-) -> Result<usize> {
-    let pending: Vec<(i64, String, Option<String>)> = {
-        let mut statement = conn.prepare(
-            "SELECT id, transcription_text, post_processed_text
-             FROM transcription_history
-             WHERE semantic_model_revision IS NOT ?1
-             ORDER BY id DESC
-             LIMIT ?2",
-        )?;
-        let rows = statement
-            .query_map(params![model.revision(), i64::try_from(chunk)?], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-    };
-    if pending.is_empty() {
-        return Ok(0);
-    }
+) -> Result<Vec<(i64, String, Option<String>)>> {
+    let mut statement = conn.prepare(
+        "SELECT id, transcription_text, post_processed_text
+         FROM transcription_history
+         WHERE semantic_model_revision IS NOT ?1
+         ORDER BY id DESC
+         LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![model.revision(), i64::try_from(chunk)?], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
 
+/// The model's vector for each pending row. Run without the history
+/// connection: a chunk of encodes takes long enough to hold up a dictation's
+/// save. A row's words never change once saved, so the vector is still its
+/// own when it is stored.
+fn encode_semantic_rows(
+    model: &SemanticModel,
+    pending: &[(i64, String, Option<String>)],
+) -> Vec<(i64, Option<Vec<f32>>)> {
+    pending
+        .iter()
+        .map(|(id, transcription_text, post_processed_text)| {
+            let text =
+                semantic::embeddable_text(transcription_text, post_processed_text.as_deref());
+            (*id, model.encode(text))
+        })
+        .collect()
+}
+
+/// Returns the number of rows written, so the caller loops until it gets zero.
+fn store_semantic_chunk(
+    conn: &mut Connection,
+    model: &SemanticModel,
+    vectors: &[(i64, Option<Vec<f32>>)],
+) -> Result<usize> {
     // One transaction per chunk: a chunk either advances entirely or not at
     // all, so an interrupted backfill leaves no row half-marked.
     let transaction = conn.transaction()?;
-    for (id, transcription_text, post_processed_text) in &pending {
-        let vector = model.encode(semantic::embeddable_text(
-            transcription_text,
-            post_processed_text.as_deref(),
-        ));
+    for (id, vector) in vectors {
         store_semantic_vector_with_connection(
             &transaction,
             *id,
@@ -3675,7 +3697,7 @@ fn backfill_semantic_chunk_with_connection(
         )?;
     }
     transaction.commit()?;
-    Ok(pending.len())
+    Ok(vectors.len())
 }
 
 /// The instant before which a recording no longer belongs on disk, in the
@@ -6125,6 +6147,16 @@ mod tests {
     /// The pinned model, or `None` when it has not been fetched here.
     fn semantic_fixture_model() -> Option<semantic::SemanticModel> {
         semantic::tests::fixture_model()
+    }
+
+    /// One chunk of the backfill's pass, on one connection.
+    fn backfill_semantic_chunk_with_connection(
+        conn: &mut Connection,
+        model: &semantic::SemanticModel,
+        chunk: usize,
+    ) -> Result<usize> {
+        let pending = pending_semantic_rows(conn, model, chunk)?;
+        store_semantic_chunk(conn, model, &encode_semantic_rows(model, &pending))
     }
 
     fn embed_all(conn: &mut Connection, model: &semantic::SemanticModel) -> usize {

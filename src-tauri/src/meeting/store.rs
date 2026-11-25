@@ -2214,6 +2214,25 @@ pub(super) fn revoke_series_consent_in(
     )? != 0)
 }
 
+/// An update that matched no row either found the cloud state already as
+/// asked or found none at all; only the second is an error.
+fn cloud_state_written(connection: &Connection, changed: usize) -> Result<(), StoreError> {
+    if changed == 1
+        || connection
+            .query_row(
+                "SELECT 1 FROM meeting_cloud_state WHERE singleton = 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+    {
+        Ok(())
+    } else {
+        Err(StoreError::NotFound)
+    }
+}
+
 pub struct MeetingStore {
     root: PathBuf,
     database_path: PathBuf,
@@ -2482,6 +2501,8 @@ impl MeetingStore {
         Ok(())
     }
 
+    /// Writes nothing when the row already holds both values: a quiet pull
+    /// hands back the cursor it was given.
     pub(crate) fn update_cloud_cursor(
         &self,
         cursor: Option<String>,
@@ -2493,26 +2514,28 @@ impl MeetingStore {
         let changed = connection.execute(
             "UPDATE meeting_cloud_state
              SET cursor = ?1, snapshot_high_water = ?2, updated_at_utc_ms = ?3
-             WHERE singleton = 1",
+             WHERE singleton = 1
+               AND (cursor IS NOT ?1 OR snapshot_high_water IS NOT ?2)",
             params![cursor, snapshot_high_water, utc_now_ms()],
         )?;
-        if changed != 1 {
-            return Err(StoreError::NotFound);
-        }
-        Ok(())
+        cloud_state_written(&connection, changed)
     }
 
-    pub(crate) fn set_cloud_clock_offset(&self, clock_offset_ms: i64) -> Result<(), StoreError> {
+    /// Writes nothing while the kept offset is within `tolerance_ms` of this
+    /// one.
+    pub(crate) fn set_cloud_clock_offset(
+        &self,
+        clock_offset_ms: i64,
+        tolerance_ms: i64,
+    ) -> Result<(), StoreError> {
         let connection = self.connection()?;
         let changed = connection.execute(
             "UPDATE meeting_cloud_state
-             SET clock_offset_ms = ?1, updated_at_utc_ms = ?2 WHERE singleton = 1",
-            params![clock_offset_ms, utc_now_ms()],
+             SET clock_offset_ms = ?1, updated_at_utc_ms = ?2
+             WHERE singleton = 1 AND abs(clock_offset_ms - ?1) > ?3",
+            params![clock_offset_ms, utc_now_ms(), tolerance_ms],
         )?;
-        if changed != 1 {
-            return Err(StoreError::NotFound);
-        }
-        Ok(())
+        cloud_state_written(&connection, changed)
     }
 
     pub(crate) fn set_cloud_paused(&self, paused: bool) -> Result<(), StoreError> {
@@ -13573,6 +13596,48 @@ mod tests {
                 .expect("foreign key targets");
             assert!(!targets.iter().any(|target| target == "meeting_sessions"));
         }
+    }
+
+    #[test]
+    fn a_quiet_cloud_pull_writes_no_rows() {
+        let (_directory, store) = store();
+        assert!(matches!(
+            store.update_cloud_cursor(Some("cursor-1".to_owned()), None),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_cloud_clock_offset(1_000, 2_000),
+            Err(StoreError::NotFound)
+        ));
+        store
+            .upsert_cloud_state(&CloudState {
+                vault_id: "vault-1".to_owned(),
+                device_id: "device-1".to_owned(),
+                endpoint: "https://sync.example.test/v1".to_owned(),
+                cursor: Some("cursor-1".to_owned()),
+                snapshot_high_water: None,
+                clock_offset_ms: 400,
+                paused: false,
+            })
+            .unwrap();
+        let rows_written = || store.connection().unwrap().total_changes();
+        let before = rows_written();
+
+        store
+            .update_cloud_cursor(Some("cursor-1".to_owned()), None)
+            .unwrap();
+        store.set_cloud_clock_offset(-500, 2_000).unwrap();
+        assert_eq!(rows_written(), before);
+        assert_eq!(store.cloud_state().unwrap().unwrap().clock_offset_ms, 400);
+
+        store
+            .update_cloud_cursor(Some("cursor-2".to_owned()), None)
+            .unwrap();
+        store.set_cloud_clock_offset(3_000, 2_000).unwrap();
+        assert_eq!(rows_written(), before + 2);
+        let state = store.cloud_state().unwrap().unwrap();
+        assert_eq!(state.cursor.as_deref(), Some("cursor-2"));
+        assert_eq!(state.clock_offset_ms, 3_000);
     }
 
     #[test]

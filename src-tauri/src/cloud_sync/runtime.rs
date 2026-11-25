@@ -114,6 +114,10 @@ const MAX_BUNDLE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SHARE_PLAINTEXT_BYTES: usize = 256 * 1024 * 1024;
 const CAPABILITIES_CACHE_MS: i64 = 5 * 60 * 1000;
 const BACKGROUND_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+/// The service's `Date` header counts whole seconds, so one steady clock reads
+/// up to a second apart, plus the request's own time. The service allows five
+/// minutes of skew.
+const CLOCK_OFFSET_TOLERANCE_MS: i64 = 2_000;
 const MAX_RETRY_DELAY_MS: i64 = 5 * 60 * 1000;
 const MAX_SHARE_EXPIRY_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// The manifest kind and `source_format` a paired phone or watch writes. Both
@@ -1348,7 +1352,7 @@ impl CloudSyncRuntime {
         let approval_signature =
             sign_canonical_pair_approval(&approval_input, &*access.keys.signing_seed)
                 .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-        self.require_request_permission(&access.state).await?;
+        self.require_request_permission(&access.state)?;
         let credentials = credentials(&access)?;
         let key = idempotency_key(&[
             "pair",
@@ -1761,7 +1765,7 @@ impl CloudSyncRuntime {
             return Ok(());
         }
         self.drain_outbox(&access).await?;
-        if self.request_permitted(&access.state).await {
+        if self.request_permitted(&access.state) {
             self.pull_changes(&access).await?;
             self.backfill_phone_thoughts(&access).await?;
             dictation_profile::sync(self, &access).await?;
@@ -1880,7 +1884,7 @@ impl CloudSyncRuntime {
         Ok(client)
     }
 
-    async fn request_permitted(&self, state: &crate::meeting::store::CloudState) -> bool {
+    fn request_permitted(&self, state: &crate::meeting::store::CloudState) -> bool {
         if self.stopped.load(Ordering::Acquire)
             || portable::is_portable()
             || self.meetings.is_capture_active()
@@ -1899,14 +1903,14 @@ impl CloudSyncRuntime {
         if endpoint != state.endpoint {
             return false;
         }
-        self.secrets.cloud_sync_keys().await.is_ok()
+        self.secrets.cloud_sync_keys_reachable()
     }
 
-    async fn require_request_permission(
+    fn require_request_permission(
         &self,
         state: &crate::meeting::store::CloudState,
     ) -> Result<(), CloudRuntimeError> {
-        if self.request_permitted(state).await {
+        if self.request_permitted(state) {
             Ok(())
         } else if portable::is_portable() {
             Err(CloudRuntimeError::PortableUnavailable)
@@ -1917,7 +1921,8 @@ impl CloudSyncRuntime {
 
     fn persist_clock(&self, store: &MeetingStore, client: &CloudClient) {
         if let Some(observation) = client.latest_server_date() {
-            let _ = store.set_cloud_clock_offset(observation.clock_offset_ms);
+            let _ = store
+                .set_cloud_clock_offset(observation.clock_offset_ms, CLOCK_OFFSET_TOLERANCE_MS);
         }
     }
 
@@ -1952,7 +1957,7 @@ impl CloudSyncRuntime {
             validate_capabilities(&capabilities)?;
             return Ok(true);
         }
-        if !self.request_permitted(&access.state).await {
+        if !self.request_permitted(&access.state) {
             return Ok(false);
         }
         let credentials = credentials(access)?;
@@ -2007,7 +2012,7 @@ impl CloudSyncRuntime {
             .due_cloud_outbox(utc_now_ms(), 16)
             .map_err(map_store_error)?;
         for due_record in due {
-            if !self.request_permitted(&access.state).await {
+            if !self.request_permitted(&access.state) {
                 return Ok(());
             }
             let claim_token = random_opaque_id()?;
@@ -2018,7 +2023,7 @@ impl CloudSyncRuntime {
             else {
                 continue;
             };
-            if !self.request_permitted(&access.state).await {
+            if !self.request_permitted(&access.state) {
                 let _ = access.store.release_cloud_outbox_claim(
                     &record.outbox_id,
                     &claim_token,
@@ -2084,7 +2089,7 @@ impl CloudSyncRuntime {
             .remote_revision_id
             .clone()
             .ok_or(CloudRuntimeError::IntegrityFailure)?;
-        if !self.request_permitted(&access.state).await {
+        if !self.request_permitted(&access.state) {
             return Err(CloudRuntimeError::Deferred);
         }
         if record.upload_id.is_none() {
@@ -2103,7 +2108,7 @@ impl CloudSyncRuntime {
         let credentials = credentials(access)?;
         let accepted;
         if original.upload_id.is_some() {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let status = access.client.upload_status(&credentials, &upload_id).await;
             self.persist_clock(&access.store, &access.client);
             match status {
@@ -2121,7 +2126,7 @@ impl CloudSyncRuntime {
                 }
                 Ok(_) => return Err(CloudRuntimeError::IntegrityFailure),
                 Err(CloudClientError::Api(error)) if error.code == CloudErrorCode::NotFound => {
-                    self.require_request_permission(&access.state).await?;
+                    self.require_request_permission(&access.state)?;
                     let created = access
                         .client
                         .create_object_upload(
@@ -2137,7 +2142,7 @@ impl CloudSyncRuntime {
                 Err(error) => return Err(CloudRuntimeError::Client(error)),
             }
         } else {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let created = access
                 .client
                 .create_object_upload(&credentials, &operation_key(&record, "create")?, &plan)
@@ -2152,7 +2157,7 @@ impl CloudSyncRuntime {
             .missing_cloud_outbox_chunks(&record.outbox_id)
             .map_err(map_store_error)?
         {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let staged = payload
                 .chunks
                 .iter()
@@ -2187,7 +2192,7 @@ impl CloudSyncRuntime {
                 )
                 .map_err(map_store_error)?;
         }
-        self.require_request_permission(&access.state).await?;
+        self.require_request_permission(&access.state)?;
         let committed = access
             .client
             .commit_upload(&credentials, &operation_key(&record, "commit")?, &upload_id)
@@ -2286,7 +2291,7 @@ impl CloudSyncRuntime {
         };
         let signature = sign_canonical_tombstone(&tombstone_input, &*access.keys.signing_seed)
             .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-        self.require_request_permission(&access.state).await?;
+        self.require_request_permission(&access.state)?;
         let credentials = credentials(access)?;
         let response = access
             .client
@@ -2352,7 +2357,7 @@ impl CloudSyncRuntime {
             .map_err(map_store_error)?
             .ok_or(CloudRuntimeError::IntegrityFailure)?;
         if share.state == CloudShareState::Revoked {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let credentials = credentials(access)?;
             let response = access
                 .client
@@ -2389,7 +2394,7 @@ impl CloudSyncRuntime {
         }
         let mut record = original.clone();
         self.stage_share(&access.store, &record, &share, None)?;
-        if !self.request_permitted(&access.state).await {
+        if !self.request_permitted(&access.state) {
             return Err(CloudRuntimeError::Deferred);
         }
         if record.upload_id.is_none() {
@@ -2407,7 +2412,7 @@ impl CloudSyncRuntime {
         let credentials = credentials(access)?;
         let accepted;
         if original.upload_id.is_some() {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let status = access.client.upload_status(&credentials, &upload_id).await;
             self.persist_clock(&access.store, &access.client);
             match status {
@@ -2420,7 +2425,7 @@ impl CloudSyncRuntime {
                 }
                 Ok(_) => return Err(CloudRuntimeError::IntegrityFailure),
                 Err(CloudClientError::Api(error)) if error.code == CloudErrorCode::NotFound => {
-                    self.require_request_permission(&access.state).await?;
+                    self.require_request_permission(&access.state)?;
                     let created = access
                         .client
                         .create_share_upload(
@@ -2436,7 +2441,7 @@ impl CloudSyncRuntime {
                 Err(error) => return Err(CloudRuntimeError::Client(error)),
             }
         } else {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let created = access
                 .client
                 .create_share_upload(&credentials, &operation_key(&record, "create")?, &plan)
@@ -2455,7 +2460,7 @@ impl CloudSyncRuntime {
             .missing_cloud_outbox_chunks(&record.outbox_id)
             .map_err(map_store_error)?
         {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let staged = payload
                 .chunks
                 .iter()
@@ -2490,7 +2495,7 @@ impl CloudSyncRuntime {
                 )
                 .map_err(map_store_error)?;
         }
-        self.require_request_permission(&access.state).await?;
+        self.require_request_permission(&access.state)?;
         let committed = access
             .client
             .commit_upload(&credentials, &operation_key(&record, "commit")?, &upload_id)
@@ -3018,7 +3023,7 @@ impl CloudSyncRuntime {
     async fn pull_changes(&self, access: &CloudAccess) -> Result<(), CloudRuntimeError> {
         let mut cursor = access.state.cursor.clone();
         loop {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let credentials = credentials(access)?;
             let page = access
                 .client
@@ -3061,7 +3066,7 @@ impl CloudSyncRuntime {
         let mut high_water = access.state.snapshot_high_water.clone();
         let mut after = None;
         loop {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let credentials = credentials(access)?;
             let page = access
                 .client
@@ -3222,7 +3227,7 @@ impl CloudSyncRuntime {
         object_id: &str,
         revision_id: &str,
     ) -> Result<RemoteObject, CloudRuntimeError> {
-        self.require_request_permission(&access.state).await?;
+        self.require_request_permission(&access.state)?;
         let credentials = credentials(access)?;
         let response = access
             .client
@@ -3497,7 +3502,7 @@ impl CloudSyncRuntime {
         );
         let mut total_bytes = 0_u64;
         for index in 0..envelope.chunk_count {
-            self.require_request_permission(&access.state).await?;
+            self.require_request_permission(&access.state)?;
             let chunk = access
                 .client
                 .object_chunk(&credentials, object_id, revision_id, index)
@@ -3537,7 +3542,7 @@ impl CloudSyncRuntime {
         access: &CloudAccess,
         envelope: &ObjectRevisionEnvelope,
     ) -> Result<[u8; 32], CloudRuntimeError> {
-        self.require_request_permission(&access.state).await?;
+        self.require_request_permission(&access.state)?;
         let credentials = credentials(access)?;
         let devices = access
             .client

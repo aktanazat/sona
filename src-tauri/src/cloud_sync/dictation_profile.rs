@@ -281,7 +281,7 @@ pub(super) async fn sync(
         .map_err(CloudRuntimeError::Client)
     };
     let credentials = credentials(access)?;
-    runtime.require_request_permission(&access.state).await?;
+    runtime.require_request_permission(&access.state)?;
     let created = access
         .client
         .create_object_upload(&credentials, &key("create")?, &plan)
@@ -314,7 +314,7 @@ pub(super) async fn sync(
             if created.accepted_indexes.contains(&index) {
                 continue;
             }
-            runtime.require_request_permission(&access.state).await?;
+            runtime.require_request_permission(&access.state)?;
             let response = access
                 .client
                 .upload_chunk(
@@ -334,7 +334,7 @@ pub(super) async fn sync(
             }
         }
     }
-    runtime.require_request_permission(&access.state).await?;
+    runtime.require_request_permission(&access.state)?;
     let committed = access
         .client
         .commit_upload(&credentials, &key("commit")?, &pending.upload_id)
