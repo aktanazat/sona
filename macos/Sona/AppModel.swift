@@ -864,8 +864,11 @@ final class AppModel {
         sheet = .chat
     }
 
+    /// Adds the quote to what is already written in Talk to Sona, so an
+    /// unsent question or an earlier quote stays.
     func discussSelection(_ quoted: QuotedSelection) {
-        chat.openAsk(draft: quoted.draft)
+        let written = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        chat.openAsk(draft: written.isEmpty ? quoted.draft : written + "\n\n" + quoted.draft)
         sheet = .chat
     }
 

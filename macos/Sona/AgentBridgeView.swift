@@ -493,7 +493,7 @@ private struct AgentGuidanceEditor: View {
                     RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .strokeBorder(Theme.border, lineWidth: 1)
                 )
-            Text("\(store.guidanceDraft.count) of 2000 characters").metaText()
+            Text("\(store.guidanceDraft.unicodeScalars.count) of 2000 characters").metaText()
         }
     }
 }

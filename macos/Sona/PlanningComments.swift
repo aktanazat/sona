@@ -248,9 +248,9 @@ private struct PlanningCommentEntry: View {
                     PlanningCommentComposer(threads: threads, subject: subject, editing: comment, prompt: "Edit comment",
                                             autofocus: true) { editing = false }
                 } else if let body = comment.body {
-                    MarkdownBody(source: body) { line in
+                    MarkdownBody(source: body, toggle: comment.author.kind == .me ? { line in
                         run { try await threads.edit(comment, on: subject, body: MarkdownBody.toggled(body, line: line)) }
-                    }
+                    } : nil)
                     .textSelection(.enabled)
                     ReactionStrip(subject: .comment, id: comment.id, reactions: comment.reactions)
                 }

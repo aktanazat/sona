@@ -700,7 +700,7 @@ private struct ScratchNoteEditor: View {
     @State private var caretBottom: CGFloat = 0
 
     private var quoted: QuotedSelection? {
-        guard let noteId, case let .selection(range)? = selection?.indices, !range.isEmpty else { return nil }
+        guard let noteId, let range = selection?.range(in: text), !range.isEmpty else { return nil }
         return QuotedSelection(text: String(text[range]), link: "sona://note/\(noteId)")
     }
 

@@ -13,6 +13,15 @@ extension FocusedValues {
     }
 }
 
+extension TextSelection {
+    /// The selected range in `text`, or nil when the selection was made in
+    /// longer text that has since been replaced, so it no longer fits.
+    func range(in text: String) -> Range<String.Index>? {
+        guard case let .selection(range) = indices, range.upperBound <= text.endIndex else { return nil }
+        return range
+    }
+}
+
 /// The editor for Markdown notes and task details. It keeps the system text
 /// editor, and adds the formatting keys, list keys and a bar over a selection.
 /// Key codes are US ANSI, so the shortcuts match the keys' positions.
@@ -27,7 +36,7 @@ struct MarkdownTextEditor: View {
     @State private var selectionBottom: CGFloat = 0
 
     private var span: MarkdownSpan? {
-        guard case let .selection(range)? = selection?.indices else { return nil }
+        guard let range = selection?.range(in: text) else { return nil }
         return MarkdownSpan(
             text: text,
             start: text.distance(from: text.startIndex, to: range.lowerBound),

@@ -59,9 +59,11 @@ impl Tracker<'_> {
         &self,
         args: &GuidanceSaveArgs,
     ) -> Result<WorkAnswer, ExternalError> {
-        let operation_id = args.write.operation_id("guidance-save", &args.text)?;
-        let by = args.write.agent();
         let before = self.current_guidance()?;
+        let operation_id = args
+            .write
+            .operation_id("guidance-save", &(before.version, &args.text))?;
+        let by = args.write.agent();
         let saved = if args.dry_run {
             self.history
                 .with_connection(|conn| {

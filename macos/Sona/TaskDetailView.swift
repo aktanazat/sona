@@ -326,7 +326,7 @@ private struct DetailNotes: View {
     @State private var selection: TextSelection?
 
     private var quoted: QuotedSelection? {
-        guard case let .selection(range)? = selection?.indices, !range.isEmpty else { return nil }
+        guard let range = selection?.range(in: text), !range.isEmpty else { return nil }
         return QuotedSelection(text: String(text[range]), link: TaskCopy.link(row))
     }
 
@@ -1515,7 +1515,9 @@ private struct CommentEntry: View {
                         editing = false
                     }
                 } else if let body = comment.body {
-                    MarkdownBody(source: body, toggle: nil)
+                    MarkdownBody(source: body, toggle: comment.author.kind == .me ? { line in
+                        run { await model.work.editComment(comment.id, on: itemId, body: MarkdownBody.toggled(body, line: line)) }
+                    } : nil)
                         .textSelection(.enabled)
                     ReactionStrip(subject: .comment, id: comment.id, reactions: comment.reactions)
                 }

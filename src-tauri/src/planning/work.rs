@@ -1521,11 +1521,15 @@ fn answer_mention(app: AppHandle, mention: WorkComment, body: String) {
             std::time::Duration::from_secs(300),
         )
         .await;
-        let reply = turn.answer.unwrap_or_else(|error| {
-            log::warn!("Sona could not answer a comment mention: {error:?}");
-            "I couldn't answer this just now. Talk to Sona needs to be set up and reachable."
-                .to_owned()
-        });
+        let reply = turn
+            .answer
+            .inspect_err(|error| log::warn!("Sona could not answer a comment mention: {error:?}"))
+            .ok()
+            .filter(|reply| !reply.trim().is_empty())
+            .unwrap_or_else(|| {
+                "I couldn't answer this just now. Talk to Sona needs to be set up and reachable."
+                    .to_owned()
+            });
         let author = comments::Author {
             actor: WorkActor::Sona,
             agent: None,
