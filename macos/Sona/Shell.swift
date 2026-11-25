@@ -88,6 +88,12 @@ struct Shell: View {
                 SaveTemplateSheet(id: id).environment(model)
             case let .problemReport(historyID):
                 ProblemReportSheet(historyID: historyID).environment(model)
+            case let .quicklinkEditor(id):
+                QuicklinkEditor(store: model.quicklinks, id: id)
+            case let .quicklinkArgument(id):
+                QuicklinkArgumentSheet(link: model.quicklinks.links.first { $0.id == id }) {
+                    try model.openQuicklink(id, argument: $0)
+                }
             }
         }
     }

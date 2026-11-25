@@ -75,6 +75,7 @@ enum SettingsPlace: String, CaseIterable, Identifiable {
     case profile, essentials, appearance, shortcuts, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, workImport, documents, about, debug
     case connections, tasks
+    case quicklinks
 
     var id: String { rawValue }
 
@@ -101,6 +102,7 @@ enum SettingsPlace: String, CaseIterable, Identifiable {
         case .debug: "Debug"
         case .connections: "Connections"
         case .tasks: "Tasks"
+        case .quicklinks: "Quicklinks"
         }
     }
 }
@@ -120,6 +122,8 @@ enum Sheet: Identifiable, Hashable {
     case share(String)
     case saveTemplate(String)
     case problemReport(Int64?)
+    case quicklinkEditor(UUID?)
+    case quicklinkArgument(UUID)
 
     var id: Self { self }
 }
@@ -403,6 +407,7 @@ final class AppModel {
     let vocabulary: VocabularyStore
     let prompts: PromptsStore
     let workflows: WorkflowsStore
+    let quicklinks: QuicklinksStore
     let agents: AgentBridgeStore
     let pairing: AgentPairingStore
     let chat: ChatStore
@@ -482,6 +487,7 @@ final class AppModel {
         vocabulary = VocabularyStore(core: core)
         prompts = PromptsStore(core: core)
         workflows = WorkflowsStore(core: core)
+        quicklinks = QuicklinksStore(core: core)
         agents = AgentBridgeStore(core: core)
         pairing = AgentPairingStore(core: core)
         chat = ChatStore(core: core)
@@ -566,6 +572,8 @@ final class AppModel {
                 self?.showSettings(page)
             })
         }
+        actions.append(PaletteAction(id: "go-settings-quicklinks", group: .navigation, title: "Quicklinks",
+                                     run: { [weak self] in self?.showSettings(.quicklinks) }, icon: "link"))
         if let title = captureActionTitle {
             actions.append(PaletteAction(id: "toggle-recording", group: .actions, title: title) { [weak self] in
                 self?.toggleCapture()
@@ -587,6 +595,11 @@ final class AppModel {
         })
         actions.append(PaletteAction(id: "keyboard-shortcuts", group: .actions, title: "Keyboard shortcuts",
                                      run: { [weak self] in self?.openKeyboardShortcuts() }, shortcut: "cmd+/"))
+        actions += quicklinks.links.map { link in
+            PaletteAction(id: "quicklink-\(link.id)", group: .quicklinks, title: link.name,
+                          run: { [weak self] in self?.openQuicklink(link.id) },
+                          icon: "link", detail: link.host)
+        }
         return actions
     }
 
@@ -600,6 +613,31 @@ final class AppModel {
     func showSettings(_ tab: SettingsPlace) {
         settingsPlace = tab
         showingSettings = true
+    }
+
+    func openQuicklink(_ id: UUID) {
+        do {
+            guard let link = quicklinks.links.first(where: { $0.id == id }) else {
+                throw QuicklinkError.changed
+            }
+            if link.needsArgument {
+                sheet = .quicklinkArgument(id)
+            } else {
+                try openQuicklink(id, argument: nil)
+            }
+        } catch {
+            quicklinks.openError = error.localizedDescription
+            showSettings(.quicklinks)
+        }
+    }
+
+    func openQuicklink(_ id: UUID, argument: String?) throws {
+        guard let link = quicklinks.links.first(where: { $0.id == id }) else {
+            throw QuicklinkError.changed
+        }
+        let destination = try link.destination(argument: argument)
+        guard NSWorkspace.shared.open(destination) else { throw QuicklinkError.cannotOpen }
+        quicklinks.openError = nil
     }
 
     /// The main window, in front and key. A floating card, the menu bar, a
@@ -1194,6 +1232,7 @@ final class AppModel {
         Task { await vocabulary.start() }
         Task { await prompts.start() }
         Task { await workflows.start() }
+        Task { await quicklinks.load() }
         Task { await agents.start() }
         Task { await cloudSync.start() }
         Task { await shared.start() }

@@ -51,6 +51,10 @@ struct SettingsScreen: View {
                 store: model.workflows,
                 openMeeting: model.openMeeting,
                 openDocuments: { model.showSettings(.documents) })
+        case .quicklinks:
+            QuicklinksView(store: model.quicklinks,
+                           edit: { model.sheet = .quicklinkEditor($0) },
+                           open: { model.openQuicklink($0) })
         case .meetings:
             Page {
                 PageTitle("Meetings", subtitle: "When Sona notices a call, what it keeps, and what it does after.")
