@@ -1,6 +1,7 @@
 import ActivityKit
 import Combine
 import Foundation
+import ImageIO
 import Network
 import PhotosUI
 import Speech
@@ -932,24 +933,19 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     /// Read one picked photo into the capture format: JPEG, at most 2048 px on its long
-    /// edge, on disk. Nil when the item is not an image this device can decode.
+    /// edge, on disk. Nil when the item is not an image this device can decode. The photo
+    /// is decoded straight at that size; a camera frame decoded whole first takes about
+    /// 190 MB at 48 megapixels.
     nonisolated static func prepare(_ item: PhotosPickerItem) async -> CapturedImage? {
         guard let data = try? await item.loadTransferable(type: Data.self),
-              let image = UIImage(data: data)
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 2048,
+              ] as CFDictionary),
+              let jpeg = UIImage(cgImage: image).jpegData(compressionQuality: 0.85)
         else { return nil }
-        let longest = max(image.size.width, image.size.height)
-        let scale = min(1, 2048 / max(longest, 1))
-        let size = CGSize(
-            width: (image.size.width * scale).rounded(.down),
-            height: (image.size.height * scale).rounded(.down)
-        )
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        let jpeg = UIGraphicsImageRenderer(size: size, format: format).jpegData(
-            withCompressionQuality: 0.85
-        ) { _ in
-            image.draw(in: CGRect(origin: .zero, size: size))
-        }
         let url = FileManager.default.temporaryDirectory
             .appending(path: "thought-image-\(UUID().uuidString).jpg")
         guard (try? jpeg.write(to: url, options: .atomic)) != nil else { return nil }
@@ -958,8 +954,8 @@ final class AppModel: NSObject, ObservableObject {
             mime: "image/jpeg",
             byteLength: jpeg.count,
             sha256: sha256Base64URL(jpeg),
-            width: Int(size.width),
-            height: Int(size.height)
+            width: image.width,
+            height: image.height
         )
     }
 
