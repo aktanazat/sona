@@ -297,8 +297,7 @@ END;";
 /// after `INBOX_SUBJECTS_MIGRATION` and `NOTE_NOTICES_MIGRATION`; the note
 /// trigger, on a table only the history database has, is dropped here and
 /// made again by running `NOTE_NOTICES_MIGRATION` once more.
-pub(crate) const HOUSEKEEPING_NOTICES_MIGRATION: &str =
-    "DROP TRIGGER IF EXISTS planning_task_lifecycle_delete;
+pub(crate) const HOUSEKEEPING_NOTICES_MIGRATION: &str = "DROP TRIGGER IF EXISTS planning_task_lifecycle_delete;
 DROP TRIGGER IF EXISTS planning_notifications_run_delete;
 DROP TRIGGER IF EXISTS planning_notifications_project_delete;
 DROP TRIGGER IF EXISTS planning_notifications_initiative_delete;
@@ -1798,17 +1797,11 @@ mod update_due_tests {
                  WHERE subject_id = ?1 ORDER BY created_at_ms",
             )
             .expect("a query")
-            .query_map([&project], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
+            .query_map([&project], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .expect("notices")
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
-        let reminder = (
-            "reminder".to_owned(),
-            "project".to_owned(),
-            Some("update".to_owned()),
-        );
+        let reminder = ("reminder".to_owned(), "project".to_owned(), Some("update".to_owned()));
         assert_eq!(notices, vec![reminder.clone(), reminder]);
     }
 
@@ -1826,9 +1819,6 @@ mod update_due_tests {
         let last_ms = at(1, 12);
 
         assert_eq!(last_cycle_due(&zone, last_ms, 1, 2, at(8, 1)), None);
-        assert_eq!(
-            last_cycle_due(&zone, last_ms, 1, 2, at(8, 3)),
-            Some(at(8, 3))
-        );
+        assert_eq!(last_cycle_due(&zone, last_ms, 1, 2, at(8, 3)), Some(at(8, 3)));
     }
 }
