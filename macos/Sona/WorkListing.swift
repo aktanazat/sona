@@ -120,6 +120,13 @@ struct TaskGroup: Identifiable, Equatable {
     /// How deep a sub-task sits under its parent, by id, when the list
     /// nests them; a row not in it sits at the top.
     var depth: [String: Int] = [:]
+
+
+    var rowSummary: String {
+        let count = "\(rows.count)"
+        guard let total = TaskEstimate.totalTitle(rows.lazy.map(\.estimate)) else { return count }
+        return "\(count) · \(total)"
+    }
 }
 
 /// Filtering, ordering and grouping, on the rows the store already holds, so

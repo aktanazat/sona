@@ -236,6 +236,14 @@ enum TaskEstimate {
     static let points = [1, 2, 4, 8, 16]
 
     static func title(_ points: Int) -> String { points == 1 ? "1 point" : "\(points) points" }
+
+    static func totalTitle(_ estimates: some Sequence<Int?>) -> String? {
+        var total: Int?
+        for case let estimate? in estimates {
+            total = (total ?? 0) + estimate
+        }
+        return total.map(title)
+    }
 }
 
 struct WorkProgress: Codable, Equatable {

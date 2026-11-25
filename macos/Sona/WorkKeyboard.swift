@@ -479,7 +479,7 @@ final class WorkFocus {
     /// The quote whose moment is playing, so only its button turns to Stop
     /// when several quotes come from one meeting.
     var playingMoment: String?
-    /// Rows on screen, top to bottom, as the list last drew them.
+    /// Distinct tasks on screen, in the order of their first visible row.
     @ObservationIgnored private(set) var visible: [String] = []
     @ObservationIgnored private var anchor: String?
     /// Where the pointer was when keys last moved the highlight: rows that
@@ -513,12 +513,18 @@ final class WorkFocus {
     }
 
     func show(_ ids: [String]) {
-        visible = ids
-        selection.formIntersection(ids)
-        if let anchor, !ids.contains(anchor) { self.anchor = nil }
-        if let arriving, ids.contains(arriving) { highlighted = arriving }
+        let shown = Set(ids)
+        if shown.count == ids.count {
+            visible = ids
+        } else {
+            var unseen = shown
+            visible = ids.filter { unseen.remove($0) != nil }
+        }
+        selection.formIntersection(shown)
+        if let anchor, !shown.contains(anchor) { self.anchor = nil }
+        if let arriving, shown.contains(arriving) { highlighted = arriving }
         arriving = nil
-        if let highlighted, !ids.contains(highlighted) { self.highlighted = nil }
+        if let highlighted, !shown.contains(highlighted) { self.highlighted = nil }
     }
 
     func highlightWhenShown(_ id: String) {
