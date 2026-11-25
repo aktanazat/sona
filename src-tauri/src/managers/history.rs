@@ -377,6 +377,7 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::work::inbox_settings::DOCK_BADGE_MIGRATION),
     M::up(crate::planning::catalog::PROJECT_POSITION_MIGRATION),
     M::up(crate::planning::work::agents::GUIDANCE_MIGRATION),
+    M::up(crate::planning::work::sessions::WATCHED_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

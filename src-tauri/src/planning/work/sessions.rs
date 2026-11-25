@@ -47,6 +47,42 @@ CREATE TRIGGER planning_agent_sessions_task_delete AFTER DELETE ON planning_task
     DELETE FROM planning_agent_sessions WHERE task_id = old.id;
 END;";
 
+/// The folder a session's agent works in, and whether Sona keeps the session
+/// from the agent's hooks rather than the agent reporting it. The Mac reads the
+/// session's code changes in the folder.
+pub(crate) const WATCHED_MIGRATION: &str =
+    "ALTER TABLE planning_agent_sessions ADD COLUMN folder TEXT;
+ALTER TABLE planning_agent_sessions ADD COLUMN watched INTEGER NOT NULL DEFAULT 0
+    CHECK(watched IN (0, 1));";
+
+/// Names a watched session's record on its task, so every step of one session
+/// working one task lands in one record.
+const WATCH_NAMESPACE: Uuid = Uuid::from_u128(0x6f0e_2b8c_41d7_4a93_b5e2_7c19_d84a_3f60);
+
+/// What a watched agent session did, as its hooks told it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Watched {
+    /// A prompt that named the task started the session on it.
+    Started,
+    /// The agent asked leave to use a tool, or is about to use it.
+    Tool { name: String, input: Option<String> },
+    /// The agent finished a turn and waits for its user, with its last words
+    /// when the hook carried them.
+    Turn { message: Option<String> },
+}
+
+/// One step of a watched session on the task it named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WatchedStep {
+    pub(crate) session_id: String,
+    /// The task as the session named it: `S-12` or the task's id.
+    pub(crate) task: String,
+    pub(crate) folder: Option<String>,
+    /// The hook event's own id, so a step is recorded once.
+    pub(crate) event_id: String,
+    pub(crate) step: Watched,
+}
+
 pub(crate) const UNRESPONSIVE_AFTER_MS: i64 = 10_000;
 pub(crate) const STALE_AFTER_MS: i64 = 30 * 60_000;
 pub(crate) const MAX_PLAN_STEPS: usize = 50;
@@ -168,6 +204,10 @@ pub struct WorkSession {
     pub question: Option<WorkSessionActivity>,
     pub unread_prompts: Vec<WorkSessionActivity>,
     pub activities: Vec<WorkSessionActivity>,
+    pub folder: Option<String>,
+    /// Sona keeps this session from the agent's hooks; it cannot be stopped
+    /// or answered from the task.
+    pub watched: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -191,10 +231,12 @@ struct Stored {
     plan_json: String,
     ended_at_ms: Option<i64>,
     end_kind: Option<String>,
+    folder: Option<String>,
+    watched: bool,
 }
 
 const SESSION_COLUMNS: &str = "id, task_id, agent, created_at_ms, heartbeat_at_ms,
-    stop_requested_at_ms, stop_requested_by, plan_json, ended_at_ms, end_kind";
+    stop_requested_at_ms, stop_requested_by, plan_json, ended_at_ms, end_kind, folder, watched";
 
 const ACTIVITY_COLUMNS: &str = "id, kind, at_ms, author_kind, author_name, body, action,
     parameter, result, options_json, answer_value, ephemeral";
@@ -211,6 +253,8 @@ fn read_stored(row: &Row<'_>) -> rusqlite::Result<Stored> {
         plan_json: row.get(7)?,
         ended_at_ms: row.get(8)?,
         end_kind: row.get(9)?,
+        folder: row.get(10)?,
+        watched: row.get(11)?,
     })
 }
 
@@ -327,6 +371,8 @@ fn view(
         question,
         unread_prompts,
         activities: if full { log } else { Vec::new() },
+        folder: stored.folder,
+        watched: stored.watched,
     })
 }
 
@@ -514,6 +560,7 @@ pub(crate) fn start(
     task_id: &str,
     agent: &str,
     set_doer: bool,
+    folder: Option<&str>,
     at_ms: i64,
 ) -> Result<String> {
     let task = super::items::item(conn, &store::uuid(task_id)?)?;
@@ -542,9 +589,9 @@ pub(crate) fn start(
     }
     let id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO planning_agent_sessions (id, task_id, agent, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![id, task.id, agent, at_ms],
+        "INSERT INTO planning_agent_sessions (id, task_id, agent, created_at_ms, folder)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, task.id, agent, at_ms, folder],
     )?;
     Ok(id)
 }
@@ -733,14 +780,92 @@ pub(crate) fn start_as(
     operation_id: &str,
     task_id: &str,
     set_doer: bool,
+    folder: Option<&str>,
 ) -> Result<WorkSession, String> {
     change(
         app,
         operation_id,
         "work_session_start",
         &(task_id, agent, set_doer),
-        |tx, at_ms| start(tx, task_id, agent, set_doer, at_ms),
+        |tx, at_ms| start(tx, task_id, agent, set_doer, folder, at_ms),
     )
+}
+
+/// Keeps a watched session on its task: the first step makes the task's record
+/// of the session, in the folder the agent works in, and each later step adds
+/// to it. The record carries no stop or reply: the user does those in the agent.
+pub(crate) fn watch(
+    conn: &Connection,
+    task_id: &str,
+    agent: &str,
+    watched: &WatchedStep,
+    at_ms: i64,
+) -> Result<String> {
+    let task = super::items::item(conn, &store::uuid(task_id)?)?;
+    let id = Uuid::new_v5(
+        &WATCH_NAMESPACE,
+        format!("{}\0{}", watched.session_id, task.id).as_bytes(),
+    )
+    .to_string();
+    conn.execute(
+        "INSERT OR IGNORE INTO planning_agent_sessions
+            (id, task_id, agent, created_at_ms, folder, watched)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+        params![id, task.id, agent, at_ms, watched.folder],
+    )?;
+    let (kind, input) = match &watched.step {
+        Watched::Started => return Ok(id),
+        Watched::Tool { name, input } => (
+            WorkSessionActivityKind::Action,
+            ActivityInput {
+                action: Some(name.clone()),
+                parameter: input.clone(),
+                ..ActivityInput::default()
+            },
+        ),
+        Watched::Turn { message } => (
+            WorkSessionActivityKind::Thought,
+            ActivityInput {
+                body: Some(
+                    message
+                        .clone()
+                        .filter(|message| !message.trim().is_empty())
+                        .unwrap_or_else(|| "Finished a turn".to_owned()),
+                ),
+                ..ActivityInput::default()
+            },
+        ),
+    };
+    let author = Author {
+        actor: WorkActor::Agent,
+        agent: Some(agent),
+    };
+    insert_activity(conn, &id, kind, author, &input, None, at_ms)?;
+    Ok(id)
+}
+
+/// [`watch`] once per hook event, the task changed for whoever shows it.
+pub(crate) fn watch_as(
+    app: &AppHandle,
+    task_id: &str,
+    agent: &str,
+    watched: &WatchedStep,
+) -> Result<(), String> {
+    let at_ms = now_ms();
+    let operation_id = Uuid::new_v5(&WATCH_NAMESPACE, watched.event_id.as_bytes()).to_string();
+    run_history(app, |conn| {
+        let id = store::mutate(
+            conn,
+            &operation_id,
+            "work_session_watch",
+            &(task_id, agent, &watched.session_id, &watched.event_id),
+            at_ms,
+            |tx| watch(tx, task_id, agent, watched, at_ms),
+        )?;
+        let mut effects = Effects::default();
+        effects.items.push(task_of(conn, &id)?);
+        Ok(Done { value: (), effects })
+    })
 }
 
 pub(crate) fn emit_as(
@@ -915,7 +1040,7 @@ mod tests {
         let conn = Connection::open_in_memory().expect("a history database");
         schema::apply_all(&conn).expect("the planner schema");
         let task = filed(&conn, "Draft the venue contract");
-        let id = start(&conn, &task, "Codex", true, 1).expect("a session");
+        let id = start(&conn, &task, "Codex", true, None, 1).expect("a session");
         let thought = ActivityInput {
             body: Some("Reading the deposit terms".to_owned()),
             ..ActivityInput::default()
@@ -977,6 +1102,50 @@ mod tests {
                 WorkSessionActivityKind::Thought,
                 WorkSessionActivityKind::Stop,
                 WorkSessionActivityKind::Response,
+            ]
+        );
+    }
+
+    /// A watched session keeps one record on its task however many steps it
+    /// reports: in its folder, marked watched, its tools and turns in order.
+    #[test]
+    fn a_watched_session_keeps_one_record_of_its_steps() {
+        let conn = Connection::open_in_memory().expect("a history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let task = filed(&conn, "Book the offsite venue");
+        let step = |event: &str, step: Watched| WatchedStep {
+            session_id: "claude-session".to_owned(),
+            task: "S-1".to_owned(),
+            folder: Some("/Users/me/venue".to_owned()),
+            event_id: event.to_owned(),
+            step,
+        };
+        let tool = Watched::Tool {
+            name: "Bash".to_owned(),
+            input: Some("cargo test".to_owned()),
+        };
+        let ids = [
+            (step("start", Watched::Started), 1),
+            (step("bash", tool), 2),
+            (step("stop", Watched::Turn { message: None }), 3),
+        ]
+        .map(|(step, at)| watch(&conn, &task, "Claude Code", &step, at).expect("a kept step"));
+        assert_eq!([&ids[1], &ids[2]], [&ids[0], &ids[0]]);
+        let record = session(&conn, &ids[0], 4).expect("the record");
+        assert_eq!(
+            (record.folder.as_deref(), record.watched, record.state),
+            (Some("/Users/me/venue"), true, WorkSessionState::Active)
+        );
+        let kept: Vec<_> = record
+            .activities
+            .iter()
+            .map(|activity| (activity.kind, activity.action.as_deref(), activity.body.as_deref()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (WorkSessionActivityKind::Action, Some("Bash"), None),
+                (WorkSessionActivityKind::Thought, None, Some("Finished a turn")),
             ]
         );
     }

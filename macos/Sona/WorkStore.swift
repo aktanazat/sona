@@ -731,7 +731,27 @@ final class WorkStore {
         let noun = before.count == 1 ? "1 task" : "\(before.count) tasks"
         let title = agent.map { "Delegated \(noun) to \($0), prompt copied" } ?? "Took back \(noun)"
         let undo = remember(title, .delegate(before.map { (id: $0.id, agent: $0.doer?.agent) }))
-        hand(before.map(\.id), to: agent, copying: true, undo: undo)
+        hand(before.map(\.id), to: agent, undo: undo) { prompts in
+            let board = NSPasteboard.general
+            board.clearContents()
+            if !board.setString(prompts.joined(separator: "\n\n"), forType: .string) {
+                self.mutationError = "The prompt could not be copied."
+            }
+        }
+    }
+
+    /// Hands one task to a coding agent and starts the agent on it in a terminal, in a
+    /// folder picked for the task's project. The session then shows on the task.
+    func start(_ id: String, with agent: AgentLaunch) {
+        guard let row = rows([id]).first, let folder = AgentLaunch.folder(for: row.projectId) else { return }
+        let undo = remember("Started \(agent.name) on 1 task", .delegate([(id: row.id, agent: row.doer?.agent)]))
+        hand([id], to: agent.name, undo: undo) { prompts in
+            do {
+                try agent.open(prompt: prompts[0], in: folder)
+            } catch {
+                self.mutationError = error.localizedDescription
+            }
+        }
     }
 
     /// Creates or changes a label; returns its id, which is in `labels` at once.
@@ -997,7 +1017,7 @@ final class WorkStore {
             setArchived(ids, false, undo: nil)
         case let .delegate(doers):
             for (agent, handed) in Dictionary(grouping: doers, by: { $0.agent }) {
-                hand(handed.map { $0.id }, to: agent, copying: false, undo: nil)
+                hand(handed.map { $0.id }, to: agent, undo: nil)
             }
         case let .unbook(id):
             unbook(id)
@@ -1615,9 +1635,11 @@ final class WorkStore {
         }
     }
 
-    /// Sends each hand-over in its turn and copies the prompts the core
-    /// wrote, a blank line apart.
-    private func hand(_ ids: [String], to agent: String?, copying: Bool, undo: Int?) {
+    /// Sends each hand-over in its turn, then gives the prompts the core
+    /// wrote, if any, to `deliver`.
+    private func hand(
+        _ ids: [String], to agent: String?, undo: Int?, deliver: (@MainActor ([String]) -> Void)? = nil
+    ) {
         let before = rows(ids)
         let now = ProjectsStore.milliseconds(.now)
         edit(Set(ids)) { row in row.doer = agent.map { WorkDoer(agent: $0, sinceMs: now) } }
@@ -1636,12 +1658,8 @@ final class WorkStore {
                     break
                 }
             }
-            if copying, !prompts.isEmpty {
-                let board = NSPasteboard.general
-                board.clearContents()
-                if !board.setString(prompts.joined(separator: "\n\n"), forType: .string) {
-                    self.mutationError = "The prompt could not be copied."
-                }
+            if let deliver, !prompts.isEmpty {
+                deliver(prompts)
             }
             self.reloadWhenIdle = true
         }

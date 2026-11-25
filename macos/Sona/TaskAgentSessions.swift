@@ -53,7 +53,7 @@ private struct SessionCard: View {
                 Text(TaskDates.ago(session.lastActivityAtMs ?? session.createdAtMs, now: TaskDates.now()))
                     .metaText()
                     .help(PlanningFormat.date(session.lastActivityAtMs ?? session.createdAtMs))
-                if session.isOpen && session.stopRequestedAtMs == nil {
+                if session.isOpen && session.stopRequestedAtMs == nil && !session.watched {
                     Button {
                         stop()
                     } label: {
@@ -80,7 +80,10 @@ private struct SessionCard: View {
                     SessionPlan(plan: session.plan)
                 }
                 SessionTimeline(session: session)
-                if session.isOpen {
+                if let folder = session.folder {
+                    SessionChanges(folder: folder, moved: session.lastActivityAtMs ?? session.createdAtMs)
+                }
+                if session.isOpen && !session.watched {
                     SessionReply(session: session)
                 }
             }
@@ -99,6 +102,90 @@ private struct SessionCard: View {
             _ = await work.stopSession(id)
             stopping = false
         }
+    }
+}
+
+/// The uncommitted changes in the folder a session's agent works in, read with git each
+/// time the session moves. Git cannot tell who made a change, so the user's own edits in
+/// that checkout show too.
+private struct SessionChanges: View {
+    let folder: String
+    let moved: Int64
+    @State private var changes: [FolderChange] = []
+
+    private static let shown = 12
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !changes.isEmpty {
+                Text("Changes in \(URL(fileURLWithPath: folder).lastPathComponent)")
+                    .metaText()
+                    .help(folder)
+                ForEach(changes.prefix(Self.shown)) { change in
+                    HStack(spacing: 8) {
+                        Text(change.path)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text(change.counts).metaText()
+                    }
+                }
+                if changes.count > Self.shown {
+                    Text("and \(changes.count - Self.shown) more").metaText()
+                }
+            }
+        }
+        .task(id: moved) {
+            let folder = folder
+            changes = await Task.detached(priority: .utility) { FolderChange.read(in: folder) }.value
+        }
+    }
+}
+
+/// One file git reports changed in a checkout: lines added and removed, or new.
+struct FolderChange: Identifiable, Equatable, Sendable {
+    let path: String
+    let counts: String
+    var id: String { path }
+
+    /// The changes in the checkout holding `folder`, paths from its top; none when the
+    /// folder is in no checkout or git cannot read it. Git runs only inside a checkout.
+    static func read(in folder: String) -> [FolderChange] {
+        var root = URL(fileURLWithPath: folder, isDirectory: true)
+        while !FileManager.default.fileExists(atPath: root.appending(path: ".git").path) {
+            guard root.pathComponents.count > 1 else { return [] }
+            root.deleteLastPathComponent()
+        }
+        guard let edited = git(["diff", "--numstat", "HEAD", "--"], in: root.path),
+              let added = git(["ls-files", "--others", "--exclude-standard"], in: root.path)
+        else { return [] }
+        let edits = edited.split(separator: "\n").compactMap { line -> FolderChange? in
+            let fields = line.split(separator: "\t", maxSplits: 2)
+            guard fields.count == 3 else { return nil }
+            let counts = fields[0] == "-" ? "binary" : "+\(fields[0]) −\(fields[1])"
+            return FolderChange(path: String(fields[2]), counts: counts)
+        }
+        return edits + added.split(separator: "\n").map { FolderChange(path: String($0), counts: "new") }
+    }
+
+    private static func git(_ arguments: [String], in folder: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", folder, "-c", "core.quotepath=off"] + arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }
 

@@ -121,6 +121,8 @@ enum WorkChoices {
         case .delegate:
             delegates(rows) { agent in
                 model.changeWork { work.delegate(ids, to: agent) }
+            } start: { agent in
+                model.changeWork { work.start(ids[0], with: agent) }
             }
         case .cycle:
             cycles(work, checked: { number in rows.allSatisfy { $0.cycle == number } }) { number in
@@ -413,12 +415,24 @@ enum WorkChoices {
     /// The agents a task can go to, by the names the core gives them.
     static let agents = ["Claude Code", "Codex", "OMP", "Grok"]
 
-    /// The agents a task can go to, and no agent once one has it.
-    private static func delegates(_ rows: [WorkItemRow], pick: @escaping @MainActor (String?) -> Void) -> [WorkChoice] {
+    /// The agents a task can go to, its prompt copied; for one task, Claude Code and
+    /// Codex started on it in a terminal; and no agent once one has it.
+    private static func delegates(
+        _ rows: [WorkItemRow], pick: @escaping @MainActor (String?) -> Void,
+        start: @escaping @MainActor (AgentLaunch) -> Void
+    ) -> [WorkChoice] {
         var choices = agents.enumerated().map { index, agent in
             WorkChoice(id: agent, title: agent, mark: .symbol("sparkle"),
                        checked: !rows.isEmpty && rows.allSatisfy { $0.doer?.agent == agent }, key: "\(index + 1)") {
                 pick(agent)
+            }
+        }
+        if rows.count == 1 {
+            choices += AgentLaunch.allCases.map { agent in
+                WorkChoice(id: "start-\(agent.rawValue)", title: "Start \(agent.name)", mark: .symbol("terminal"),
+                           detail: "In a terminal") {
+                    start(agent)
+                }
             }
         }
         if rows.contains(where: { $0.doer != nil }) {

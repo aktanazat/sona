@@ -4,6 +4,7 @@
 
 use super::capture::{self, WorkCaptureSource};
 use super::items;
+use super::sessions::{self, WatchedStep};
 use super::sync::{self, MeetingReader};
 use super::types::{
     WorkActivityKind, WorkActor, WorkDelegation, WorkDoer, WorkItem, WorkItemDetail, WorkItemInput,
@@ -958,6 +959,32 @@ pub(crate) fn follow_session(app: &AppHandle, agent: &str, session_id: &str, tas
         };
         if let Err(message) = claim_as(&app, &agent, &operation_id, &id, None).await {
             log::info!("A watched session's task was left as it was: {message}");
+        }
+    });
+}
+
+/// Keeps each watched session's steps on the task it named, in the order they
+/// came. A step whose task is gone or cannot be read is dropped; the session
+/// goes on either way.
+pub(crate) fn watch_sessions(app: &AppHandle, steps: Vec<(&'static str, WatchedStep)>) {
+    if steps.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        for (agent, step) in steps {
+            let agent = agent_name(Some(agent));
+            let named = crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+                named_item(conn, &step.task)
+            });
+            let recorded = match named {
+                Ok(Some(id)) => sessions::watch_as(&app, &id, &agent, &step),
+                Ok(None) => continue,
+                Err(message) => Err(message),
+            };
+            if let Err(message) = recorded {
+                log::info!("A watched session's step was not kept on its task: {message}");
+            }
         }
     });
 }

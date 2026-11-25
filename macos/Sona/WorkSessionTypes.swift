@@ -16,6 +16,10 @@ struct WorkSession: Decodable, Identifiable, Equatable {
     var question: WorkSessionActivity?
     var unreadPrompts: [WorkSessionActivity]
     var activities: [WorkSessionActivity]
+    var folder: String?
+    /// Sona keeps the session from the agent's hooks: it is stopped and
+    /// answered in the agent, not here.
+    var watched: Bool
 
     var isOpen: Bool { endedAtMs == nil }
 }
