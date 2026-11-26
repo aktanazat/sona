@@ -422,6 +422,7 @@ struct MeetingsPlace: View {
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
     @State private var draggedFavorite: WorkFavoriteEntry?
+    @State private var tasksOver: WorkFavoriteEntry?
     @State private var favoriteDrop: FavoriteDrop?
     @State private var endTargeted = false
     @State private var renamingFolder: String?
@@ -646,7 +647,18 @@ struct Sidebar: View {
     }
 
     private func favoritePlace(_ entry: WorkFavoriteEntry, in folder: String?) -> FavoritePlace {
-        FavoritePlace(entry: entry, folder: folder, dragged: $draggedFavorite, drop: $favoriteDrop) { dragged, drop in
+        var takeTasks: (([String]) -> Void)?
+        if case let .favorite(.project, project) = entry {
+            takeTasks = { ids in
+                let moving = model.workRows(ids).filter { $0.projectId != project }.map(\.id)
+                guard !moving.isEmpty else { return }
+                model.changeWork { model.work.update(moving, WorkPatch(projectId: .set(project))) }
+            }
+        }
+        return FavoritePlace(
+            entry: entry, folder: folder, dragged: $draggedFavorite, drop: $favoriteDrop,
+            tasksOver: $tasksOver, takeTasks: takeTasks
+        ) { dragged, drop in
             landFavorite(dragged, drop)
         }
     }
@@ -769,6 +781,9 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
     let folder: String?
     @Binding var dragged: WorkFavoriteEntry?
     @Binding var drop: FavoriteDrop?
+    /// The project favorite tasks dragged from a list are over.
+    @Binding var tasksOver: WorkFavoriteEntry?
+    let takeTasks: (([String]) -> Void)?
     let land: (WorkFavoriteEntry, FavoriteDrop) -> Void
 
     func body(content: Content) -> some View {
@@ -776,6 +791,13 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
             .overlay(alignment: shown?.after == true ? .bottom : .top) {
                 if shown != nil {
                     Theme.accent.frame(height: 2).allowsHitTesting(false)
+                }
+            }
+            .overlay {
+                if tasksOver == entry {
+                    RoundedRectangle(cornerRadius: Theme.radiusRow)
+                        .strokeBorder(Theme.accent, lineWidth: 2)
+                        .allowsHitTesting(false)
                 }
             }
             .onDrag {
@@ -803,18 +825,38 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
         }
     }
 
-    func validateDrop(info: DropInfo) -> Bool { landing(info) != nil }
+    func validateDrop(info: DropInfo) -> Bool {
+        dragged == nil ? takeTasks != nil : landing(info) != nil
+    }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        drop = landing(info)
+        if dragged == nil {
+            tasksOver = entry
+        } else {
+            drop = landing(info)
+        }
         return DropProposal(operation: .move)
     }
 
-    func dropExited(info: DropInfo) { drop = nil }
+    func dropExited(info: DropInfo) {
+        drop = nil
+        if tasksOver == entry { tasksOver = nil }
+    }
 
     func performDrop(info: DropInfo) -> Bool {
-        defer { (drop, dragged) = (nil, nil) }
-        guard let dragged, let landing = landing(info) else { return false }
+        defer { (drop, dragged, tasksOver) = (nil, nil, nil) }
+        guard let dragged else {
+            guard let takeTasks else { return false }
+            for provider in info.itemProviders(for: [.utf8PlainText]) {
+                _ = provider.loadObject(ofClass: NSString.self) { text, _ in
+                    guard let text = text as? String else { return }
+                    let ids = text.split(separator: "\n").map(String.init)
+                    Task { @MainActor in takeTasks(ids) }
+                }
+            }
+            return true
+        }
+        guard let landing = landing(info) else { return false }
         land(dragged, landing)
         return true
     }

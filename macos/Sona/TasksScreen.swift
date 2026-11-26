@@ -522,6 +522,7 @@ struct TaskListBody<Row: View, Lead: View>: View {
                 row(entry.item)
             }
             .modifier(TaskRowInteractions(id: entry.item.id))
+            .draggable(model.menuTargets(entry.item.id).joined(separator: "\n"))
             .transition(WorkMotion.insert(reduced: reduceMotion))
         }
     }
