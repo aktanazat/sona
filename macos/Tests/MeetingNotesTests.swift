@@ -48,6 +48,7 @@ final class MeetingNotesTests: XCTestCase {
             summary: .init(text: summary, citations: trace.map(\.anchor)),
             summaryTrace: trace, outline: [], decisions: decisions, actionItems: [],
             keyQuestions: [], risks: [], followUpDraft: .init(text: "", citations: []),
-            ledger: nil, ledgerFailure: nil, plain: nil, plainBecause: nil, leftOut: nil)
+            ledger: nil, ledgerFailure: nil, plain: nil, plainBecause: nil, leftOut: nil,
+            decisionDrift: nil)
     }
 }

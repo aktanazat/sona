@@ -34,7 +34,7 @@ struct ArtifactPane: View {
                         }
                     }
                 }
-                if !notes.decisions.isEmpty { lines("Decisions", notes.decisions) }
+                if !notes.decisions.isEmpty { decisions(notes.decisions, drift: content.decisionDrift ?? []) }
                 if !notes.actions.isEmpty { actions(notes.actions, artifactId: artifact.artifactId) }
                 if !notes.figures.isEmpty { figures(notes.figures) }
                 if !notes.questions.isEmpty { lines("Open questions", notes.questions) }
@@ -78,6 +78,19 @@ struct ArtifactPane: View {
         section(title, count: counted ? "\(lines.count)" : nil) {
             ForEach(lines) { line in
                 NoteLine(store: store, line: line) { Text(line.text).bodyText() }
+            }
+        }
+    }
+
+    private func decisions(
+        _ lines: [MeetingNotesDigest.Line], drift: [MeetingDecisionDrift]
+    ) -> some View {
+        section("Decisions", count: "\(lines.count)") {
+            ForEach(lines) { line in
+                NoteLine(store: store, line: line) { Text(line.text).bodyText() }
+                ForEach(Array(drift.filter { $0.decision == line.id }.enumerated()), id: \.offset) {
+                    DriftLine(store: store, drift: $0.element)
+                }
             }
         }
     }
@@ -402,6 +415,39 @@ private struct NoteLine<Content: View>: View {
         }
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Under a decision, the earlier meeting's decision it changes. Pressing it
+/// opens that meeting at the words.
+private struct DriftLine: View {
+    let store: MeetingsStore
+    let drift: MeetingDecisionDrift
+
+    var body: some View {
+        Button {
+            let cited = drift.earlier.citations.min { $0.startOffsetNs < $1.startOffsetNs }
+            store.open(
+                drift.earlierSessionId,
+                atMilliseconds: cited.map { UInt64(max($0.startOffsetNs, 0) / 1_000_000) },
+                segmentId: cited?.segmentId)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Label("Changes what \(meeting) decided", systemImage: "arrow.triangle.2.circlepath")
+                    .metaText()
+                Text("“\(drift.earlier.text)”").bodyText(14, Theme.inkSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(CitedLineStyle())
+        .padding(.leading, 18)
+        .accessibilityHint("Opens the earlier meeting")
+    }
+
+    private var meeting: String {
+        let title = drift.earlierTitle.isEmpty ? "an earlier meeting" : "“\(drift.earlierTitle)”"
+        guard let at = drift.earlierStartedAtUtcMs else { return title }
+        return "\(title) on \(at.meetingDate.formatted(date: .abbreviated, time: .omitted))"
     }
 }
 

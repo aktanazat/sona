@@ -1028,6 +1028,19 @@ struct MeetingGeneratedArtifacts: Decodable {
     /// Stretches of the meeting the notes could not read, so they were
     /// written from the rest; nil in a revision written before this existed.
     let leftOut: [MeetingLeftOutSpan]?
+    /// Decisions here that change one an earlier meeting made; nil when none
+    /// does, and in a revision written before this existed.
+    let decisionDrift: [MeetingDecisionDrift]?
+}
+
+/// `DecisionDrift`: an earlier meeting's decision that the decision at
+/// `decision` in these notes changes.
+struct MeetingDecisionDrift: Decodable {
+    let decision: Int
+    let earlierSessionId: MeetingSessionId
+    let earlierTitle: String
+    let earlierStartedAtUtcMs: Int64?
+    let earlier: ArtifactCitedText
 }
 
 struct MeetingNoteEditSource: Codable, Equatable, Identifiable {

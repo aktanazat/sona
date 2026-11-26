@@ -524,7 +524,7 @@ fn reminded_subject(conn: &Connection, kind: SubjectKind, id: &str) -> StorageRe
             |row| row.get(0),
         )?,
         SubjectKind::Note => crate::scratchpad::note_with_connection(conn, &id)?.is_some(),
-        SubjectKind::View => false,
+        SubjectKind::View | SubjectKind::Meeting => false,
     };
     if found {
         Ok(id)

@@ -71,7 +71,7 @@ struct WorkSubscription: Codable, Equatable {
 enum WorkNotificationKind: String, Codable, Hashable {
     case status, comment, mention, assigned, changed, reminder, due, automation, digest
     case question, project, view, note, housekeeping
-    case unblocked
+    case unblocked, decision
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -81,7 +81,7 @@ enum WorkNotificationKind: String, Codable, Hashable {
     /// Every kind the core posts, in the order its settings list them.
     static let listed: [WorkNotificationKind] = [
         .status, .comment, .mention, .assigned, .changed, .reminder, .due, .automation, .digest,
-        .question, .project, .view, .note, .housekeeping, .unblocked,
+        .question, .project, .view, .note, .housekeeping, .unblocked, .decision,
     ]
 
     var label: String {
@@ -101,6 +101,7 @@ enum WorkNotificationKind: String, Codable, Hashable {
         case .note: "Followed notes"
         case .housekeeping: "Housekeeping"
         case .unblocked: "Unblocked tasks"
+        case .decision: "Changed decisions"
         case .unknown: "Other"
         }
     }
@@ -108,7 +109,7 @@ enum WorkNotificationKind: String, Codable, Hashable {
 
 /// What a notice, a follow or a reminder is about when it is not a task.
 enum WorkSubjectKind: String, Codable, Hashable {
-    case project, initiative, note, view
+    case project, initiative, note, view, meeting
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -317,6 +318,11 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
         case .unblocked:
             let verb = to == "canceled" ? "canceled" : "finished"
             return from.map { "\(verb) “\($0)”, which blocked it" } ?? "unblocked it"
+        case .decision:
+            let count = to.flatMap(Int.init) ?? 1
+            return count == 1
+                ? "changed a decision an earlier meeting made"
+                : "changed \(count) decisions earlier meetings made"
         case .unknown: return "changed it"
         }
     }

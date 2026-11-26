@@ -839,7 +839,7 @@ impl Tracker<'_> {
                     .ok()
                 })
                 .map(|note| note.title),
-            SubjectKind::View => None,
+            SubjectKind::View | SubjectKind::Meeting => None,
         })
     }
 

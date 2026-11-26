@@ -2977,3 +2977,55 @@ mod phone_decisions {
         .is_err());
     }
 }
+
+#[test]
+fn meetings_filed_to_one_project_find_each_other_through_its_tasks() {
+    let conn = Connection::open_in_memory().expect("an in-memory history database");
+    schema::apply_all(&conn).expect("the planner schema");
+    let launch = planning_store::insert_project(&conn, "Launch", None, AT)
+        .expect("a project")
+        .id;
+    let hiring = planning_store::insert_project(&conn, "Hiring", None, AT)
+        .expect("another project")
+        .id;
+    let task = items::insert(
+        &conn,
+        &NewItem {
+            title: "Book the venue",
+            details: None,
+            status: WorkStatus::NotStarted,
+            priority: 0,
+            project_id: Some(&launch),
+            milestone_id: None,
+            owner: &WorkOwner::Nobody,
+            due_at_ms: None,
+            label_ids: &[],
+            source_loop_id: None,
+            recurrence: None,
+        },
+        WorkActor::Sona,
+        AT,
+    )
+    .expect("a task")
+    .id;
+    for (id, kind, target, meeting) in [
+        ("e1", "project", launch.as_str(), "planning"),
+        ("e2", "task", task.as_str(), "venue-call"),
+        ("e3", "project", hiring.as_str(), "interview"),
+    ] {
+        conn.execute(
+            "INSERT INTO planning_evidence_links (id, target_kind, target_id, source_kind,
+                source_id, revision, created_at_ms) VALUES (?1, ?2, ?3, 'meeting', ?4, 1, 1)",
+            rusqlite::params![id, kind, target, meeting],
+        )
+        .expect("a meeting filed");
+    }
+
+    assert_eq!(
+        super::sharing_a_project(&conn, "planning").expect("the planning meeting's"),
+        vec!["venue-call".to_owned()]
+    );
+    assert!(super::sharing_a_project(&conn, "interview")
+        .expect("the interview's")
+        .is_empty());
+}

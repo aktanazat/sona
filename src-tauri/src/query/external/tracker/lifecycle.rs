@@ -1715,7 +1715,7 @@ impl Tracker<'_> {
                                 .filter(|note| !note.personal)
                                 .map(|note| note.title)
                         }
-                        SubjectKind::Initiative => None,
+                        SubjectKind::Initiative | SubjectKind::Meeting => None,
                     };
                     Ok(name.map(|name| ExternalFollow {
                         kind: follow.kind,

@@ -1312,6 +1312,23 @@ pub struct GeneratedMeetingArtifacts {
     /// Defaulted so every earlier revision reads back as covering it all.
     #[serde(default)]
     pub left_out: Vec<LeftOutSpan>,
+    /// Decisions here that change one an earlier meeting of the same series
+    /// or of a linked project made. Defaulted so every earlier revision reads
+    /// back as changing nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_drift: Vec<DecisionDrift>,
+}
+
+/// An earlier meeting's decision that one of these notes' decisions changes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct DecisionDrift {
+    /// The changing decision's place in `decisions`.
+    pub decision: u32,
+    pub earlier_session_id: MeetingSessionId,
+    pub earlier_title: String,
+    pub earlier_started_at_utc_ms: Option<i64>,
+    /// The earlier decision as its notes wrote it, with the lines it cites.
+    pub earlier: CitedArtifactText,
 }
 
 /// One stretch of a meeting the notes could not read, and why. The offsets

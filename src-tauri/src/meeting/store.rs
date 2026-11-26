@@ -12545,6 +12545,7 @@ mod tests {
             plain_because: None,
             plain: false,
             left_out: Vec::new(),
+            decision_drift: Vec::new(),
         }
     }
 

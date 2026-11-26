@@ -123,7 +123,7 @@ pub(crate) fn follow(
             crate::scratchpad::note_with_connection(conn, &id)?.ok_or(Refusal::NotFound)?;
         }
         SubjectKind::View => {}
-        SubjectKind::Initiative => return Err(Refusal::Invalid.into()),
+        SubjectKind::Initiative | SubjectKind::Meeting => return Err(Refusal::Invalid.into()),
     }
     let added = conn.execute(
         "INSERT INTO planning_follows (kind, target_id, created_at_ms) VALUES (?1, ?2, ?3)

@@ -847,3 +847,49 @@ fn the_digest_receipt_carries_the_three_counts_it_measured() {
     assert_eq!(counts.loops_closed, 0);
     assert_eq!(counts.suggestions_waiting, 1);
 }
+
+#[test]
+fn earlier_decisions_come_from_the_series_and_linked_meetings_newest_first() {
+    use super::workflow_core_tests::current_artifact;
+    let (_directory, store) = store();
+    let notes = |session_id, decisions: &[&str]| {
+        let decisions: Vec<_> = decisions
+            .iter()
+            .map(|text| serde_json::json!({"text": text, "citations": []}))
+            .collect();
+        current_artifact(
+            &store,
+            session_id,
+            &serde_json::json!({ "decisions": decisions }),
+            1,
+        );
+    };
+    let oldest = meeting(&store, "Weekly", 1_000);
+    calendar_facts(&store, oldest, "weekly", "Weekly");
+    notes(oldest, &["Ship on Friday"]);
+    let undecided = meeting(&store, "Weekly", 2_000);
+    calendar_facts(&store, undecided, "weekly", "Weekly");
+    notes(undecided, &[]);
+    let linked = meeting(&store, "Board", 3_000);
+    notes(linked, &["The budget is ten thousand"]);
+    let unrelated = meeting(&store, "Hiring", 3_500);
+    notes(unrelated, &["Hire Sam"]);
+    let now = meeting(&store, "Weekly", 4_000);
+    calendar_facts(&store, now, "weekly", "Weekly");
+    let later = meeting(&store, "Weekly", 5_000);
+    calendar_facts(&store, later, "weekly", "Weekly");
+    notes(later, &["Ship on Monday"]);
+
+    let earlier = store.earlier_decisions(now, &[linked], 6).unwrap();
+
+    let read: Vec<_> = earlier
+        .iter()
+        .map(|earlier| (earlier.session_id, earlier.started_at_utc_ms))
+        .collect();
+    assert_eq!(read, vec![(linked, Some(3_000)), (oldest, Some(1_000))]);
+    assert_eq!(earlier[0].title, "Board");
+    assert_eq!(earlier[1].decisions[0].text, "Ship on Friday");
+    let newest = store.earlier_decisions(now, &[linked], 1).unwrap();
+    assert_eq!(newest.len(), 1);
+    assert_eq!(newest[0].session_id, linked);
+}

@@ -465,6 +465,7 @@ fn said(notice: &Notification) -> String {
         NotificationKind::Note => "edited it".to_owned(),
         NotificationKind::Housekeeping => notice.to.clone().unwrap_or_default(),
         NotificationKind::Unblocked => "unblocked it".to_owned(),
+        NotificationKind::Decision => inbox::changed_decisions(notice.to.as_deref()),
     }
 }
 

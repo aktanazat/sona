@@ -802,6 +802,14 @@ const fn choose_text_engine(facts: TextEngineFacts) -> TextEngineChoice {
     }
 }
 
+/// Whether an earlier meeting's decisions may be compared, on `route`, with
+/// those of a meeting whose notes are being written there. A meeting kept on
+/// this Mac goes only to the engine on this Mac, and only for a meeting kept
+/// here too, since its words are saved on the newer meeting's notes.
+const fn may_compare(earlier_kept: bool, here_kept: bool, route: ProcessingRoute) -> bool {
+    !earlier_kept || (here_kept && matches!(route, ProcessingRoute::Local))
+}
+
 /// The engine on this Mac as one reading of the settings, so the generator
 /// a choice is made on and the state reported for that choice describe the
 /// same engine. A settings write during a slow endpoint probe otherwise
@@ -1452,6 +1460,44 @@ impl MeetingProcessingService {
         route == ProcessingRoute::Local
             || (self.remote_intelligence_enabled()
                 && !self.series_opted_out_of_remote(store, session_id))
+    }
+
+    /// The decisions in a meeting's new notes that change one an earlier
+    /// meeting of its series, or of a project it is filed to, made, asked of
+    /// the engine that wrote the notes. An earlier meeting goes only where
+    /// [`may_compare`] lets it.
+    fn decision_drift(
+        &self,
+        store: &MeetingStore,
+        generator: &dyn MeetingTextGenerator,
+        session_id: MeetingSessionId,
+        route: ProcessingRoute,
+        decisions: &[CitedArtifactText],
+        check: &dyn Fn() -> Result<(), RunFailure>,
+    ) -> Result<Vec<DecisionDrift>, RunFailure> {
+        if decisions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let linked =
+            crate::planning::work::meetings_sharing_a_project(self.app.as_ref(), session_id);
+        let read = crate::query::KeptLocal::read(store).and_then(|kept| {
+            store
+                .earlier_decisions(session_id, &linked, complete_reading::DRIFT_MEETINGS_MAX)
+                .map(|earlier| (kept, earlier))
+        });
+        let (kept, earlier) = match read {
+            Ok(read) => read,
+            Err(error) => {
+                log::warn!("Earlier decisions for {session_id:?} could not be read: {error:?}");
+                return Ok(Vec::new());
+            }
+        };
+        let here = kept.hides(session_id);
+        let earlier: Vec<_> = earlier
+            .into_iter()
+            .filter(|meeting| may_compare(kept.hides(meeting.session_id), here, route))
+            .collect();
+        complete_reading::decision_drift(generator, decisions, &earlier, check)
     }
 
     /// Park every run at its next checkpoint until the returned gate drops.
@@ -3260,6 +3306,14 @@ impl MeetingProcessingService {
             &mut content,
             checkpoint,
         )?;
+        content.decision_drift = self.decision_drift(
+            store,
+            generator.as_ref(),
+            session_id,
+            route,
+            &content.decisions,
+            &checkpoint,
+        )?;
         checkpoint()?;
         let artifact = store
             .store_artifact_revision(ArtifactRevisionInput {
@@ -3299,6 +3353,14 @@ impl MeetingProcessingService {
             log::warn!("Could not carry loops forward into {session_id:?}: {error:?}");
         }
         crate::planning::work::take_in(self.app.as_ref(), store, session_id);
+        if !content.decision_drift.is_empty() {
+            crate::planning::work::decisions_changed(
+                self.app.as_ref(),
+                store,
+                session_id,
+                content.decision_drift.len(),
+            );
+        }
         crate::planning::work::watch::after_meeting(self.app.as_ref(), store, session_id);
         // Third pass over the same landed revision: the summary and transcript
         // a reader will search for are final now, so this is where the meeting
@@ -6476,6 +6538,7 @@ fn validate_artifact_output(
         plain_because: None,
         plain: false,
         left_out: Vec::new(),
+        decision_drift: Vec::new(),
     };
     drop_restated_items(&mut artifacts);
     Ok(artifacts)
@@ -6876,6 +6939,7 @@ fn plain_artifacts(
         plain: true,
         plain_because: Some(stopped_by),
         left_out,
+        decision_drift: Vec::new(),
     }
 }
 
@@ -11781,6 +11845,131 @@ pub(crate) mod tests {
             .find(|thread| thread.topic == "Support")
             .expect("the support thread");
         assert_eq!(support.state, LedgerThreadState::Decided);
+    }
+
+    /// An engine that finds every decision it is shown changed, and keeps
+    /// what it was shown.
+    #[derive(Default)]
+    struct DriftWitness {
+        shown: Mutex<Vec<String>>,
+    }
+
+    impl MeetingTextGenerator for DriftWitness {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "drift-witness"
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            evidence: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            self.shown
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(evidence.to_owned());
+            Ok(r#"{"relation": "changes"}"#.to_owned())
+        }
+    }
+
+    #[test]
+    fn a_meeting_kept_on_this_mac_is_compared_only_by_the_engine_here() {
+        use crate::meeting::store::workflow_core_tests::{current_artifact, meeting, store};
+        let (_directory, store) = store();
+        let earlier = meeting(&store, "Launch sync", 1_000);
+        let now = meeting(&store, "Launch sync", 2_000);
+        for (session_id, start_utc_ms) in [(earlier, 1_000), (now, 2_000)] {
+            store
+                .remember_calendar_facts(
+                    session_id,
+                    &crate::meeting::detection::machine::CalendarEventSummary {
+                        event_key: format!("launch#{start_utc_ms}"),
+                        series_key: "launch".to_owned(),
+                        title: "Launch sync".to_owned(),
+                        attendee_count: 2,
+                        start_utc_ms,
+                        end_utc_ms: start_utc_ms + 500,
+                        attendees: Vec::new(),
+                        notes: None,
+                        calendar_name: None,
+                        location: None,
+                        url: None,
+                        place: None,
+                    },
+                )
+                .expect("the calendar facts");
+        }
+        current_artifact(
+            &store,
+            earlier,
+            &serde_json::json!({"decisions": [{"text": "Launch moves to March 3", "citations": []}]}),
+            1_500,
+        );
+        let service = MeetingProcessingService::new(None);
+        let witness = DriftWitness::default();
+        let decisions = [CitedArtifactText {
+            text: "Launch moves to April 9".to_owned(),
+            citations: Vec::new(),
+        }];
+        let drift = |route| {
+            service
+                .decision_drift(&store, &witness, now, route, &decisions, &|| Ok(()))
+                .expect("drift")
+        };
+        let shown = || {
+            witness
+                .shown
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+        };
+
+        let open = drift(ProcessingRoute::Relay);
+        assert_eq!(open.len(), 1, "compared on the relay");
+        assert_eq!(open[0].earlier_session_id, earlier);
+        assert_eq!(shown(), 1);
+
+        store
+            .set_series_remote_opt_out(
+                &crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest {
+                    operation_id: MeetingOperationId::new(),
+                    series_key: "launch".to_owned(),
+                    remote_intelligence_opt_out: true,
+                    expected_revision: 0,
+                },
+                3_000,
+            )
+            .expect("keep the series here");
+        assert!(drift(ProcessingRoute::Relay).is_empty());
+        assert_eq!(shown(), 1, "kept: never sent to the relay");
+
+        assert_eq!(drift(ProcessingRoute::Local).len(), 1);
+        assert_eq!(shown(), 2, "kept: compared on this Mac");
+    }
+
+    #[test]
+    fn a_kept_meeting_is_never_compared_beside_one_that_is_not() {
+        for route in [ProcessingRoute::Local, ProcessingRoute::Relay] {
+            assert!(may_compare(false, false, route));
+            assert!(may_compare(false, true, route));
+            assert!(!may_compare(true, false, route));
+        }
+        assert!(may_compare(true, true, ProcessingRoute::Local));
+        assert!(!may_compare(true, true, ProcessingRoute::Relay));
     }
 }
 

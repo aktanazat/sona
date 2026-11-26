@@ -205,6 +205,10 @@ pub(super) fn today_rows(
                     .chain(&row.item_ids)
                     .any(|id| hidden.contains(id))
                 && !about_note(row).is_some_and(|id| personal.contains(&id))
+                && !row.lead.subject.as_ref().is_some_and(|subject| {
+                    subject.kind == inbox::SubjectKind::Meeting
+                        && kept.map_or(true, |kept| kept.hides_meeting(&subject.id))
+                })
         })
         .take(MAX_ROWS)
         .map(|row| notice(row, &tasks))
@@ -349,6 +353,7 @@ fn notice_line(notice: &inbox::Notification) -> String {
             "canceled a task that blocked it".to_owned()
         }
         NotificationKind::Unblocked => "finished a task that blocked it".to_owned(),
+        NotificationKind::Decision => inbox::changed_decisions(to),
     };
     let line = format!("{} {what}", who(notice));
     match &notice.excerpt {
@@ -967,6 +972,58 @@ mod tests {
             ["Which vendor?"]
         );
         assert_eq!(rows.questions[0].options[0].value, "acme");
+    }
+
+    #[test]
+    fn a_changed_decision_reaches_the_phone_only_from_a_meeting_that_may_leave() {
+        use crate::meeting::store::workflow_core_tests::{meeting, store};
+        let conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let (_directory, meetings) = store();
+        let launch = meeting(&meetings, "Launch sync", AT);
+        inbox::decisions_changed(&conn, &launch.uuid().to_string(), "Launch sync", 1, AT)
+            .expect("the notice");
+
+        let shown = |kept: Option<&KeptLocal>| today_rows(&conn, kept, AT).expect("the rows").inbox;
+        let kept = || KeptLocal::read(&meetings).expect("the kept meetings");
+        assert!(shown(None).is_empty(), "unreadable: kept here");
+        let open = shown(Some(&kept()));
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].title, "Launch sync");
+        let line = "Sona changed a decision an earlier meeting made";
+        assert_eq!(open[0].line, line);
+
+        meetings
+            .remember_calendar_facts(
+                launch,
+                &crate::meeting::detection::machine::CalendarEventSummary {
+                    event_key: "launch#1".to_owned(),
+                    series_key: "launch".to_owned(),
+                    title: "Launch sync".to_owned(),
+                    attendee_count: 2,
+                    start_utc_ms: AT,
+                    end_utc_ms: AT + 1_000,
+                    attendees: Vec::new(),
+                    notes: None,
+                    calendar_name: None,
+                    location: None,
+                    url: None,
+                    place: None,
+                },
+            )
+            .expect("the calendar facts");
+        meetings
+            .set_series_remote_opt_out(
+                &crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest {
+                    operation_id: crate::meeting::types::MeetingOperationId::new(),
+                    series_key: "launch".to_owned(),
+                    remote_intelligence_opt_out: true,
+                    expected_revision: 0,
+                },
+                AT,
+            )
+            .expect("keep the series here");
+        assert!(shown(Some(&kept())).is_empty());
     }
 
     #[test]

@@ -142,6 +142,7 @@ impl MeetingTextGenerator for Witness {
             ReplyShape::PlainNotes => "plain notes",
             ReplyShape::Json if prompt == NOTES_TOPICS => "topics",
             ReplyShape::Json if prompt == DECISION_CHECK => "decision check",
+            ReplyShape::Json if prompt == DECISION_DRIFT => "decision drift",
             ReplyShape::Json | ReplyShape::Prose | ReplyShape::MemoryNote => "other",
         };
         let counts = match (&result, shape) {
@@ -1058,4 +1059,111 @@ fn print_notes(notes: &GeneratedMeetingArtifacts) {
             println!("caveat: {caveat}");
         }
     }
+}
+
+/// Pairs of an earlier and a new decision, each with whether the new one
+/// changes the earlier one. Made up, so the report may quote them.
+const DRIFT_PAIRS: [(&str, &str, bool); 12] = [
+    (
+        "The launch moves to March 3",
+        "The launch moves to April 9",
+        true,
+    ),
+    (
+        "We will use Postgres for the billing service",
+        "The billing service will use MySQL instead of Postgres",
+        true,
+    ),
+    (
+        "Dana owns the onboarding redesign",
+        "Sam takes over the onboarding redesign from Dana",
+        true,
+    ),
+    (
+        "The Q3 marketing budget is 50,000 dollars",
+        "The Q3 marketing budget is cut to 30,000 dollars",
+        true,
+    ),
+    (
+        "The mobile app ships every week",
+        "The mobile app ships every two weeks from now on",
+        true,
+    ),
+    (
+        "The launch moves to March 3",
+        "The launch stays on March 3",
+        false,
+    ),
+    (
+        "We will use Postgres for billing",
+        "Billing keeps using Postgres, with a read replica added",
+        false,
+    ),
+    (
+        "Dana owns the onboarding redesign",
+        "Dana presents the onboarding redesign on Friday",
+        false,
+    ),
+    (
+        "The launch party is at the office",
+        "The launch date moves to April 9",
+        false,
+    ),
+    (
+        "Billing invoices go out on the first of the month",
+        "The billing service moves to MySQL",
+        false,
+    ),
+    (
+        "Hire a designer for the website",
+        "The website copy is frozen until launch",
+        false,
+    ),
+    (
+        "The team offsite is in Denver",
+        "The team standup moves to 10am",
+        false,
+    ),
+];
+
+/// Each made-up pair through the app's own drift comparison on the engine
+/// this Mac's settings choose, reported by whether it was flagged.
+///
+/// <test binary> --ignored --exact \
+///     meeting::processing::complete_reading::probe::drift_probe --nocapture
+#[ignore = "asks the meeting engine about made-up decisions"]
+#[test]
+fn drift_probe() {
+    let engine = probe_engine(app_settings().as_ref())
+        .expect("SONA_PROBE_ENGINE is a meeting engine in the form Sona's settings keep it");
+    let witness = Witness::new(&engine);
+    println!("\nengine: {}", witness.engine().model_id());
+    let mut right = 0;
+    for (earlier, new, changes) in DRIFT_PAIRS {
+        let meeting = crate::meeting::store::series::EarlierDecisions {
+            session_id: MeetingSessionId::new(),
+            title: "Earlier".to_owned(),
+            started_at_utc_ms: None,
+            decisions: vec![CitedArtifactText {
+                text: earlier.to_owned(),
+                citations: Vec::new(),
+            }],
+        };
+        let decision = CitedArtifactText {
+            text: new.to_owned(),
+            citations: Vec::new(),
+        };
+        let started = Instant::now();
+        let flagged = !decision_drift(witness.engine(), &[decision], &[meeting], &|| Ok(()))
+            .expect("not stopped")
+            .is_empty();
+        right += usize::from(flagged == changes);
+        println!(
+            "{} {:.1} s | expected {} | {earlier} -> {new}",
+            if flagged { "flagged" } else { "kept   " },
+            started.elapsed().as_secs_f64(),
+            if changes { "flagged" } else { "kept" },
+        );
+    }
+    println!("{right} of {} as expected", DRIFT_PAIRS.len());
 }

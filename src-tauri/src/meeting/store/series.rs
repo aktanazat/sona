@@ -35,8 +35,8 @@ use crate::meeting::series_types::{
 };
 use crate::meeting::template_types::MeetingTemplateId;
 use crate::meeting::types::{
-    GeneratedMeetingArtifacts, MeetingCommandKind, MeetingDeletionJobId, MeetingOperationId,
-    MeetingSessionId,
+    CitedArtifactText, GeneratedMeetingArtifacts, MeetingCommandKind, MeetingDeletionJobId,
+    MeetingOperationId, MeetingSessionId,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -54,6 +54,15 @@ pub(crate) struct PreviousSeriesBrief {
     pub session_id: MeetingSessionId,
     pub headline: String,
 }
+
+/// An earlier meeting's decisions, as its readable notes hold them.
+pub(crate) struct EarlierDecisions {
+    pub session_id: MeetingSessionId,
+    pub title: String,
+    pub started_at_utc_ms: Option<i64>,
+    pub decisions: Vec<CitedArtifactText>,
+}
+
 impl MeetingStore {
     /// What one series has decided, by its own key.
     pub(crate) fn series_preferences(
@@ -77,6 +86,63 @@ impl MeetingStore {
         }
         let connection = self.connection()?;
         previous_series_brief_in(&connection, series_key, before_utc_ms)
+    }
+
+    /// The newest `limit` meetings held before this one, in its series or
+    /// among `linked`, whose notes hold a decision; newest first.
+    pub(crate) fn earlier_decisions(
+        &self,
+        session_id: MeetingSessionId,
+        linked: &[MeetingSessionId],
+        limit: usize,
+    ) -> Result<Vec<EarlierDecisions>, StoreError> {
+        let linked: Vec<String> = linked.iter().map(|linked| id(*linked)).collect();
+        let linked = serde_json::to_string(&linked).map_err(|_| StoreError::Corrupt)?;
+        let limit = i64::try_from(limit).map_err(|_| StoreError::Corrupt)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(&format!(
+            "WITH earlier AS MATERIALIZED (
+                SELECT m.id, m.title, m.started_at_utc_ms,
+                       COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) AS held_at,
+                       ({READABLE_ARTIFACT_CONTENT}) AS content
+                  FROM meeting_sessions m
+                 WHERE m.id != ?1
+                   AND m.phase != 'deleting'
+                   AND COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) < (
+                           SELECT COALESCE(started_at_utc_ms, created_at_utc_ms)
+                             FROM meeting_sessions WHERE id = ?1)
+                   AND (m.id IN (SELECT value FROM json_each(?2))
+                        OR m.id IN (
+                           SELECT session_id FROM meeting_calendar_facts
+                            WHERE json_extract(event_json, '$.seriesKey') = (
+                                   SELECT json_extract(event_json, '$.seriesKey')
+                                     FROM meeting_calendar_facts WHERE session_id = ?1))))
+             SELECT id, title, started_at_utc_ms, json_extract(content, '$.decisions')
+               FROM earlier
+              WHERE json_array_length(content, '$.decisions') > 0
+              ORDER BY held_at DESC, id DESC
+              LIMIT ?3"
+        ))?;
+        let rows = statement
+            .query_map(params![id(session_id), linked, limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(session, title, started_at_utc_ms, decisions)| {
+                Ok(EarlierDecisions {
+                    session_id: MeetingSessionId::from_uuid(parse_uuid(&session)?),
+                    title,
+                    started_at_utc_ms,
+                    decisions: serde_json::from_str(&decisions).map_err(|_| StoreError::Corrupt)?,
+                })
+            })
+            .collect()
     }
 
     /// The fence every series write carries, on its own.
