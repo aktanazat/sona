@@ -38,18 +38,25 @@ series automations in Settings (`meeting::automations`) are a separate thing too
       daylight saving.
     - `task_created`, `status_changed` (optionally `to` one status), `label_added`
       (optionally one `labelId`), `assigned` (a task gets an owner or a delegate),
-      `comment_added` and `project_status_changed` (optionally `to` one project
-      status). These read the change stream (`planning_changes`).
+      `comment_added`, `project_status_changed` (optionally `to` one project status),
+      `initiative_status_changed` (optionally `to` one initiative status),
+      `milestone_done` and `project_update_posted`. These read the change stream
+      (`planning_changes`).
     - `meeting_ended`: once per meeting, when its notes are ready.
+    - `cycle_started` and `cycle_ended`: once per cycle, on its first or last day, for
+      cycles whose day comes after the automation was turned on.
   - Conditions: any-of lists of labels, projects and task statuses, at most 8 entries
     in all, checked against the task as it is when the trigger is read. Task triggers
-    take all three; `project_status_changed` takes only projects; schedules and
-    `meeting_ended` take none.
+    take all three; project triggers (`project_status_changed`, `milestone_done`,
+    `project_update_posted`) take only projects; the rest take none.
   - Event triggers keep their own cursor into the change stream. Turning an
     automation on or changing its trigger moves the cursor to the newest change, so
     nothing older fires. Each queued run carries a cause key (`schedule:<due>`,
-    `change:<seq>`, `meeting:<id>`, `manual:<operation id>`), unique per automation,
-    so the same change or the same due time never queues a second run.
+    `change:<seq>`, `meeting:<id>`, `cycle-started:<number>`,
+    `cycle-ended:<number>`, `manual:<operation id>`), unique per automation, so the
+    same change or the same due time never queues a second run.
+  - An automation may set how hard the agent thinks on a run (`reasoning`: low,
+    medium or high; left out, the model decides). It is kept with each version.
   - A new value is read from the change stream itself: the old value kept by the next
     change to the same field, or the row as it is now when none followed. A task moved
     to Done and back to Todo before the trigger was read still fires a "moved to Done"
@@ -68,11 +75,14 @@ series automations in Settings (`meeting::automations`) are a separate thing too
     the automation doesn't allow is answered "<tool> is not allowed in this
     automation" and recorded on the run as refused. The relay's turn has only a yes/no
     for tools, so the agent still sees all of them; it is refused when it asks.
-  - Allowlist names are the read-only MCP tools, mapped to the in-app lookups:
-    `sona_search` (search, dictation), `sona_meetings` (recent), `sona_meeting`,
-    `sona_transcript`, `sona_people` (person), `sona_action_items` (loops),
-    `sona_upcoming` and `sona_stats` (word stats, activity). Other names are refused
-    when the automation is saved.
+  - Allowlist names are MCP tool names. The read-only ones map to the in-app
+    lookups: `sona_search` (search, dictation), `sona_meetings` (recent),
+    `sona_meeting`, `sona_transcript`, `sona_people` (person), `sona_action_items`
+    (loops), `sona_upcoming`, `sona_stats` (word stats, activity) and `sona_skills`
+    (the user's saved skills). Five more let the run propose changes (see below):
+    `sona_work_create`, `sona_work_update`, `sona_scratchpad_update_body`,
+    `sona_project_save` and `sona_project_update_save`. Other names are refused when
+    the automation is saved.
 - The scheduler (`loops::start`, from the app's setup in `lib.rs`) lives in the app
   process only. Every 10 seconds, or at once after a save, Run now or a meeting:
   1. it queues due schedules and matching changes in one transaction;
@@ -90,26 +100,45 @@ series automations in Settings (`meeting::automations`) are a separate thing too
   start.
 - `meeting_ended` is queued from `planning::work::take_in`, which the meeting
   pipeline calls after a meeting's notes land. Meetings that started before the
-  automation was armed don't fire.
+  automation was armed don't fire. A run about a meeting whose series is kept on this
+  Mac is skipped ("this meeting's series is kept on this Mac, so it isn't sent to the
+  in-app agent").
 
 ## What the agent can do
 
-The in-app agent can only read. It can't change tasks, and an action it offers in its
-answer is not applied. An automation's output is its answer, kept on the run and, for
-task runs, in the task's session.
+The in-app agent never changes anything itself. An automation's output is its
+answer, kept on the run and, for task runs, in the task's session.
+
+With a proposal tool on its list, the run may end its answer with a
+`sona-proposals` block. Sona files what it proposes and lists it under the answer;
+nothing is applied until the user accepts it:
+
+- `sona_work_create`: new tasks, which wait in Triage.
+- `sona_work_update`: changes to existing tasks (title, details, status,
+  priority), which wait in Triage field by field.
+- `sona_scratchpad_update_body`: text added to the end of a note.
+- `sona_project_save`: a project's new description.
+- `sona_project_update_save`: a drafted project update.
+
+The last three wait as document proposals (`sona_doc_proposal_list`; accepted or
+declined in Triage). The prompt lists up to 30 projects and 15 notes it may name.
+Proposals of a kind the list doesn't allow are refused and recorded on the run. More
+than 10 of one kind keeps none, and none are kept when the agents' switches closed
+during the run.
 
 ## Bridge (Swift `core.request`, params camelCase)
 
 - `work_loops {}` → `{ loops: [WorkLoop], tools: [{ name, title }] }`
 - `work_loop { loopId }` → `{ automation, versions (newest first), runs (newest first, at most 50) }`
-- `work_loop_save { operationId, loopId|null, input: { name, prompt, trigger, conditions, tools } }` → WorkLoop
+- `work_loop_save { operationId, loopId|null, input: { name, prompt, trigger, conditions, tools, reasoning } }` → WorkLoop
 - `work_loop_run { operationId, loopId }` → WorkLoopRun (queued)
 - `work_loop_enable { operationId, loopId, enabled }` → WorkLoop
 - `work_loop_restore_version { operationId, loopId, version }` → WorkLoop
 - `work_loop_delete { operationId, loopId }` → the deleted WorkLoop; its versions and runs go with it
 
 WorkLoop: `{ id, name, prompt, enabled, trigger, conditions: { labels, projects,
-statuses }, tools, version, nextRunAtMs, lastRun, createdAtMs, updatedAtMs }`.
+statuses }, tools, reasoning, version, nextRunAtMs, lastRun, createdAtMs,
+updatedAtMs }`.
 `nextRunAtMs` is null for event triggers and for automations that are off.
 WorkLoopRun: `{ id, automationId, version, cause, taskId, meetingId, status,
 queuedAtMs, startedAtMs, endedAtMs, output, error, refusedTools, sessionId }`. Errors
@@ -122,8 +151,8 @@ every run that starts or ends, emits `work-changed`.
   id.
 - `automation-save NAME [--automation AUTOMATION] [--prompt TEXT]` with one trigger:
   - `--schedule hourly|daily|weekly|monthly --first-run "YYYY-MM-DD HH:MM" [--timezone ZONE] [--days mon,wed]`
-  - `--on task-created|status-changed|label-added|assigned|comment-added|project-status-changed|meeting-ended [--to STATUS] [--label LABEL]`
-  - and `[--if-label ...] [--if-project ...] [--if-status ...] [--tools ...]`, where "" clears a list.
+  - `--on task-created|status-changed|label-added|assigned|comment-added|project-status-changed|initiative-status|milestone-done|project-update|meeting-ended|cycle-started|cycle-ended [--to STATUS] [--label LABEL]`
+  - and `[--if-label ...] [--if-project ...] [--if-status ...] [--tools ...] [--reasoning default|low|medium|high]`, where "" clears a list.
   A new automation needs `--prompt` and a trigger; changing one keeps what isn't
   given.
 - `automation-run AUTOMATION` queues a run for the running app.
@@ -150,14 +179,14 @@ are opt-in. All of them call the CLI verbs above.
 
 Sidebar > Automations (`macos/Sona/LoopsScreen.swift`, `LoopsStore.swift`,
 `WorkLoopsTypes.swift`): a list with each automation's trigger, next run and last
-result; an editor for name, prompt, trigger, conditions and tools; Run now; run
-history; version history with Restore; Delete. Unknown trigger kinds and statuses
-decode to a fallback.
+result; an editor for name, prompt, trigger, conditions, tools and how hard the agent
+thinks; Run now; run history; version history with Restore; Delete. Unknown trigger
+kinds and statuses decode to a fallback.
 
 ## Not built
 
 - Slack, pull request and webhook triggers (not Sona's).
-- Automations that change tasks. The in-app agent can only read.
+- Automations that change things directly. A run only proposes; the user accepts.
 - Runs while Sona is closed. A schedule that came due while the app was closed runs
   once at the next start, not once per missed time.
 
@@ -174,6 +203,7 @@ reached a model (2026-11-11), under the earlier `loop-*` verb names:
   exactly one run ("S-2 moved to Done"), still one 12 seconds later; S-4 and S-5 gave
   one each, and S-5 (no delegate) got a session from the automation.
 - Saving with `--tools sona_work_update` was refused, naming the tools it can use.
+  (That tool was allowed later, for proposals.)
 - A second save made version 2; restoring version 1 made version 3, restored from 1,
   with version 1's prompt.
 
