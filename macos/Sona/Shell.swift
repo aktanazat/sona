@@ -41,7 +41,7 @@ struct Shell: View {
                         }
                     }
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
-                    .environment(\.paneWidth, paneWidth)
+                    .environment(\.paneWidth, model.sidebarHidden ? max(0, paneWidth - Theme.windowControlsWidth) : paneWidth)
                     .toolbar(removing: .title)
                 }
                 if model.paletteShown {

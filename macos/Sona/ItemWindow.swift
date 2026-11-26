@@ -24,7 +24,7 @@ struct ItemWindowView: View {
         .frame(minWidth: 640, minHeight: 480)
         .background(Theme.page.ignoresSafeArea())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
-        .environment(\.paneWidth, paneWidth)
+        .environment(\.paneWidth, max(0, paneWidth - Theme.windowControlsWidth))
         .onAppear { model.windowOpened() }
         .onDisappear { model.windowClosed() }
     }
