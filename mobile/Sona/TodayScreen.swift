@@ -195,7 +195,7 @@ private struct QuestionRow: View {
                                 Task {
                                     await model.decide(
                                         .answer, row: question.session_id, title: question.task_title,
-                                        sessionId: question.session_id, value: option.value
+                                        sessionId: question.session_id, askedAtMs: question.asked_at_ms, value: option.value
                                     )
                                 }
                             }
@@ -368,7 +368,7 @@ private struct AnswerSheet: View {
                         Task {
                             await model.decide(
                                 .answer, row: question.session_id, title: question.task_title,
-                                sessionId: question.session_id, body: body
+                                sessionId: question.session_id, askedAtMs: question.asked_at_ms, body: body
                             )
                         }
                         dismiss()

@@ -2306,8 +2306,10 @@ pub(crate) enum PhoneDecision<'a> {
     Accept { task: &'a str },
     Decline { task: &'a str },
     Mark { notices: &'a [String], how: inbox::Mark },
+    /// Only to the question asked at `asked_at_ms`, while it is still open.
     Answer {
         session: &'a str,
+        asked_at_ms: i64,
         body: Option<&'a str>,
         value: Option<&'a str>,
     },
@@ -2339,9 +2341,10 @@ fn decide(
         PhoneDecision::Mark { notices, how } => inbox::marked(history, change, notices, how)?.effects,
         PhoneDecision::Answer {
             session,
+            asked_at_ms,
             body,
             value,
-        } => sessions::replied(history, change, session, body, value)?.effects,
+        } => sessions::replied(history, change, session, asked_at_ms, body, value)?.effects,
     };
     Ok(Done { value: (), effects })
 }

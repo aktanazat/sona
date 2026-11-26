@@ -76,6 +76,7 @@ struct WorkActionManifest: Codable, Equatable {
 
     var acted_at_utc_ms: Int64
     var action: Action
+    var asked_at_ms: Int64?
     var body: String?
     var device_id: String
     var expected_revision: Int64?
@@ -91,6 +92,7 @@ struct WorkActionManifest: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(acted_at_utc_ms, forKey: .acted_at_utc_ms)
         try container.encode(action, forKey: .action)
+        try container.encode(asked_at_ms, forKey: .asked_at_ms)
         try container.encode(body, forKey: .body)
         try container.encode(device_id, forKey: .device_id)
         try container.encode(expected_revision, forKey: .expected_revision)

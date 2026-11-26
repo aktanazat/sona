@@ -1037,14 +1037,14 @@ final class AppModel: NSObject, ObservableObject {
     func decide(
         _ action: WorkActionManifest.Action, row: String, title: String, taskId: String? = nil,
         expectedRevision: Int64? = nil, noticeIds: [String] = [], sessionId: String? = nil,
-        body: String? = nil, value: String? = nil
+        askedAtMs: Int64? = nil, body: String? = nil, value: String? = nil
     ) async {
         guard let snapshot = board?.workToday else { return }
         do {
             try await today.decide(
                 action, row: row, title: title, in: snapshot, deviceId: deviceId,
                 taskId: taskId, expectedRevision: expectedRevision, noticeIds: noticeIds,
-                sessionId: sessionId, body: body, value: value
+                sessionId: sessionId, askedAtMs: askedAtMs, body: body, value: value
             )
         } catch {
             boardState = .offline

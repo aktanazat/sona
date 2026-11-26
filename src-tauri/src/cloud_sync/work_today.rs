@@ -349,17 +349,12 @@ fn notice_line(notice: &inbox::Notification) -> String {
                 None => failed,
             }
         }
-        NotificationKind::Unblocked => {
-            let verb = if to == Some("canceled") {
-                "canceled"
-            } else {
-                "finished"
-            };
-            notice.from.as_deref().map_or_else(
-                || "unblocked it".to_owned(),
-                |from| format!("{verb} “{from}”, which blocked it"),
-            )
+        // The blocker's title is not sent: the blocker may be drawn from a
+        // meeting kept on this Mac, and the notice keeps only its title.
+        NotificationKind::Unblocked if to == Some("canceled") => {
+            "canceled a task that blocked it".to_owned()
         }
+        NotificationKind::Unblocked => "finished a task that blocked it".to_owned(),
     };
     let line = format!("{} {what}", who(notice));
     match &notice.excerpt {
@@ -413,6 +408,9 @@ pub(super) struct WorkAction {
     /// `done`, `accept`, `decline`, `read`, `archive` or `answer`; any other
     /// is refused, so a newer phone learns this Mac cannot do it.
     action: String,
+    /// For an answer, when the question it answers was asked, so it never
+    /// lands on a later question in the same session.
+    asked_at_ms: Option<i64>,
     body: Option<String>,
     device_id: String,
     expected_revision: Option<i64>,
@@ -542,6 +540,7 @@ fn decision(action: &WorkAction) -> Option<PhoneDecision<'_>> {
         },
         ("answer", _) => PhoneDecision::Answer {
             session: action.session_id.as_deref()?,
+            asked_at_ms: action.asked_at_ms?,
             body: action.body.as_deref(),
             value: action.value.as_deref(),
         },

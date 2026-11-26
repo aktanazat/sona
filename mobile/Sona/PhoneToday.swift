@@ -65,12 +65,12 @@ final class PhoneToday: ObservableObject {
     func decide(
         _ action: WorkActionManifest.Action, row: String, title: String, in today: WorkToday, deviceId: String,
         taskId: String? = nil, expectedRevision: Int64? = nil, noticeIds: [String] = [],
-        sessionId: String? = nil, body: String? = nil, value: String? = nil
+        sessionId: String? = nil, askedAtMs: Int64? = nil, body: String? = nil, value: String? = nil
     ) async throws {
         guard pending(for: row) == nil else { return }
         let sentAt = now()
         let manifest = WorkActionManifest(
-            acted_at_utc_ms: Int64(sentAt.timeIntervalSince1970 * 1000), action: action, body: body,
+            acted_at_utc_ms: Int64(sentAt.timeIntervalSince1970 * 1000), action: action, asked_at_ms: askedAtMs, body: body,
             device_id: deviceId, expected_revision: expectedRevision, format_version: 1,
             kind: WorkActionObject.kind, notice_ids: noticeIds, session_id: sessionId,
             target_device_id: today.source_device_id, task_id: taskId, value: value

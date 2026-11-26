@@ -976,6 +976,7 @@ pub(super) fn replied(
     conn: &mut Connection,
     change: super::Change<'_>,
     session_id: &str,
+    asked_at_ms: i64,
     body: Option<&str>,
     value: Option<&str>,
 ) -> Result<Done<String>> {
@@ -989,7 +990,13 @@ pub(super) fn replied(
         "work_session_reply",
         &(session_id, by.actor, by.agent, body, value),
         change.at_ms,
-        |tx| reply(tx, session_id, by, body, value, change.at_ms),
+        |tx| {
+            let log = activities(tx, &stored(tx, session_id)?.id)?;
+            if view_question(&log).map(|question| question.at_ms) != Some(asked_at_ms) {
+                return Err(Refusal::Invalid.into());
+            }
+            reply(tx, session_id, by, body, value, change.at_ms)
+        },
     )?;
     let mut effects = Effects::default();
     effects.items.push(task_of(conn, &id)?);

@@ -2889,6 +2889,7 @@ mod phone_decisions {
             },
             PhoneDecision::Answer {
                 session: &answered,
+                asked_at_ms: AT,
                 body: None,
                 value: Some("acme"),
             },
@@ -2904,6 +2905,24 @@ mod phone_decisions {
                 decide(conn, None, None, change, decision).expect("the decision");
             }
         };
+        let earlier_question = Change {
+            operation_id: &operation(),
+            actor: WorkActor::Me,
+            at_ms: AT + 1,
+        };
+        assert!(decide(
+            &mut conn,
+            None,
+            None,
+            earlier_question,
+            &PhoneDecision::Answer {
+                session: &answered,
+                asked_at_ms: AT - 1,
+                body: Some("for the old question"),
+                value: None,
+            },
+        )
+        .is_err());
         run(&mut conn);
 
         let status = |id: &str| items::item(&conn, id).expect("a task").status;
