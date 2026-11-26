@@ -2613,6 +2613,23 @@ impl MeetingStore {
         let connection = self.connection()?;
         cloud_head_in(&connection, object_id)
     }
+
+    pub(crate) fn unimported_cloud_heads(&self) -> Result<Vec<CloudHead>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT object_id, source_session_id, remote_revision_id, tombstone,
+                    acknowledged_revision_id, change_sequence
+             FROM meeting_cloud_heads
+             WHERE source_session_id IS NULL AND tombstone = 0
+               AND remote_revision_id IS NOT NULL
+               AND acknowledged_revision_id = remote_revision_id
+             ORDER BY change_sequence, object_id",
+        )?;
+        let heads = statement
+            .query_map([], cloud_head_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(heads)
+    }
     pub(crate) fn cloud_head_for_session(
         &self,
         session_id: MeetingSessionId,

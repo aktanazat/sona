@@ -1,6 +1,7 @@
 use std::{
     fmt,
     fs::{self, File, OpenOptions},
+    future::Future,
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -1818,12 +1819,65 @@ impl CloudSyncRuntime {
         self.drain_outbox(&access).await?;
         if self.request_permitted(&access.state) {
             self.pull_changes(&access).await?;
+            self.recover_refused_phone_audio(&access).await?;
             self.backfill_phone_thoughts(&access).await?;
             dictation_profile::sync(self, &access).await?;
             memory_index::sync(self, &access).await?;
             work_today::sync(self, &access).await?;
         }
         Ok(())
+    }
+
+    async fn recover_refused_phone_audio(
+        &self,
+        access: &CloudAccess,
+    ) -> Result<(), CloudRuntimeError> {
+        use crate::{managers::history::HistoryManager, scratchpad::phone_import};
+        use tauri::Manager;
+
+        let history = Arc::clone(self.app.state::<Arc<HistoryManager>>().inner());
+        recover_phone_audio_once(&access.store, &access.state.vault_id, |head| {
+            let history = &history;
+            async move {
+                let object_id = &head.object_id;
+                if phone_import::is_deleted(history, &access.state.vault_id, object_id)
+                    .map_err(|_| CloudRuntimeError::Storage)?
+                    || phone_import::reference(history, &access.state.vault_id, object_id, None)
+                        .map_err(|_| CloudRuntimeError::Storage)?
+                        .is_some()
+                {
+                    return Ok(());
+                }
+                let revision_id = head
+                    .remote_revision_id
+                    .as_deref()
+                    .ok_or(CloudRuntimeError::IntegrityFailure)?;
+                match self
+                    .fetch_remote_object(access, object_id, revision_id)
+                    .await?
+                {
+                    RemoteObject::DeviceRecording(recording) => {
+                        self.install_device_recording(
+                            access,
+                            object_id,
+                            revision_id,
+                            head.change_sequence,
+                            recording,
+                        )
+                        .await
+                    }
+                    RemoteObject::Thought(thought) => self.install_phone_thought(
+                        access,
+                        object_id,
+                        revision_id,
+                        head.change_sequence,
+                        thought,
+                    ),
+                    _ => Ok(()),
+                }
+            }
+        })
+        .await
     }
 
     async fn active_access(&self) -> Result<Option<CloudAccess>, CloudRuntimeError> {
@@ -3717,43 +3771,18 @@ impl CloudSyncRuntime {
         sequence: u64,
         recording: DeviceRecordingImport,
     ) -> Result<(), CloudRuntimeError> {
-        if access
-            .store
-            .cloud_head(object_id)
-            .map_err(map_store_error)?
-            .is_some()
+        if let Some(session_id) = import_device_recording(
+            &self.meetings,
+            &access.store,
+            object_id,
+            revision_id,
+            sequence,
+            recording,
+        )
+        .await?
         {
-            // A device that revised a recording it already delivered would
-            // otherwise arrive as a second meeting over the same audio.
-            log::warn!("Cloud recording {object_id} was revised after it was imported");
-            return acknowledge_remote_revision(&access.store, object_id, revision_id, sequence);
+            self.emit_changed(Some(session_id), Some(CloudObjectState::Committed));
         }
-        let snapshot = self
-            .meetings
-            .import_recording_with(
-                recording.request(),
-                recording.personal_notes.as_deref(),
-                recording.calendar_event.as_ref(),
-                &recording.bookmark_offsets_ns,
-                recording.place_reading,
-            )
-            .await
-            .map_err(|error| {
-                log::warn!("Cloud recording {object_id} would not import: {error:?}");
-                map_import_error(error)
-            })?;
-        access
-            .store
-            .upsert_cloud_head(&CloudHead {
-                object_id: object_id.to_owned(),
-                source_session_id: Some(snapshot.session_id),
-                remote_revision_id: Some(revision_id.to_owned()),
-                tombstone: false,
-                acknowledged_revision_id: Some(revision_id.to_owned()),
-                change_sequence: sequence,
-            })
-            .map_err(map_store_error)?;
-        self.emit_changed(Some(snapshot.session_id), Some(CloudObjectState::Committed));
         Ok(())
     }
 
@@ -4360,6 +4389,79 @@ fn acknowledge_if_refused(
         }
         other => other,
     }
+}
+
+/// Old Macs acknowledged unsupported audio without keeping a source. Revisit
+/// those heads once after the normal pull has applied newer revisions/deletes.
+async fn recover_phone_audio_once<F, Fut>(
+    store: &MeetingStore,
+    vault_id: &str,
+    mut install: F,
+) -> Result<(), CloudRuntimeError>
+where
+    F: FnMut(CloudHead) -> Fut,
+    Fut: Future<Output = Result<(), CloudRuntimeError>>,
+{
+    let stamp = format!(
+        ".compact-phone-audio-v1-{}.done",
+        sha256_base64url(vault_id.as_bytes())
+    );
+    match fs::metadata(store.root().join(&stamp)) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(CloudRuntimeError::File),
+    }
+    for head in store.unimported_cloud_heads().map_err(map_store_error)? {
+        match install(head).await {
+            Ok(()) | Err(CloudRuntimeError::IntegrityFailure) => {}
+            Err(CloudRuntimeError::Client(CloudClientError::Api(api)))
+                if api.code == CloudErrorCode::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    write_staged_file(store.root(), &stamp, b"1")
+}
+
+async fn import_device_recording(
+    meetings: &MeetingSessionManager,
+    store: &MeetingStore,
+    object_id: &str,
+    revision_id: &str,
+    sequence: u64,
+    recording: DeviceRecordingImport,
+) -> Result<Option<MeetingSessionId>, CloudRuntimeError> {
+    if store
+        .cloud_head(object_id)
+        .map_err(map_store_error)?
+        .is_some_and(|head| head.tombstone || head.source_session_id.is_some())
+    {
+        acknowledge_remote_revision(store, object_id, revision_id, sequence)?;
+        return Ok(None);
+    }
+    let snapshot = meetings
+        .import_recording_with(
+            recording.request(),
+            recording.personal_notes.as_deref(),
+            recording.calendar_event.as_ref(),
+            &recording.bookmark_offsets_ns,
+            recording.place_reading,
+        )
+        .await
+        .map_err(|error| {
+            log::warn!("Cloud recording {object_id} would not import: {error:?}");
+            map_import_error(error)
+        })?;
+    store
+        .upsert_cloud_head(&CloudHead {
+            object_id: object_id.to_owned(),
+            source_session_id: Some(snapshot.session_id),
+            remote_revision_id: Some(revision_id.to_owned()),
+            tombstone: false,
+            acknowledged_revision_id: Some(revision_id.to_owned()),
+            change_sequence: sequence,
+        })
+        .map_err(map_store_error)?;
+    Ok(Some(snapshot.session_id))
 }
 
 /// What an importer's refusal says about the revision that caused it: storage
@@ -5300,10 +5402,7 @@ mod tests {
         staging.finish(&manifest.audio)
     }
 
-    #[test]
-    fn a_compact_phone_recording_becomes_a_meeting() {
-        let (_files, manager) = crate::meeting::session::tests::importing_manager();
-        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+    fn compact_phone_object() -> (PhoneObject, Vec<u8>) {
         let audio = include_bytes!("../../tests/fixtures/phone-audio/jfk.aac").to_vec();
         let mut object = phone_object(audio.clone(), &sha256_base64url(&audio), TEST_DEVICE_ID);
         let plaintext = open_object_revision_payload(
@@ -5320,16 +5419,133 @@ mod tests {
             &object.sealed_manifest,
         )
         .unwrap();
-        let compact_manifest = String::from_utf8(plaintext)
-            .unwrap()
-            .replace(DEVICE_RECORDING_CODEC, DEVICE_RECORDING_COMPACT_CODEC);
+        let mut manifest: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+        manifest["audio"]["codec"] = DEVICE_RECORDING_COMPACT_CODEC.into();
+        manifest["duration_ms"] = 11_000.into();
         object.sealed_manifest = seal(
             0,
             1,
             ObjectContentKind::Manifest,
-            compact_manifest.as_bytes(),
+            &serde_json::to_vec(&manifest).unwrap(),
         );
         object.envelope.manifest_sha256 = sha256_base64url(&object.sealed_manifest);
+        (object, audio)
+    }
+
+    #[test]
+    fn a_refused_compact_recording_is_recovered_once_after_updating() {
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let (object, _) = compact_phone_object();
+        acknowledge_if_refused(
+            &store,
+            TEST_OBJECT_ID,
+            TEST_REVISION_ID,
+            12,
+            Err(CloudRuntimeError::IntegrityFailure),
+        )
+        .unwrap();
+        acknowledge_remote_revision(&store, "otherobject12345", TEST_REVISION_ID, 13).unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        tauri::async_runtime::block_on(recover_phone_audio_once(&store, TEST_VAULT_ID, |head| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let store = &store;
+            let manager = &manager;
+            let object = &object;
+            async move {
+                if head.object_id != TEST_OBJECT_ID {
+                    return Err(CloudRuntimeError::IntegrityFailure);
+                }
+                let revision = head.remote_revision_id.as_deref().unwrap();
+                let manifest = match open_remote_manifest(
+                    &TEST_VAULT_ROOT,
+                    TEST_VAULT_ID,
+                    &head.object_id,
+                    revision,
+                    object.envelope.chunk_count,
+                    &object.sealed_manifest,
+                )? {
+                    RemoteManifest::DeviceRecording(manifest) => manifest,
+                    _ => panic!("expected a device recording"),
+                };
+                let staged = stage(
+                    object,
+                    store.cloud_recording_staging_path(&head.object_id).unwrap(),
+                )?;
+                import_device_recording(
+                    manager,
+                    store,
+                    &head.object_id,
+                    revision,
+                    head.change_sequence,
+                    DeviceRecordingImport::new(staged, manifest, &head.object_id),
+                )
+                .await?;
+                Ok(())
+            }
+        }))
+        .unwrap();
+        let head = store.cloud_head(TEST_OBJECT_ID).unwrap().unwrap();
+        let session_id = head
+            .source_session_id
+            .expect("the refused recording must be imported after updating");
+        let review = tauri::async_runtime::block_on(manager.get(session_id)).unwrap();
+        assert!(!review.transcript.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        tauri::async_runtime::block_on(recover_phone_audio_once(&store, TEST_VAULT_ID, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        }))
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the stamped pass must not run twice, even for an unrecoverable source"
+        );
+    }
+
+    #[test]
+    fn a_failed_recovery_is_retried_before_it_is_stamped() {
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        acknowledge_remote_revision(&store, TEST_OBJECT_ID, TEST_REVISION_ID, 12).unwrap();
+        let failed =
+            tauri::async_runtime::block_on(recover_phone_audio_once(&store, TEST_VAULT_ID, |_| {
+                std::future::ready(Err(CloudRuntimeError::File))
+            }));
+        assert!(matches!(failed, Err(CloudRuntimeError::File)));
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        tauri::async_runtime::block_on(recover_phone_audio_once(&store, TEST_VAULT_ID, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        }))
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_deleted_refused_recording_is_not_revisited() {
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        acknowledge_remote_revision(&store, TEST_OBJECT_ID, TEST_REVISION_ID, 12).unwrap();
+        let mut head = store.cloud_head(TEST_OBJECT_ID).unwrap().unwrap();
+        head.tombstone = true;
+        store.upsert_cloud_head(&head).unwrap();
+        tauri::async_runtime::block_on(recover_phone_audio_once(
+            &store,
+            TEST_VAULT_ID,
+            |_| async {
+                panic!("a deleted source must not be fetched");
+            },
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn a_compact_phone_recording_becomes_a_meeting() {
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let (object, audio) = compact_phone_object();
         let staged = stage(
             &object,
             store.cloud_recording_staging_path(TEST_OBJECT_ID).unwrap(),
