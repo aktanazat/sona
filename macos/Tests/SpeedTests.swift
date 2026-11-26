@@ -1,0 +1,199 @@
+import AppKit
+import SwiftUI
+import XCTest
+@testable import Sona
+
+/// Counts the work the app does for one user action, so a regression shows
+/// as a number rather than a feeling.
+final class SpeedTests: XCTestCase {
+    func testALaunchWritesOnlyTheSpotlightRowsThatChanged() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appending(path: "sona-speed-\(UUID().uuidString)/spotlight-index.json")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        var notes = Dictionary(uniqueKeysWithValues: (0..<500).map {
+            ("n\($0)", SystemNote(id: "n\($0)", title: "Note \($0)", body: "Body \($0)"))
+        })
+
+        XCTAssertNil(SpotlightStamp.load(from: file))
+        var first = SpotlightStamp()
+        let firstChange = first.change(to: SpotlightStamp.digests(notes), for: NoteEntity.self)
+        XCTAssertNil(firstChange.gone)
+        XCTAssertEqual(firstChange.written.count, 500)
+        first.kinds[SpotlightStamp.kind(NoteEntity.self)] = SpotlightStamp.digests(notes)
+        try first.save(to: file)
+
+        let relaunch = try XCTUnwrap(SpotlightStamp.load(from: file))
+        let unchanged = relaunch.change(to: SpotlightStamp.digests(notes), for: NoteEntity.self)
+        XCTAssertEqual(unchanged.gone, [])
+        XCTAssertEqual(unchanged.written, [])
+
+        notes["n1"] = SystemNote(id: "n1", title: "Note 1", body: "Edited")
+        notes["n2"] = nil
+        let edited = relaunch.change(to: SpotlightStamp.digests(notes), for: NoteEntity.self)
+        XCTAssertEqual(edited.gone, ["n2"])
+        XCTAssertEqual(edited.written, ["n1"])
+        XCTAssertNil(relaunch.change(to: [:], for: TaskEntity.self).gone)
+
+        var older = relaunch
+        older.version = SpotlightStamp.currentVersion - 1
+        try older.save(to: file)
+        XCTAssertNil(SpotlightStamp.load(from: file))
+    }
+
+    /// Thirty rows drawn together used to write the receipts twice each, and
+    /// every write redrew every row that reads them.
+    @MainActor
+    func testRowsDrawnTogetherGetTheirReceiptsInOneChange() async {
+        let store = LibraryStore(core: Core())
+        let changes = Counter()
+        Self.count(changes, of: store)
+        for id in Int64(1)...30 { store.loadReceipts(for: id) }
+        while store.receipts.count < 30 { await Self.change(of: store) }
+        XCTAssertEqual(changes.value, 1)
+        store.loadReceipts(for: 7)
+        XCTAssertEqual(changes.value, 1)
+    }
+
+    @MainActor
+    func testPlayableLinesMatchWhatEachRowUsedToScanFor() {
+        let tracks = [
+            MeetingTrackSnapshot(trackId: "mic", sourceKind: .microphone, format: nil,
+                                 firstOffsetNs: 0, lastOffsetNs: 300, durableRecordCount: 4),
+            MeetingTrackSnapshot(trackId: "system", sourceKind: .systemAudio, format: nil,
+                                 firstOffsetNs: 0, lastOffsetNs: 900, durableRecordCount: 0),
+        ]
+        let transcript = (0..<400).map { index in
+            TranscriptEffectiveSegment(
+                base: TranscriptSegment(
+                    segmentId: "s\(index % 390)", transcriptRevisionId: "r", trackId: index % 3 == 0 ? "system" : "mic",
+                    ordinal: index, startOffsetNs: Int64(index), endOffsetNs: Int64(index + 1),
+                    speakerId: "a", text: "", confidenceMilli: nil),
+                replacementText: nil, removed: index % 7 == 0, editRevision: nil,
+                assignedSpeakerId: "a", speakerAssignment: .unknown)
+        }
+        let scanned = Set(transcript.map(\.base.segmentId).filter { id in
+            guard let segment = transcript.first(where: { $0.base.segmentId == id && !$0.removed }) else { return false }
+            return tracks.contains {
+                $0.trackId == segment.base.trackId && $0.durableRecordCount > 0
+                    && ($0.firstOffsetNs ?? .max) < segment.base.endOffsetNs
+                    && ($0.lastOffsetNs ?? 0) > segment.base.startOffsetNs
+            }
+        })
+        XCTAssertFalse(scanned.isEmpty)
+        XCTAssertEqual(MeetingsStore.playable(transcript, tracks: tracks), scanned)
+    }
+
+    @MainActor
+    private final class Counter {
+        var value = 0
+    }
+
+    /// Counts every write, each as it happens, so writes in one turn are not
+    /// folded together.
+    @MainActor
+    private static func count(_ counter: Counter, of store: LibraryStore) {
+        withObservationTracking { _ = store.receipts } onChange: {
+            MainActor.assumeIsolated {
+                counter.value += 1
+                count(counter, of: store)
+            }
+        }
+    }
+
+    @MainActor
+    private static func change(of store: LibraryStore) async {
+        await withCheckedContinuation { continuation in
+            withObservationTracking { _ = store.receipts } onChange: { continuation.resume() }
+        }
+    }
+}
+
+/// The Markdown editor as the note and the task details host it: a window
+/// that is never shown, the SwiftUI editor in it, and the text view under it
+/// driven the way AppKit drives it.
+@MainActor
+final class MarkdownEditorTests: XCTestCase {
+    private final class Note {
+        var text: String
+        var selection: TextSelection?
+        var focused = false
+        var keys: [MarkdownEditorKey] = []
+
+        init(_ text: String) {
+            self.text = text
+        }
+    }
+
+    private var window: NSWindow?
+
+    override func tearDown() async throws {
+        window?.close()
+        window = nil
+    }
+
+    private func open(_ note: Note) throws -> MarkdownTextView {
+        let editor = MarkdownTextEditor(
+            text: Binding { note.text } set: { note.text = $0 },
+            selection: Binding { note.selection } set: { note.selection = $0 },
+            focused: Binding { note.focused } set: { note.focused = $0 },
+            label: "Note",
+            keys: { key in
+                note.keys.append(key)
+                return key == .escape
+            })
+        let host = NSHostingView(rootView: editor.frame(width: 400))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 600), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        self.window = window
+        let view = try XCTUnwrap(Self.textView(in: host))
+        XCTAssertTrue(window.makeFirstResponder(view))
+        return view
+    }
+
+    private static func textView(in view: NSView) -> MarkdownTextView? {
+        if let found = view as? MarkdownTextView { return found }
+        for child in view.subviews {
+            if let found = textView(in: child) { return found }
+        }
+        return nil
+    }
+
+    private func command(_ characters: String, code: UInt16) -> NSEvent? {
+        NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+            windowNumber: window?.windowNumber ?? 0, context: nil, characters: characters,
+            charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)
+    }
+
+    func testBoldIsOneStepOfUndoAndTheNoteFollowsBothWays() throws {
+        let note = Note("make this bold")
+        let view = try open(note)
+        // Each key press is its own undo group in the app; the test has no
+        // event loop, so it opens and closes them as the events would.
+        let undo = try XCTUnwrap(view.undoManager)
+        undo.groupsByEvent = false
+        undo.beginUndoGrouping()
+        view.setSelectedRange(NSRange(location: 0, length: 0))
+        view.insertText("x", replacementRange: NSRange(location: 0, length: 0))
+        undo.endUndoGrouping()
+        view.setSelectedRange(NSRange(location: 11, length: 4))
+        undo.beginUndoGrouping()
+        XCTAssertTrue(view.performKeyEquivalent(with: try XCTUnwrap(command("b", code: 11))))
+        undo.endUndoGrouping()
+        XCTAssertEqual(note.text, "xmake this **bold**")
+        XCTAssertEqual(note.selection.flatMap { $0.range(in: note.text) }.map { String(note.text[$0]) }, "bold")
+
+        undo.undo()
+        XCTAssertEqual(view.string, "xmake this bold")
+        XCTAssertEqual(note.text, "xmake this bold")
+        undo.redo()
+        XCTAssertEqual(note.text, "xmake this **bold**")
+        undo.undo()
+        undo.undo()
+        XCTAssertEqual(note.text, "make this bold")
+    }
+}
