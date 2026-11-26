@@ -263,4 +263,57 @@ final class MarkdownEditorTests: XCTestCase {
         XCTAssertEqual(view.string, "second note")
         XCTAssertEqual(note.text, "second note")
     }
+
+    /// The note and the task details give the editor no width of their own:
+    /// it sits in a page's column and must take that column's width.
+    func testEditorOnAPageFillsTheColumnAndWrapsAtIt() throws {
+        let column = 700 - 2 * Theme.margin
+        try checkFills(minHeight: 240, width: column + 10) { editor in
+            AnyView(Page { Text("New note"); editor.padding(.horizontal, -5) })
+        }
+        try checkFills(lineSpacing: 3, width: column + 10) { editor in
+            AnyView(Page {
+                Text("Details")
+                ZStack(alignment: .topLeading) {
+                    Text("Add details").allowsHitTesting(false)
+                    editor.padding(.horizontal, -5)
+                }
+            })
+        }
+    }
+
+    private func checkFills(
+        minHeight: CGFloat = 0, lineSpacing: CGFloat = 0, width: CGFloat,
+        line: UInt = #line, _ screen: (MarkdownTextEditor) -> AnyView
+    ) throws {
+        let note = Note("Weekly plan\n- ship the editor\n" + String(repeating: "make this bold ", count: 40))
+        let editor = MarkdownTextEditor(
+            text: Binding { note.text } set: { note.text = $0 },
+            selection: Binding { note.selection } set: { note.selection = $0 },
+            focused: Binding { note.focused } set: { note.focused = $0 },
+            document: note.document, label: "Note", lineSpacing: lineSpacing, minHeight: minHeight)
+        let host = NSHostingView(rootView: screen(editor))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 600), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        self.window = window
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        let view = try XCTUnwrap(Self.textView(in: host), line: line)
+        let container = try XCTUnwrap(view.textContainer, line: line)
+        let layout = try XCTUnwrap(view.layoutManager, line: line)
+        XCTAssertEqual(view.frame.width, width, accuracy: 1, line: line)
+        XCTAssertEqual(container.size.width, view.frame.width, accuracy: 1, line: line)
+        layout.ensureLayout(for: container)
+        XCTAssertGreaterThan(layout.usedRect(for: container).width, width - 60, line: line)
+        // Three source lines, the long one wrapped onto a handful at that width.
+        var lines = 0
+        layout.enumerateLineFragments(forGlyphRange: layout.glyphRange(for: container)) { _, _, _, _, _ in lines += 1 }
+        XCTAssertGreaterThan(lines, 3, line: line)
+        XCTAssertLessThan(lines, 20, line: line)
+        XCTAssertEqual(
+            view.frame.height, max(layout.usedRect(for: container).height, minHeight), accuracy: 2, line: line)
+    }
 }
