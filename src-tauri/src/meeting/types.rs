@@ -1312,17 +1312,16 @@ pub struct GeneratedMeetingArtifacts {
     /// Defaulted so every earlier revision reads back as covering it all.
     #[serde(default)]
     pub left_out: Vec<LeftOutSpan>,
-    /// Decisions here that change one an earlier meeting of the same series
-    /// or of a linked project made. Defaulted so every earlier revision reads
-    /// back as changing nothing.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub decision_drift: Vec<DecisionDrift>,
 }
 
-/// An earlier meeting's decision that one of these notes' decisions changes.
+/// An earlier meeting's decision that a decision in a meeting's notes
+/// changes, as read for the review page. Stored only as a reference beside
+/// the notes (`meeting_decision_drift`), so the earlier words never travel
+/// with the newer meeting's notes and are left out once the earlier meeting
+/// is gone, rewritten or kept on this Mac while the newer one is not.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct DecisionDrift {
-    /// The changing decision's place in `decisions`.
+    /// The changing decision's place in the notes' `decisions`.
     pub decision: u32,
     pub earlier_session_id: MeetingSessionId,
     pub earlier_title: String,

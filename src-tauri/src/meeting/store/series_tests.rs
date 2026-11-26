@@ -882,14 +882,136 @@ fn earlier_decisions_come_from_the_series_and_linked_meetings_newest_first() {
 
     let earlier = store.earlier_decisions(now, &[linked], 6).unwrap();
 
-    let read: Vec<_> = earlier
-        .iter()
-        .map(|earlier| (earlier.session_id, earlier.started_at_utc_ms))
-        .collect();
-    assert_eq!(read, vec![(linked, Some(3_000)), (oldest, Some(1_000))]);
-    assert_eq!(earlier[0].title, "Board");
+    let read: Vec<_> = earlier.iter().map(|earlier| earlier.session_id).collect();
+    assert_eq!(read, vec![linked, oldest]);
     assert_eq!(earlier[1].decisions[0].text, "Ship on Friday");
     let newest = store.earlier_decisions(now, &[linked], 1).unwrap();
     assert_eq!(newest.len(), 1);
     assert_eq!(newest[0].session_id, linked);
+}
+
+/// A meeting in series `series_key` at `at_utc_ms` whose notes hold one
+/// decision, and the notes revision it was read from.
+fn decided_meeting(
+    store: &MeetingStore,
+    series_key: &str,
+    at_utc_ms: i64,
+    decision: &str,
+) -> (MeetingSessionId, String) {
+    let session_id = meeting(store, series_key, at_utc_ms);
+    calendar_facts(store, session_id, series_key, series_key);
+    super::workflow_core_tests::current_artifact(
+        store,
+        session_id,
+        &serde_json::json!({"decisions": [{"text": decision, "citations": []}]}),
+        at_utc_ms,
+    );
+    // PANIC: a fixture that cannot read back the revision it just wrote is a broken test.
+    let artifact_id: String = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT artifact_id FROM meeting_artifact_revisions WHERE session_id = ?1
+             ORDER BY generated_at_utc_ms DESC, rowid DESC LIMIT 1",
+            params![session_id.uuid().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (session_id, artifact_id)
+}
+
+/// An earlier meeting in "board" and a later one in "launch" whose only
+/// decision changes the earlier one's, recorded as the pipeline does.
+fn changed_pair(store: &MeetingStore) -> (MeetingSessionId, MeetingSessionId) {
+    let (earlier, earlier_artifact) = decided_meeting(store, "board", 1_000, "Ship on Friday");
+    let (later, later_artifact) = decided_meeting(store, "launch", 2_000, "Ship on Monday");
+    // PANIC: a fixture that cannot record its own drift is a broken test.
+    store
+        .record_decision_drift(
+            crate::meeting::types::MeetingArtifactId::from_uuid(
+                uuid::Uuid::parse_str(&later_artifact).unwrap(),
+            ),
+            &[super::series::DriftRef {
+                decision: 0,
+                earlier_session_id: earlier,
+                earlier_artifact_id: earlier_artifact,
+                earlier_decision: 0,
+            }],
+        )
+        .unwrap();
+    (earlier, later)
+}
+
+#[test]
+fn a_changed_decision_reads_the_earlier_words_which_never_join_the_later_notes() {
+    let (_directory, store) = store();
+    let (earlier, later) = changed_pair(&store);
+
+    let drift = store.decision_drift(later).unwrap();
+
+    assert_eq!(drift.len(), 1);
+    assert_eq!(drift[0].decision, 0);
+    assert_eq!(drift[0].earlier_session_id, earlier);
+    assert_eq!(drift[0].earlier_title, "board");
+    assert_eq!(drift[0].earlier_started_at_utc_ms, Some(1_000));
+    assert_eq!(drift[0].earlier.text, "Ship on Friday");
+    let later_notes: String = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT group_concat(content_json) FROM meeting_artifact_revisions
+             WHERE session_id = ?1",
+            params![later.uuid().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !later_notes.contains("Friday") && !later_notes.contains(&earlier.uuid().to_string()),
+        "what the bundle, export and share carry of the later meeting: {later_notes}"
+    );
+}
+
+#[test]
+fn a_changed_decision_is_left_out_once_the_earlier_meeting_is_deleted() {
+    let (_directory, store) = store();
+    let (earlier, later) = changed_pair(&store);
+
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "DELETE FROM meeting_sessions WHERE id = ?1",
+            params![earlier.uuid().to_string()],
+        )
+        .unwrap();
+
+    assert!(store.decision_drift(later).unwrap().is_empty());
+}
+
+#[test]
+fn a_changed_decision_is_left_out_while_only_the_earlier_meeting_is_kept_here() {
+    let (_directory, store) = store();
+    let (_, later) = changed_pair(&store);
+
+    exclude(&store, "board");
+    assert!(store.decision_drift(later).unwrap().is_empty());
+
+    exclude(&store, "launch");
+    let both_kept = store.decision_drift(later).unwrap();
+    assert_eq!(both_kept.len(), 1);
+}
+
+#[test]
+fn a_changed_decision_is_left_out_once_the_earlier_notes_are_written_again() {
+    let (_directory, store) = store();
+    let (earlier, later) = changed_pair(&store);
+
+    super::workflow_core_tests::current_artifact(
+        &store,
+        earlier,
+        &serde_json::json!({"decisions": [{"text": "Ship on Friday", "citations": []}]}),
+        5_000,
+    );
+
+    assert!(store.decision_drift(later).unwrap().is_empty());
 }

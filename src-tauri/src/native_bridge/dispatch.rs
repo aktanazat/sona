@@ -3821,6 +3821,11 @@ pub(super) async fn call(
             let session_id = args.take("sessionId")?;
             reply(crate::commands::loops::meeting_loops(app.state(), session_id).await)
         }
+        "meeting_decision_drift" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::loops::meeting_decision_drift(app.state(), session_id).await)
+        }
         "meeting_loop_resolve" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

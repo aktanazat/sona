@@ -2045,6 +2045,7 @@ pub fn run(cli_args: CliArgs) {
             commands::people::open_loops_inbox,
             commands::people::vocabulary_candidates,
             commands::loops::meeting_loops,
+            commands::loops::meeting_decision_drift,
             commands::loops::meeting_loop_resolve,
             commands::loops::meeting_loop_reopen,
             commands::loops::meeting_loop_assign,

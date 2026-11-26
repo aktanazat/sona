@@ -1125,7 +1125,10 @@ const DRIFT_UNRELATED: [(&str, &str); 9] = [
         "Hire a designer for the website",
         "The website copy is frozen until launch",
     ),
-    ("The team offsite is in Denver", "The team standup moves to 10am"),
+    (
+        "The team offsite is in Denver",
+        "The team standup moves to 10am",
+    ),
     (
         "The design review is on Tuesdays",
         "The design system uses the new color palette",
@@ -1135,7 +1138,10 @@ const DRIFT_UNRELATED: [(&str, &str); 9] = [
         "The Q3 marketing budget is 50,000 dollars",
         "The Q3 sales target is 2 million dollars",
     ),
-    ("The mobile app ships every week", "The mobile app gets a dark mode"),
+    (
+        "The mobile app ships every week",
+        "The mobile app gets a dark mode",
+    ),
     (
         "Customer support moves to Zendesk",
         "Customer interviews start next week",
@@ -1162,10 +1168,9 @@ fn drift_probe() {
     ] {
         let mut flagged = 0;
         for (earlier, new) in pairs {
-            let meeting = crate::meeting::store::series::EarlierDecisions {
+            let meeting = EarlierDecisions {
                 session_id: MeetingSessionId::new(),
-                title: "Earlier".to_owned(),
-                started_at_utc_ms: None,
+                artifact_id: "probe".to_owned(),
                 decisions: vec![CitedArtifactText {
                     text: (*earlier).to_owned(),
                     citations: Vec::new(),
@@ -1176,8 +1181,14 @@ fn drift_probe() {
                 citations: Vec::new(),
             };
             let started = Instant::now();
-            let drift = decision_drift(witness.engine(), &[decision], &[meeting], &|| Ok(()))
-                .expect("not stopped");
+            let drift = decision_drift(
+                witness.engine(),
+                &[decision],
+                &[meeting],
+                &|_| true,
+                &|| Ok(()),
+            )
+            .expect("not stopped");
             flagged += usize::from(!drift.is_empty());
             println!(
                 "{kind} {} {:.1} s | {earlier} -> {new}",

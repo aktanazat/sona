@@ -34,7 +34,7 @@ struct ArtifactPane: View {
                         }
                     }
                 }
-                if !notes.decisions.isEmpty { decisions(notes.decisions, drift: content.decisionDrift ?? []) }
+                if !notes.decisions.isEmpty { decisions(notes.decisions, drift: store.decisionDrift) }
                 if !notes.actions.isEmpty { actions(notes.actions, artifactId: artifact.artifactId) }
                 if !notes.figures.isEmpty { figures(notes.figures) }
                 if !notes.questions.isEmpty { lines("Open questions", notes.questions) }

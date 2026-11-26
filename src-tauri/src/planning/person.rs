@@ -417,7 +417,6 @@ mod tests {
             plain: false,
             plain_because: None,
             left_out: Vec::new(),
-            decision_drift: Vec::new(),
         };
         meetings
             .with_planning_snapshot(|connection| {

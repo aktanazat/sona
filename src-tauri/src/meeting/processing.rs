@@ -41,6 +41,7 @@ use super::prompt_types::{
 use super::relay_generator::RelayTextGenerator;
 use super::store::meeting_maybe::HeardVoice;
 use super::store::recall::RecallMemory;
+use super::store::series::{DriftRef, EarlierDecisions};
 use super::store::voice_identity::{
     DiarizationEvidenceKind, DiarizationEvidenceSpanInput, VoiceEnrollmentEvidence,
     VoiceEnrollmentRecord,
@@ -1476,7 +1477,7 @@ impl MeetingProcessingService {
         route: ProcessingRoute,
         decisions: &[CitedArtifactText],
         check: &dyn Fn() -> Result<(), RunFailure>,
-    ) -> Result<Vec<DecisionDrift>, RunFailure> {
+    ) -> Result<Vec<DriftRef>, RunFailure> {
         if decisions.is_empty() || generator.model_id() == AppleIntelligenceGenerator.model_id() {
             return Ok(Vec::new());
         }
@@ -1495,11 +1496,14 @@ impl MeetingProcessingService {
             }
         };
         let here = kept.hides(session_id);
-        let earlier: Vec<_> = earlier
+        let earlier: Vec<EarlierDecisions> = earlier
             .into_iter()
             .filter(|meeting| may_compare(kept.hides(meeting.session_id), here, route))
             .collect();
-        complete_reading::decision_drift(generator, decisions, &earlier, check)
+        let may_send = |earlier: MeetingSessionId| {
+            route == ProcessingRoute::Local || !self.series_opted_out_of_remote(store, earlier)
+        };
+        complete_reading::decision_drift(generator, decisions, &earlier, &may_send, check)
     }
 
     /// Park every run at its next checkpoint until the returned gate drops.
@@ -3308,7 +3312,7 @@ impl MeetingProcessingService {
             &mut content,
             checkpoint,
         )?;
-        content.decision_drift = self.decision_drift(
+        let drift = self.decision_drift(
             store,
             generator.as_ref(),
             session_id,
@@ -3330,6 +3334,13 @@ impl MeetingProcessingService {
                 generated_at_utc_ms: utc_now_ms(),
             })
             .map_err(RunFailure::from)?;
+        let changed = match store.record_decision_drift(artifact.artifact_id, &drift) {
+            Ok(()) => drift.len(),
+            Err(error) => {
+                log::warn!("Changed decisions of {session_id:?} could not be kept: {error:?}");
+                0
+            }
+        };
         // Two passes read the revision that just landed, in this order and
         // only here.
         //
@@ -3355,14 +3366,7 @@ impl MeetingProcessingService {
             log::warn!("Could not carry loops forward into {session_id:?}: {error:?}");
         }
         crate::planning::work::take_in(self.app.as_ref(), store, session_id);
-        if !content.decision_drift.is_empty() {
-            crate::planning::work::decisions_changed(
-                self.app.as_ref(),
-                store,
-                session_id,
-                content.decision_drift.len(),
-            );
-        }
+        crate::planning::work::decisions_changed(self.app.as_ref(), store, session_id, changed);
         crate::planning::work::watch::after_meeting(self.app.as_ref(), store, session_id);
         // Third pass over the same landed revision: the summary and transcript
         // a reader will search for are final now, so this is where the meeting
@@ -6540,7 +6544,6 @@ fn validate_artifact_output(
         plain_because: None,
         plain: false,
         left_out: Vec::new(),
-        decision_drift: Vec::new(),
     };
     drop_restated_items(&mut artifacts);
     Ok(artifacts)
@@ -6941,7 +6944,6 @@ fn plain_artifacts(
         plain: true,
         plain_because: Some(stopped_by),
         left_out,
-        decision_drift: Vec::new(),
     }
 }
 
@@ -11849,11 +11851,14 @@ pub(crate) mod tests {
         assert_eq!(support.state, LedgerThreadState::Decided);
     }
 
-    /// An engine that finds every decision it is shown changed, and keeps
-    /// what it was shown.
+    /// An engine that finds every decision it is shown changed, or none
+    /// when `unrelated`, runs `on_ask` on each request, and keeps what it
+    /// was shown.
     #[derive(Default)]
     struct DriftWitness {
         id: &'static str,
+        unrelated: bool,
+        on_ask: Option<Box<dyn Fn() + Send + Sync>>,
         shown: Mutex<Vec<String>>,
     }
 
@@ -11881,47 +11886,117 @@ pub(crate) mod tests {
             _max_tokens: i32,
             _shape: ReplyShape,
         ) -> Result<String, MeetingTextGenerationError> {
+            if let Some(on_ask) = &self.on_ask {
+                on_ask();
+            }
             self.shown
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(evidence.to_owned());
-            Ok(r#"{"relation": "changes"}"#.to_owned())
+            Ok(if self.unrelated {
+                r#"{"relation": "unrelated"}"#
+            } else {
+                r#"{"relation": "changes"}"#
+            }
+            .to_owned())
         }
+    }
+
+    /// A meeting of the "launch" series at `start_utc_ms`, with `decision`
+    /// in its notes when there is one.
+    fn launch_meeting(
+        store: &MeetingStore,
+        start_utc_ms: i64,
+        decision: Option<&str>,
+    ) -> MeetingSessionId {
+        use crate::meeting::store::workflow_core_tests::{current_artifact, meeting};
+        let session_id = meeting(store, "Launch sync", start_utc_ms);
+        store
+            .remember_calendar_facts(
+                session_id,
+                &crate::meeting::detection::machine::CalendarEventSummary {
+                    event_key: format!("launch#{start_utc_ms}"),
+                    series_key: "launch".to_owned(),
+                    title: "Launch sync".to_owned(),
+                    attendee_count: 2,
+                    start_utc_ms,
+                    end_utc_ms: start_utc_ms + 500,
+                    attendees: Vec::new(),
+                    notes: None,
+                    calendar_name: None,
+                    location: None,
+                    url: None,
+                    place: None,
+                },
+            )
+            .expect("the calendar facts");
+        if let Some(decision) = decision {
+            current_artifact(
+                store,
+                session_id,
+                &serde_json::json!({"decisions": [{"text": decision, "citations": []}]}),
+                start_utc_ms,
+            );
+        }
+        session_id
+    }
+
+    fn keep_launch_here(store: &MeetingStore) {
+        store
+            .set_series_remote_opt_out(
+                &crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest {
+                    operation_id: MeetingOperationId::new(),
+                    series_key: "launch".to_owned(),
+                    remote_intelligence_opt_out: true,
+                    expected_revision: 0,
+                },
+                3_000,
+            )
+            .expect("keep the series here");
+    }
+
+    #[test]
+    fn a_series_kept_here_mid_comparison_reaches_the_relay_no_more() {
+        let (_directory, store) = crate::meeting::store::workflow_core_tests::store();
+        launch_meeting(&store, 1_000, Some("Launch moves to March 3"));
+        launch_meeting(&store, 1_500, Some("Launch moves to March 5"));
+        let now = launch_meeting(&store, 2_000, None);
+        let keeping = Arc::clone(&store);
+        let witness = DriftWitness {
+            unrelated: true,
+            on_ask: Some(Box::new(move || keep_launch_here(&keeping))),
+            ..DriftWitness::default()
+        };
+        let decisions = [CitedArtifactText {
+            text: "Launch moves to April 9".to_owned(),
+            citations: Vec::new(),
+        }];
+
+        MeetingProcessingService::new(None)
+            .decision_drift(
+                &store,
+                &witness,
+                now,
+                ProcessingRoute::Relay,
+                &decisions,
+                &|| Ok(()),
+            )
+            .expect("drift");
+
+        let shown = witness
+            .shown
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(shown.len(), 1, "{shown:#?}");
+        assert!(shown[0].contains("March 5"));
     }
 
     #[test]
     fn a_meeting_kept_on_this_mac_is_compared_only_by_the_engine_here() {
-        use crate::meeting::store::workflow_core_tests::{current_artifact, meeting, store};
-        let (_directory, store) = store();
-        let earlier = meeting(&store, "Launch sync", 1_000);
-        let now = meeting(&store, "Launch sync", 2_000);
-        for (session_id, start_utc_ms) in [(earlier, 1_000), (now, 2_000)] {
-            store
-                .remember_calendar_facts(
-                    session_id,
-                    &crate::meeting::detection::machine::CalendarEventSummary {
-                        event_key: format!("launch#{start_utc_ms}"),
-                        series_key: "launch".to_owned(),
-                        title: "Launch sync".to_owned(),
-                        attendee_count: 2,
-                        start_utc_ms,
-                        end_utc_ms: start_utc_ms + 500,
-                        attendees: Vec::new(),
-                        notes: None,
-                        calendar_name: None,
-                        location: None,
-                        url: None,
-                        place: None,
-                    },
-                )
-                .expect("the calendar facts");
-        }
-        current_artifact(
-            &store,
-            earlier,
-            &serde_json::json!({"decisions": [{"text": "Launch moves to March 3", "citations": []}]}),
-            1_500,
-        );
+        let (_directory, store) = crate::meeting::store::workflow_core_tests::store();
+        let earlier = launch_meeting(&store, 1_000, Some("Launch moves to March 3"));
+        let now = launch_meeting(&store, 2_000, None);
         let service = MeetingProcessingService::new(None);
         let witness = DriftWitness::default();
         let decisions = [CitedArtifactText {
@@ -11946,17 +12021,7 @@ pub(crate) mod tests {
         assert_eq!(open[0].earlier_session_id, earlier);
         assert_eq!(shown(), 1);
 
-        store
-            .set_series_remote_opt_out(
-                &crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest {
-                    operation_id: MeetingOperationId::new(),
-                    series_key: "launch".to_owned(),
-                    remote_intelligence_opt_out: true,
-                    expected_revision: 0,
-                },
-                3_000,
-            )
-            .expect("keep the series here");
+        keep_launch_here(&store);
         assert!(drift(ProcessingRoute::Relay).is_empty());
         assert_eq!(shown(), 1, "kept: never sent to the relay");
 

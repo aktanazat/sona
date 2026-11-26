@@ -316,6 +316,8 @@ final class MeetingsStore {
     var pending: String? { running.last?.word }
     private(set) var analytics: MeetingAnalyticsSnapshot?
     private(set) var loops: [MeetingLoopRow]?
+    /// Earlier decisions the open meeting's notes change.
+    private(set) var decisionDrift: [MeetingDecisionDrift] = []
     private(set) var loopsBusy = false
     /// The open meeting's commitments that nothing in the planner cites yet.
     private(set) var untracked: MeetingUntrackedActionsRead = .reading
@@ -988,6 +990,7 @@ final class MeetingsStore {
         analyticsKey = nil
         loops = nil
         loopsKey = nil
+        decisionDrift = []
         untracked = .reading
         untrackedKey = nil
         setAside = []
@@ -1739,8 +1742,11 @@ final class MeetingsStore {
         guard let sessionId = openSessionId else { return }
         let read: MeetingLoopsResult? = try? await core.request(
             "meeting_loops", MeetingRequest.session(sessionId))
+        let drift: [MeetingDecisionDrift]? = try? await core.request(
+            "meeting_decision_drift", MeetingRequest.session(sessionId))
         guard isOpen(sessionId) else { return }
         loops = read?.rows ?? []
+        decisionDrift = drift ?? []
     }
 
     func loopRows(_ kind: MeetingLoopKind) -> [MeetingLoopRow] {

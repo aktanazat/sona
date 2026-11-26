@@ -1386,7 +1386,6 @@ fn joined_as_written(
         plain_because: None,
         plain: false,
         left_out: left_out_spans(evidence, left_out),
-        decision_drift: Vec::new(),
     };
     drop_repeated_items(&mut content);
     drop_restated_items(&mut content);
@@ -2694,14 +2693,16 @@ fn shared_subject(new: &HashSet<String>, earlier: &HashSet<String>) -> Option<us
 /// The decisions here that change one an earlier meeting made. A pair goes
 /// to the model only when the two share what they are about, the newest
 /// earlier meeting first, and a decision stops at the first earlier one the
-/// model finds it keeps or changes. A failed or unreadable answer flags
-/// nothing.
+/// model finds it keeps or changes. `may_send` is asked again right before
+/// each request, since an earlier meeting can be kept on this Mac while the
+/// comparisons run. A failed or unreadable answer flags nothing.
 pub(super) fn decision_drift(
     generator: &dyn MeetingTextGenerator,
     decisions: &[CitedArtifactText],
-    earlier: &[crate::meeting::store::series::EarlierDecisions],
+    earlier: &[EarlierDecisions],
+    may_send: &dyn Fn(MeetingSessionId) -> bool,
     check: &dyn Fn() -> Result<(), RunFailure>,
-) -> Result<Vec<DecisionDrift>, RunFailure> {
+) -> Result<Vec<DriftRef>, RunFailure> {
     let earlier_words: Vec<Vec<HashSet<String>>> = earlier
         .iter()
         .map(|meeting| {
@@ -2751,6 +2752,12 @@ pub(super) fn decision_drift(
             if normalized_words(&old.text) == said {
                 break;
             }
+            let Ok(earlier_decision) = u32::try_from(position) else {
+                break;
+            };
+            if !may_send(before.session_id) {
+                continue;
+            }
             asks += 1;
             let input = format!(
                 "Earlier decision: {}\nNew decision: {}\n{DRIFT_QUESTION}",
@@ -2768,12 +2775,11 @@ pub(super) fn decision_drift(
                 Ok(reply) => {
                     match first_json_value::<DriftReply>(&reply).map(|reply| reply.relation) {
                         Ok(DriftRelation::Changes) => {
-                            drift.push(DecisionDrift {
+                            drift.push(DriftRef {
                                 decision: index,
                                 earlier_session_id: before.session_id,
-                                earlier_title: before.title.clone(),
-                                earlier_started_at_utc_ms: before.started_at_utc_ms,
-                                earlier: old.clone(),
+                                earlier_artifact_id: before.artifact_id.clone(),
+                                earlier_decision,
                             });
                             break;
                         }

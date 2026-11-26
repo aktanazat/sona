@@ -25,7 +25,7 @@
 use super::fence::{write_fenced, Fence, FencedWrite};
 use super::{
     grant_series_consent_in, id, live_series_consent_in, parse_uuid, revoke_series_consent_in,
-    MeetingStore, StoreError, READABLE_ARTIFACT_CONTENT,
+    MeetingStore, StoreError, READABLE_ARTIFACT_CONTENT, READABLE_ARTIFACT_ID,
 };
 use crate::meeting::analytics::MeetingNotesTemplate;
 use crate::meeting::series_types::{
@@ -35,8 +35,8 @@ use crate::meeting::series_types::{
 };
 use crate::meeting::template_types::MeetingTemplateId;
 use crate::meeting::types::{
-    CitedArtifactText, GeneratedMeetingArtifacts, MeetingCommandKind, MeetingDeletionJobId,
-    MeetingOperationId, MeetingSessionId,
+    CitedArtifactText, DecisionDrift, GeneratedMeetingArtifacts, MeetingArtifactId,
+    MeetingCommandKind, MeetingDeletionJobId, MeetingOperationId, MeetingSessionId,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -58,9 +58,19 @@ pub(crate) struct PreviousSeriesBrief {
 /// An earlier meeting's decisions, as its readable notes hold them.
 pub(crate) struct EarlierDecisions {
     pub session_id: MeetingSessionId,
-    pub title: String,
-    pub started_at_utc_ms: Option<i64>,
+    /// The notes revision the decisions were read from.
+    pub artifact_id: String,
     pub decisions: Vec<CitedArtifactText>,
+}
+
+/// A decision in new notes that changes one an earlier meeting made, kept as
+/// where the earlier decision sits rather than its words.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DriftRef {
+    pub decision: u32,
+    pub earlier_session_id: MeetingSessionId,
+    pub earlier_artifact_id: String,
+    pub earlier_decision: u32,
 }
 
 impl MeetingStore {
@@ -102,8 +112,9 @@ impl MeetingStore {
         let connection = self.connection()?;
         let mut statement = connection.prepare(&format!(
             "WITH earlier AS MATERIALIZED (
-                SELECT m.id, m.title, m.started_at_utc_ms,
+                SELECT m.id,
                        COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) AS held_at,
+                       ({READABLE_ARTIFACT_ID}) AS artifact_id,
                        ({READABLE_ARTIFACT_CONTENT}) AS content
                   FROM meeting_sessions m
                  WHERE m.id != ?1
@@ -117,7 +128,7 @@ impl MeetingStore {
                             WHERE json_extract(event_json, '$.seriesKey') = (
                                    SELECT json_extract(event_json, '$.seriesKey')
                                      FROM meeting_calendar_facts WHERE session_id = ?1))))
-             SELECT id, title, started_at_utc_ms, json_extract(content, '$.decisions')
+             SELECT id, artifact_id, json_extract(content, '$.decisions')
                FROM earlier
               WHERE json_array_length(content, '$.decisions') > 0
               ORDER BY held_at DESC, id DESC
@@ -128,21 +139,97 @@ impl MeetingStore {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(2)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(session, title, started_at_utc_ms, decisions)| {
+            .map(|(session, artifact_id, decisions)| {
                 Ok(EarlierDecisions {
                     session_id: MeetingSessionId::from_uuid(parse_uuid(&session)?),
-                    title,
-                    started_at_utc_ms,
+                    artifact_id,
                     decisions: serde_json::from_str(&decisions).map_err(|_| StoreError::Corrupt)?,
                 })
             })
             .collect()
+    }
+
+    /// Keeps which decisions in a notes revision change an earlier meeting's.
+    pub(crate) fn record_decision_drift(
+        &self,
+        artifact_id: MeetingArtifactId,
+        drift: &[DriftRef],
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        for changed in drift {
+            transaction.execute(
+                "INSERT OR REPLACE INTO meeting_decision_drift (
+                    artifact_id, decision, earlier_session_id, earlier_artifact_id,
+                    earlier_decision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    id(artifact_id),
+                    changed.decision,
+                    id(changed.earlier_session_id),
+                    changed.earlier_artifact_id,
+                    changed.earlier_decision
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// The earlier decisions a meeting's readable notes change, in the words
+    /// the earlier notes hold now. One is left out once its meeting is gone or
+    /// its notes were written again, and when its meeting is kept on this Mac
+    /// while this one is not.
+    pub(crate) fn decision_drift(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<DecisionDrift>, StoreError> {
+        let kept = self.kept_local_sessions()?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT d.decision, d.earlier_session_id, m.title, m.started_at_utc_ms,
+                    json_extract(a.content_json, '$.decisions[' || d.earlier_decision || ']')
+               FROM meeting_decision_drift d
+               JOIN meeting_sessions m ON m.id = d.earlier_session_id AND m.phase != 'deleting'
+               JOIN meeting_artifact_revisions a ON a.artifact_id = d.earlier_artifact_id
+              WHERE d.artifact_id = (
+                        SELECT ({READABLE_ARTIFACT_ID}) FROM meeting_sessions m WHERE m.id = ?1)
+                AND ({READABLE_ARTIFACT_ID}) = d.earlier_artifact_id
+              ORDER BY d.decision"
+        ))?;
+        let rows = statement
+            .query_map(params![id(session_id)], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let here_kept = kept.contains(&session_id);
+        let mut drift = Vec::with_capacity(rows.len());
+        for (decision, earlier, title, started_at_utc_ms, words) in rows {
+            let earlier_session_id = MeetingSessionId::from_uuid(parse_uuid(&earlier)?);
+            let Some(words) = words else { continue };
+            if kept.contains(&earlier_session_id) && !here_kept {
+                continue;
+            }
+            drift.push(DecisionDrift {
+                decision,
+                earlier_session_id,
+                earlier_title: title,
+                earlier_started_at_utc_ms: started_at_utc_ms,
+                earlier: serde_json::from_str(&words).map_err(|_| StoreError::Corrupt)?,
+            });
+        }
+        Ok(drift)
     }
 
     /// The fence every series write carries, on its own.

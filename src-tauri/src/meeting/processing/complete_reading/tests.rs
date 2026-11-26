@@ -295,7 +295,6 @@ mod tests {
             plain: false,
             plain_because: None,
             left_out: Vec::new(),
-            decision_drift: Vec::new(),
         };
         (evidence, notes)
     }
@@ -3221,34 +3220,25 @@ mod tests {
         }
     }
 
-    fn earlier_meeting(
-        title: &str,
-        decisions: &[&str],
-    ) -> crate::meeting::store::series::EarlierDecisions {
-        crate::meeting::store::series::EarlierDecisions {
+    fn earlier_meeting(decisions: &[&str]) -> EarlierDecisions {
+        EarlierDecisions {
             session_id: MeetingSessionId::from_uuid(uuid::Uuid::new_v4()),
-            title: title.to_owned(),
-            started_at_utc_ms: Some(1_700_000_000_000),
+            artifact_id: uuid::Uuid::new_v4().to_string(),
             decisions: decisions.iter().map(|text| decided(text)).collect(),
         }
     }
 
+    fn sent_anywhere(_: MeetingSessionId) -> bool {
+        true
+    }
+
     #[test]
     fn a_changed_decision_is_flagged_and_a_kept_or_unrelated_one_is_not() {
-        let mut earlier = earlier_meeting(
-            "Launch sync",
-            &[
-                "Launch moves to March 3",
-                "Billing stays on Postgres",
-                "Hire a contractor for the logo",
-            ],
-        );
-        let cited = ArtifactCitation {
-            segment_id: TranscriptSegmentId::new(),
-            start_offset_ns: 61_000_000_000,
-            end_offset_ns: 64_000_000_000,
-        };
-        earlier.decisions[0].citations.push(cited.clone());
+        let earlier = earlier_meeting(&[
+            "Launch moves to March 3",
+            "Billing stays on Postgres",
+            "Hire a contractor for the logo",
+        ]);
         let decisions = [
             decided("Order new office chairs"),
             decided("Launch moves to April 9"),
@@ -3257,22 +3247,22 @@ mod tests {
         ];
         let judge = DriftJudge::default();
 
-        let drift = decision_drift(&judge, &decisions, std::slice::from_ref(&earlier), &|| {
-            Ok(())
-        })
+        let drift = decision_drift(
+            &judge,
+            &decisions,
+            std::slice::from_ref(&earlier),
+            &sent_anywhere,
+            &|| Ok(()),
+        )
         .expect("drift");
 
         assert_eq!(
             drift,
-            vec![DecisionDrift {
+            vec![DriftRef {
                 decision: 1,
                 earlier_session_id: earlier.session_id,
-                earlier_title: "Launch sync".to_owned(),
-                earlier_started_at_utc_ms: Some(1_700_000_000_000),
-                earlier: CitedArtifactText {
-                    text: "Launch moves to March 3".to_owned(),
-                    citations: vec![cited],
-                },
+                earlier_artifact_id: earlier.artifact_id.clone(),
+                earlier_decision: 0,
             }]
         );
         let asked = judge.asked.lock().expect("the judge's record");
@@ -3292,14 +3282,15 @@ mod tests {
             .collect();
         let launch: Vec<&str> = launch.iter().map(String::as_str).collect();
         let earlier: Vec<_> = (0..DRIFT_MEETINGS_MAX)
-            .map(|_| earlier_meeting("Launch sync", &launch))
+            .map(|_| earlier_meeting(&launch))
             .collect();
         let decisions: Vec<_> = (31..=50)
             .map(|day| decided(&format!("Launch moves to day {day}")))
             .collect();
         let judge = DriftJudge::default();
 
-        let drift = decision_drift(&judge, &decisions, &earlier, &|| Ok(())).expect("drift");
+        let drift = decision_drift(&judge, &decisions, &earlier, &sent_anywhere, &|| Ok(()))
+            .expect("drift");
 
         assert!(drift.is_empty());
         let asked = judge.asked.lock().expect("the judge's record");
@@ -3323,18 +3314,41 @@ mod tests {
 
     #[test]
     fn the_same_words_again_ask_nothing() {
-        let earlier = earlier_meeting("Launch sync", &["Launch moves to March 3"]);
+        let earlier = earlier_meeting(&["Launch moves to March 3"]);
         let judge = DriftJudge::default();
 
         let drift = decision_drift(
             &judge,
             &[decided("launch moves to March 3.")],
             std::slice::from_ref(&earlier),
+            &sent_anywhere,
             &|| Ok(()),
         )
         .expect("drift");
 
         assert!(drift.is_empty());
         assert!(judge.asked.lock().expect("the judge's record").is_empty());
+    }
+
+    #[test]
+    fn a_meeting_that_may_not_be_sent_is_never_asked_about() {
+        let kept = earlier_meeting(&["Launch moves to March 3"]);
+        let kept_id = kept.session_id;
+        let open = earlier_meeting(&["Launch moves to March 5"]);
+        let judge = DriftJudge::default();
+
+        let drift = decision_drift(
+            &judge,
+            &[decided("Launch moves to April 9")],
+            &[kept, open],
+            &|meeting| meeting != kept_id,
+            &|| Ok(()),
+        )
+        .expect("drift");
+
+        assert!(drift.is_empty());
+        let asked = judge.asked.lock().expect("the judge's record");
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].contains("March 5"), "{asked:#?}");
     }
 }

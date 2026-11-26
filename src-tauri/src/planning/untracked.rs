@@ -608,7 +608,6 @@ mod tests {
                     plain: false,
                     plain_because: None,
                     left_out: Vec::new(),
-                    decision_drift: Vec::new(),
                 };
                 let artifact_id = Uuid::new_v4().to_string();
                 connection.execute(
