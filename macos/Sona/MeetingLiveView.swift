@@ -44,7 +44,7 @@ struct MeetingLiveView: View {
                                 // A jump's highlight reaches 8pt past the words,
                                 // and a scroll view clips at its own edge.
                                 ScrollView {
-                                    transcript
+                                    LiveTranscript(store: store, highlightedLine: highlightedLine)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .padding(.horizontal, 8)
                                 }
@@ -78,7 +78,7 @@ struct MeetingLiveView: View {
                             ownNotes
                             recalled
                             help(proxy)
-                            transcript
+                            LiveTranscript(store: store, highlightedLine: highlightedLine)
                         }
                     }
                 } else {
@@ -247,77 +247,6 @@ struct MeetingLiveView: View {
     }
 
     // MARK: The words
-
-    private var transcript: some View {
-        PageSection("Transcript") {
-            if store.showsProvisional {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.provisional, id: \.segmentId) { segment in
-                        line(
-                            at: segment.startOffsetNs, segment.text,
-                            speaker: segment.speakerLabel, ink: ink(segment), anchor: "live-\(segment.segmentId)")
-                    }
-                }
-            } else if store.lines.isEmpty {
-                Text("Words appear here as they are recognized.")
-                    .bodyText(14, Theme.inkSecondary)
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.lines, id: \.base.segmentId) { segment in
-                        line(
-                            at: segment.base.startOffsetNs, segment.text,
-                            speaker: store.speakerLabel(segment), ink: ink(segment),
-                            anchor: "stored-\(segment.base.segmentId)")
-                    }
-                }
-            }
-        }
-    }
-
-    /// The voice in its color with the clock across from it, then the words.
-    private func line(
-        at offsetNs: Int64, _ text: String, speaker: String, ink: Color, anchor: String
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(speaker)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(ink)
-                Spacer(minLength: 12)
-                Text(offsetNs.meetingOffsetClock)
-                    .font(TypeScale.body(12))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.inkTertiary)
-            }
-            Text(text).bodyText(14)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            highlightedLine == anchor ? Theme.accentSoft : .clear,
-            in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .padding(.horizontal, -8)
-        .id(anchor)
-    }
-
-    private func ink(_ segment: TranscriptEffectiveSegment) -> Color {
-        switch segment.speakerAssignment {
-        case .localSpeaker, .systemSpeaker:
-            SpeakerInk.color(at: store.live?.speakers.firstIndex { $0.speakerId == segment.assignedSpeakerId })
-        case .unknown, .overlap:
-            SpeakerInk.color(at: nil)
-        }
-    }
-
-    /// The running pass numbers its speakers per source, so the source is
-    /// part of the color: the first voice on each source is a different one.
-    private func ink(_ segment: MeetingProvisionalSegment) -> Color {
-        guard case let .cluster(index) = segment.speaker,
-              let source = MeetingSourceKind.allCases.firstIndex(of: segment.sourceKind)
-        else { return SpeakerInk.color(at: nil) }
-        return SpeakerInk.color(at: Int(index) * MeetingSourceKind.allCases.count + source)
-    }
 
     private func jump(to offset: Int64, using proxy: ScrollViewProxy) {
         let anchor: String
@@ -634,6 +563,85 @@ struct MeetingLiveView: View {
             if store.noteBody.isEmpty { noteOpen = false }
         }
         .onDisappear { noteSaving = false }
+    }
+}
+
+/// The words of the running call, a view of its own so a keystroke in the
+/// notes or a tick of the clock redraws none of them, and lazy so a long
+/// call builds only the lines in sight.
+private struct LiveTranscript: View {
+    let store: MeetingLiveStore
+    let highlightedLine: String?
+
+    var body: some View {
+        PageSection("Transcript") {
+            if store.showsProvisional {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(store.provisional, id: \.segmentId) { segment in
+                        line(
+                            at: segment.startOffsetNs, segment.text,
+                            speaker: segment.speakerLabel, ink: ink(segment), anchor: "live-\(segment.segmentId)")
+                    }
+                }
+            } else if store.lines.isEmpty {
+                Text("Words appear here as they are recognized.")
+                    .bodyText(14, Theme.inkSecondary)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(store.lines, id: \.base.segmentId) { segment in
+                        line(
+                            at: segment.base.startOffsetNs, segment.text,
+                            speaker: store.speakerLabel(segment), ink: ink(segment),
+                            anchor: "stored-\(segment.base.segmentId)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The voice in its color with the clock across from it, then the words.
+    private func line(
+        at offsetNs: Int64, _ text: String, speaker: String, ink: Color, anchor: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(speaker)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(ink)
+                Spacer(minLength: 12)
+                Text(offsetNs.meetingOffsetClock)
+                    .font(TypeScale.body(12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkTertiary)
+            }
+            Text(text).bodyText(14)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            highlightedLine == anchor ? Theme.accentSoft : .clear,
+            in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .padding(.horizontal, -8)
+        .id(anchor)
+    }
+
+    private func ink(_ segment: TranscriptEffectiveSegment) -> Color {
+        switch segment.speakerAssignment {
+        case .localSpeaker, .systemSpeaker:
+            SpeakerInk.color(at: store.live?.speakers.firstIndex { $0.speakerId == segment.assignedSpeakerId })
+        case .unknown, .overlap:
+            SpeakerInk.color(at: nil)
+        }
+    }
+
+    /// The running pass numbers its speakers per source, so the source is
+    /// part of the color: the first voice on each source is a different one.
+    private func ink(_ segment: MeetingProvisionalSegment) -> Color {
+        guard case let .cluster(index) = segment.speaker,
+              let source = MeetingSourceKind.allCases.firstIndex(of: segment.sourceKind)
+        else { return SpeakerInk.color(at: nil) }
+        return SpeakerInk.color(at: Int(index) * MeetingSourceKind.allCases.count + source)
     }
 }
 
