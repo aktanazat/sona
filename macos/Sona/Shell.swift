@@ -17,7 +17,9 @@ struct Shell: View {
             } else if model.onboarding.step != .done {
                 OnboardingView(store: model.onboarding).keepsWindowToolbar()
             } else {
-                NavigationSplitView(columnVisibility: .constant(.all)) {
+                NavigationSplitView(columnVisibility: Binding(
+                    get: { model.sidebarHidden ? .detailOnly : .all },
+                    set: { model.sidebarHidden = $0 == .detailOnly })) {
                     Sidebar()
                         .navigationSplitViewColumnWidth(Theme.sidebarWidth)
                         .toolbar(removing: .sidebarToggle)

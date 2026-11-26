@@ -32,7 +32,7 @@ struct SonaApp: App {
         .restorationBehavior(.disabled)
         .commands {
             CommandGroup(replacing: .newItem) {}
-            SendSelectionCommand(model: model)
+            CommandGroup(replacing: .sidebar) { SidebarMenuItem(model: model) }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
                     .keyboardShortcut(",", modifiers: .command)
@@ -313,6 +313,15 @@ struct CaptureMenuItem: View {
         case .recording: "Stop Recording"
         case let .working(kind): "\(kind.capitalized)…"
         }
+    }
+}
+
+struct SidebarMenuItem: View {
+    let model: AppModel
+
+    var body: some View {
+        Button(model.sidebarHidden ? "Show Sidebar" : "Hide Sidebar") { model.sidebarHidden.toggle() }
+            .keyboardShortcut("s", modifiers: [.control, .command])
     }
 }
 

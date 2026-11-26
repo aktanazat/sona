@@ -339,6 +339,9 @@ final class AppModel {
     var paletteShown = false {
         didSet { if !paletteShown { workFocus.picker = nil } }
     }
+    var sidebarHidden = UserDefaults.standard.bool(forKey: "sidebarHidden") {
+        didSet { UserDefaults.standard.set(sidebarHidden, forKey: "sidebarHidden") }
+    }
     /// The question a `sona://search` link carried, held until the palette
     /// opens and reads it.
     private var paletteSeed = ""
