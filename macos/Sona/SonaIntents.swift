@@ -11,7 +11,7 @@ struct SystemIndex: Decodable {
     let meetings: [SystemMeeting]
 }
 
-struct SystemPerson: Decodable, Equatable {
+struct SystemPerson: Codable, Identifiable {
     let id: String
     let displayName: String
     let aliases: [String]
@@ -22,7 +22,7 @@ struct SystemPerson: Decodable, Equatable {
     }
 }
 
-struct SystemMeeting: Decodable, Equatable {
+struct SystemMeeting: Codable, Identifiable {
     let id: MeetingSessionId
     let title: String
     let createdAtUtcMs: Int64
@@ -43,7 +43,7 @@ struct SystemWork: Decodable {
     let notes: [SystemNote]
 }
 
-struct SystemTask: Decodable, Equatable {
+struct SystemTask: Codable, Identifiable {
     let id: String
     let number: Int64
     let title: String
@@ -52,13 +52,13 @@ struct SystemTask: Decodable, Equatable {
     let project: String?
 }
 
-struct SystemProject: Decodable, Equatable {
+struct SystemProject: Codable, Identifiable {
     let id: String
     let title: String
     let description: String?
 }
 
-struct SystemNote: Decodable, Equatable {
+struct SystemNote: Codable, Identifiable {
     let id: String
     let title: String
     let body: String
