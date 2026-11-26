@@ -38,7 +38,12 @@ final class SpotlightStore {
         }
     }
 
+    /// The stamp holds only while the index still carries the mark written
+    /// with it: a rebuilt or erased index has none, and is written whole.
     func start() async {
+        if (try? await index.fetchLastClientState()) != stamp.mark {
+            stamp = SpotlightStamp()
+        }
         due = [.meetings, .work]
         await sync()
     }
@@ -69,7 +74,15 @@ final class SpotlightStore {
             if parts.contains(.work) { await reindexWork() }
         }
         if stamp != before, let stampFile {
-            try? stamp.save(to: stampFile)
+            let mark = Data(UUID().uuidString.utf8)
+            index.beginBatch()
+            do {
+                try await index.endBatch(withClientState: mark)
+                stamp.mark = mark
+                try stamp.save(to: stampFile)
+            } catch {
+                try? FileManager.default.removeItem(at: stampFile)
+            }
         }
         syncing = false
     }
@@ -130,6 +143,8 @@ struct SpotlightStamp: Codable, Equatable {
 
     var version = currentVersion
     var kinds: [String: [String: String]] = [:]
+    /// The client state written to the index with this stamp.
+    var mark: Data?
 
     /// A missing, unreadable or older stamp reads as none, so the index is
     /// replaced whole.
