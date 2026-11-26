@@ -35,6 +35,15 @@ liveness), 4 (delegate filter), 9 (plan checklist and select questions) and
     Status and owner are never changed.
   - Every write goes through `store::mutate`, so a repeated operation id
     replays from its receipt in one transaction.
+  - Watched sessions (`WATCHED_MIGRATION`: columns `folder` and
+    `watched_session`): when the user starts Claude Code or Codex from a task
+    (Delegate > Start), the agent's hooks reach Sona through the agent bridge
+    (`agent_bridge.rs`, `take_steps`), and `watch`/`watch_as` keep that session
+    on the task. The first step makes the record, in the agent's folder, and
+    closes the same session's record on any other task. A finished turn ends
+    the record, since the agent then waits in its terminal; the next step opens
+    it again. A watched record carries no stop or reply (the user does those in
+    the agent), and an archived task is refused.
 - `src-tauri/src/planning/work/changes.rs`
   - Migration `CHANGES_MIGRATION`: table `planning_changes(seq, at_ms, entity,
     entity_id, task_id, action, updated_from, data)`, filled by SQLite triggers
@@ -105,7 +114,8 @@ Implemented in `native_bridge/dispatch.rs`; the shapes are camelCase.
 `{id, itemId, agent, state: "pending"|"active"|"awaiting_input"|"stale"|"complete"|"error",
 unresponsive, createdAtMs, lastActivityAtMs?, heartbeatAtMs?, stopRequestedAtMs?,
 stopRequestedBy?, endedAtMs?, plan: [{content, status: "pending"|"in_progress"|"completed"|"canceled"}],
-question?: WorkSessionActivity, unreadPrompts: [WorkSessionActivity], activities: [WorkSessionActivity]}`
+question?: WorkSessionActivity, unreadPrompts: [WorkSessionActivity], activities: [WorkSessionActivity],
+folder?, watched}`
 (`activities` is empty in `work_sessions`).
 
 `WorkSessionActivity`:
@@ -159,6 +169,10 @@ The lead case is proven by the test only: in a scratch home `project-save --lead
 answers `unavailable: Conversations and the people in them can't be opened right now.`
 MCP: `bun test`, `npx tsc --noEmit`, `npx oxlint` in `tools/sona-mcp`.
 
-Not verified: the bridge commands were compiled but not called from the app;
-the 10-second unresponsive and 30-minute stale states were not waited out
-live; `save` on milestone, cycle, repeat and snooze fields was not run.
+The app calls the bridge commands from `macos/Sona/WorkStore.swift` and shows
+sessions on the task (`TaskAgentSessions.swift`), with the session's git changes
+for watched sessions.
+
+Not verified: the 10-second unresponsive and 30-minute stale states were not
+waited out live; `save` on milestone, cycle, repeat and snooze fields was not run;
+a watched session from a real Start on a task was not followed end to end.
