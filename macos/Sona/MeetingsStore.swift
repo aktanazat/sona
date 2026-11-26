@@ -299,7 +299,11 @@ final class MeetingsStore {
     // MARK: The open meeting
 
     private(set) var openSessionId: MeetingSessionId?
-    private(set) var snapshot: MeetingReviewSnapshot?
+    private(set) var snapshot: MeetingReviewSnapshot? {
+        didSet { playable = snapshot.map { Self.playable($0.transcript, tracks: $0.tracks) } ?? [] }
+    }
+    /// The open meeting's lines with audio to play, so each row asks once.
+    @ObservationIgnored private var playable: Set<TranscriptSegmentId> = []
     private(set) var reviewLoading = false
     /// Why the first read of the open meeting produced no page: the core's
     /// own words, kept apart from `error` so the page can offer another read
@@ -1331,14 +1335,25 @@ final class MeetingsStore {
     }
 
     func canPlay(_ segmentId: TranscriptSegmentId) -> Bool {
-        guard !transcriptDeleted, !audioDeleted,
-              let segment = snapshot?.transcript.first(where: { $0.base.segmentId == segmentId && !$0.removed })
-        else { return false }
-        return snapshot?.tracks.contains {
-            $0.trackId == segment.base.trackId && $0.durableRecordCount > 0
-                && ($0.firstOffsetNs ?? Int64.max) < segment.base.endOffsetNs
-                && ($0.lastOffsetNs ?? 0) > segment.base.startOffsetNs
-        } == true
+        !transcriptDeleted && !audioDeleted && playable.contains(segmentId)
+    }
+
+    /// The lines a track holds audio under: the first unremoved line of each
+    /// id, as a row finds it.
+    static func playable(
+        _ transcript: [TranscriptEffectiveSegment], tracks: [MeetingTrackSnapshot]
+    ) -> Set<TranscriptSegmentId> {
+        var seen: Set<TranscriptSegmentId> = []
+        var playable: Set<TranscriptSegmentId> = []
+        for segment in transcript where !segment.removed && seen.insert(segment.base.segmentId).inserted {
+            let heard = tracks.contains {
+                $0.trackId == segment.base.trackId && $0.durableRecordCount > 0
+                    && ($0.firstOffsetNs ?? Int64.max) < segment.base.endOffsetNs
+                    && ($0.lastOffsetNs ?? 0) > segment.base.startOffsetNs
+            }
+            if heard { playable.insert(segment.base.segmentId) }
+        }
+        return playable
     }
 
     func playContribution(_ segmentId: TranscriptSegmentId) {
