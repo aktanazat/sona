@@ -3137,6 +3137,7 @@ impl CloudSyncRuntime {
                 .is_none_or(|head| head.source_session_id.is_none())
         {
             self.forget_unstarted_agent_ask(access, object_id)?;
+            self.forget_work_action(access, object_id)?;
             self.delete_phone_thought_source(access, object_id, revision_id, sequence)?;
             return access
                 .store

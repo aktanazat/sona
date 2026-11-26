@@ -18,6 +18,9 @@ final class PhoneToday: ObservableObject {
     /// How long the Mac normally needs to see a decision: it checks the vault every few
     /// seconds while it is awake.
     static let pickUpWindow: TimeInterval = 120
+    /// After this long without an answer (the Mac asleep, or too old to know decisions),
+    /// the row offers its buttons again, so it is never stuck.
+    static let retryAfter: TimeInterval = 10 * 60
 
     struct Pending: Codable, Equatable {
         /// The task, session or inbox row the decision is about.
@@ -58,6 +61,18 @@ final class PhoneToday: ObservableObject {
     /// Whether the Mac has had its usual time to see this decision and has not.
     func isLate(_ decision: Pending) -> Bool {
         now().timeIntervalSince(decision.sentAt) > Self.pickUpWindow
+    }
+
+    func canRetry(_ decision: Pending) -> Bool {
+        now().timeIntervalSince(decision.sentAt) > Self.retryAfter
+    }
+
+    /// Takes a decision the Mac has not answered off its row and deletes it from the
+    /// vault, so the row can be decided again.
+    func retry(_ decision: Pending) async {
+        pending.removeAll { $0.objectId == decision.objectId }
+        answered.append(decision.objectId)
+        await reconcile(nil)
     }
 
     /// Sends one decision about `row` to the Mac that wrote `today`. A row that already

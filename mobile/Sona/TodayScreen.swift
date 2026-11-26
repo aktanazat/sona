@@ -150,9 +150,15 @@ private struct Sending: View {
     let decision: PhoneToday.Pending
 
     var body: some View {
-        Text(today.isLate(decision) ? "today.waiting" : "today.sent")
-            .font(.footnote)
-            .foregroundStyle(Theme.textTertiary)
+        HStack(spacing: 8) {
+            Text(today.isLate(decision) ? "today.waiting" : "today.sent")
+                .font(.footnote)
+                .foregroundStyle(Theme.textTertiary)
+            if today.canRetry(decision) {
+                Button("today.retry") { Task { await today.retry(decision) } }
+                    .font(.footnote)
+            }
+        }
     }
 }
 

@@ -42,8 +42,6 @@ pub(super) const ACTION_SOURCE_FORMAT: &str = "sona-work-action-v1";
 const CACHE_FILE: &str = "work-today.json";
 const HANDLED_FILE: &str = "work-actions.json";
 const MAX_ROWS: usize = 50;
-const MAX_HANDLED: usize = 50;
-const HANDLED_LIFETIME_MS: i64 = 2 * 24 * 60 * 60 * 1000;
 const MAX_TEXT_BYTES: usize = 8 * 1024;
 const MAX_NOTICE_IDS: usize = 200;
 /// Names the planner operation a phone's decision is applied as, so the same
@@ -174,8 +172,7 @@ pub(super) fn today_rows(
         .collect();
     triage.sort_by_key(|item| (std::cmp::Reverse(item.created_at_ms), item.number));
 
-    let personal = personal_notes(conn)?;
-    let inbox = inbox::rows_of(
+    let rows = inbox::rows_of(
         conn,
         Shown {
             unread_only: true,
@@ -183,22 +180,35 @@ pub(super) fn today_rows(
         },
         &InboxFilter::default(),
         now_ms,
-    )?
-    .into_iter()
-    .filter(|row| {
-        row.lead.kind != NotificationKind::Question
-            && !row
-                .item_id
-                .iter()
-                .chain(&row.item_ids)
-                .any(|id| hidden.contains(id))
-            && !row.lead.subject.as_ref().is_some_and(|subject| {
-                subject.kind == inbox::SubjectKind::Note && personal.contains(&subject.id)
-            })
-    })
-    .take(MAX_ROWS)
-    .map(|row| notice(row, &tasks))
-    .collect();
+    )?;
+    let about_note = |row: &InboxRow| {
+        row.lead
+            .subject
+            .as_ref()
+            .filter(|subject| subject.kind == inbox::SubjectKind::Note)
+            .map(|subject| subject.id.clone())
+    };
+    // The notes table lives beside the planner's: a planner-only database
+    // has no notices about notes, so it is read only when one is listed.
+    let personal = if rows.iter().any(|row| about_note(row).is_some()) {
+        crate::scratchpad::personal::personal_ids(conn)?
+    } else {
+        HashSet::new()
+    };
+    let inbox = rows
+        .into_iter()
+        .filter(|row| {
+            row.lead.kind != NotificationKind::Question
+                && !row
+                    .item_id
+                    .iter()
+                    .chain(&row.item_ids)
+                    .any(|id| hidden.contains(id))
+                && !about_note(row).is_some_and(|id| personal.contains(&id))
+        })
+        .take(MAX_ROWS)
+        .map(|row| notice(row, &tasks))
+        .collect();
 
     let questions = sessions::sessions(conn, None, true, now_ms)?
         .into_iter()
@@ -233,22 +243,6 @@ pub(super) fn today_rows(
         inbox,
         questions,
     })
-}
-
-/// Personal documents, which no notice about may leave this Mac. The notes
-/// table lives beside the planner's, so a planner-only database has none.
-fn personal_notes(conn: &Connection) -> Result<HashSet<String>> {
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scratch_notes')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !exists {
-        return Ok(HashSet::new());
-    }
-    let mut statement = conn.prepare("SELECT id FROM scratch_notes WHERE personal = 1")?;
-    let ids = statement.query_map([], |row| row.get(0))?;
-    Ok(ids.collect::<rusqlite::Result<_>>()?)
 }
 
 fn notice(row: InboxRow, tasks: &HashMap<&str, &WorkItem>) -> TodayNotice {
@@ -479,8 +473,9 @@ pub(super) fn is_snapshot(
     open_object_revision_payload(vault_root, &context, ciphertext).is_ok()
 }
 
-/// The decisions this Mac applied, newest last, for the snapshot to report
-/// until the phone has had time to see them.
+/// The decisions this Mac applied, in the order it applied them. Each stays
+/// until the phone deletes the decision, so a phone away for days still
+/// learns how each one went.
 #[derive(Default, Serialize, Deserialize)]
 struct HandledState {
     vault_id: String,
@@ -492,25 +487,32 @@ fn read_handled(
     directory: &Path,
     vault_id: &str,
     device_id: &str,
-    now_utc_ms: i64,
 ) -> Result<HandledState, CloudRuntimeError> {
-    let mut state = match fs::read(directory.join(HANDLED_FILE)) {
+    let state = match fs::read(directory.join(HANDLED_FILE)) {
         Ok(bytes) => serde_json::from_slice::<HandledState>(&bytes)
             .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => HandledState::default(),
         Err(_) => return Err(CloudRuntimeError::File),
     };
-    if state.vault_id != vault_id || state.device_id != device_id {
-        state = HandledState {
-            vault_id: vault_id.to_owned(),
-            device_id: device_id.to_owned(),
-            handled: Vec::new(),
-        };
-    }
-    state
-        .handled
-        .retain(|entry| entry.at_utc_ms >= now_utc_ms.saturating_sub(HANDLED_LIFETIME_MS));
-    Ok(state)
+    Ok(
+        if state.vault_id == vault_id && state.device_id == device_id {
+            state
+        } else {
+            HandledState {
+                vault_id: vault_id.to_owned(),
+                device_id: device_id.to_owned(),
+                handled: Vec::new(),
+            }
+        },
+    )
+}
+
+fn write_handled(directory: &Path, state: &HandledState) -> Result<(), CloudRuntimeError> {
+    write_staged_file(
+        directory,
+        HANDLED_FILE,
+        &serde_json::to_vec(state).map_err(|_| CloudRuntimeError::File)?,
+    )
 }
 
 fn ensure_directory(directory: &Path) -> Result<(), CloudRuntimeError> {
@@ -548,22 +550,27 @@ fn decision(action: &WorkAction) -> Option<PhoneDecision<'_>> {
     })
 }
 
-/// Applies one decision as the user. The planner refuses one that no longer
-/// fits (a task moved on, a question already answered), and that is an
-/// outcome the phone is told, not an error to retry.
-async fn apply(app: &AppHandle, object_id: &str, action: &WorkAction) -> Outcome {
-    let operation_id = Uuid::new_v5(&ACTION_NAMESPACE, object_id.as_bytes()).to_string();
-    let applied = match decision(action) {
-        Some(decision) => crate::planning::work::decide_as_me(app, &operation_id, &decision)
-            .await
-            .is_ok(),
-        None => false,
-    };
-    if applied {
-        Outcome::Applied
-    } else {
-        Outcome::Refused
+/// How a decision ended, or `None` when it could not be made for now (the
+/// database was busy or unreadable) and the revision is to be read again.
+fn settle(
+    made: Option<Result<Result<(), crate::planning::store::Refusal>, String>>,
+) -> Option<Outcome> {
+    match made {
+        Some(Ok(Ok(()))) => Some(Outcome::Applied),
+        None | Some(Ok(Err(_))) => Some(Outcome::Refused),
+        Some(Err(_)) => None,
     }
+}
+
+async fn apply(app: &AppHandle, object_id: &str, action: &WorkAction) -> Option<Outcome> {
+    let operation_id = Uuid::new_v5(&ACTION_NAMESPACE, object_id.as_bytes()).to_string();
+    let made = match decision(action) {
+        Some(decision) => {
+            Some(crate::planning::work::decide_as_me(app, &operation_id, &decision).await)
+        }
+        None => None,
+    };
+    settle(made)
 }
 
 impl CloudSyncRuntime {
@@ -601,34 +608,42 @@ impl CloudSyncRuntime {
         if action.target_device_id == access.state.device_id {
             let directory = phone_sync_directory(&self.app).map_err(|_| CloudRuntimeError::File)?;
             ensure_directory(&directory)?;
-            let now = utc_now_ms();
-            let mut state = read_handled(
-                &directory,
-                &access.state.vault_id,
-                &access.state.device_id,
-                now,
-            )?;
+            let mut state =
+                read_handled(&directory, &access.state.vault_id, &access.state.device_id)?;
             if !state
                 .handled
                 .iter()
                 .any(|entry| entry.action_id == object_id)
             {
-                let outcome = apply(&self.app, object_id, &action).await;
+                let outcome = apply(&self.app, object_id, &action)
+                    .await
+                    .ok_or(CloudRuntimeError::Storage)?;
                 state.handled.push(Handled {
                     action_id: object_id.to_owned(),
                     outcome,
-                    at_utc_ms: now,
+                    at_utc_ms: utc_now_ms(),
                 });
-                let excess = state.handled.len().saturating_sub(MAX_HANDLED);
-                state.handled.drain(..excess);
-                write_staged_file(
-                    &directory,
-                    HANDLED_FILE,
-                    &serde_json::to_vec(&state).map_err(|_| CloudRuntimeError::File)?,
-                )?;
+                write_handled(&directory, &state)?;
             }
         }
         super::acknowledge_remote_revision(&access.store, object_id, revision_id, sequence)
+    }
+
+    /// The phone deleted a decision: it has read the result, so the next
+    /// snapshot stops reporting it.
+    pub(super) fn forget_work_action(
+        &self,
+        access: &CloudAccess,
+        object_id: &str,
+    ) -> Result<(), CloudRuntimeError> {
+        let directory = phone_sync_directory(&self.app).map_err(|_| CloudRuntimeError::File)?;
+        let mut state = read_handled(&directory, &access.state.vault_id, &access.state.device_id)?;
+        let before = state.handled.len();
+        state.handled.retain(|entry| entry.action_id != object_id);
+        if state.handled.len() == before {
+            return Ok(());
+        }
+        write_handled(&directory, &state)
     }
 }
 
@@ -719,13 +734,8 @@ pub(super) async fn sync(
         let kept = KeptLocal::read(&access.store).ok();
         let rows = crate::planning::history(&history, |conn| today_rows(conn, kept.as_ref(), now))
             .map_err(|_| CloudRuntimeError::Storage)?;
-        let handled = read_handled(
-            &directory,
-            &access.state.vault_id,
-            &access.state.device_id,
-            now,
-        )?
-        .handled;
+        let handled =
+            read_handled(&directory, &access.state.vault_id, &access.state.device_id)?.handled;
         let mut today = WorkToday {
             format_version: 1,
             kind: "work_today",
@@ -930,8 +940,22 @@ mod tests {
         );
         ask(&conn, &open, "Which vendor?");
         ask(&conn, &kept, "Who is on the list?");
+        conn.execute(
+            "INSERT INTO planning_notifications (id, task_id, kind, actor, from_value, to_value,
+                created_at_ms)
+             VALUES ('unblocked', ?1, 'unblocked', 'sona', 'Draft the layoffs memo', 'done', ?2)",
+            rusqlite::params![open, AT],
+        )
+        .expect("a task the kept one blocked is unblocked");
 
         let rows = today_rows(&conn, None, AT).expect("the rows");
+
+        assert_eq!(rows.inbox.len(), 1);
+        assert!(
+            !rows.inbox[0].line.contains("layoffs"),
+            "{}",
+            rows.inbox[0].line
+        );
 
         assert_eq!(titles(&rows.due), ["Book the room"]);
         assert!(rows.triage.is_empty());
@@ -943,6 +967,34 @@ mod tests {
             ["Which vendor?"]
         );
         assert_eq!(rows.questions[0].options[0].value, "acme");
+    }
+
+    #[test]
+    fn a_result_stays_until_the_phone_deletes_its_decision() {
+        let directory = tempfile::tempdir().expect("a scratch directory");
+        let mut state = read_handled(directory.path(), "vault", "mac").expect("no results yet");
+        state.handled.push(Handled {
+            action_id: "decision".to_owned(),
+            outcome: Outcome::Applied,
+            at_utc_ms: 0,
+        });
+        write_handled(directory.path(), &state).expect("kept");
+
+        let later = read_handled(directory.path(), "vault", "mac").expect("read days later");
+
+        assert_eq!(later.handled, state.handled);
+    }
+
+    #[test]
+    fn only_the_planner_refusing_a_decision_counts_as_refused() {
+        use crate::planning::store::Refusal;
+        assert_eq!(settle(Some(Ok(Ok(())))), Some(Outcome::Applied));
+        assert_eq!(
+            settle(Some(Ok(Err(Refusal::StaleRevision)))),
+            Some(Outcome::Refused)
+        );
+        assert_eq!(settle(None), Some(Outcome::Refused));
+        assert_eq!(settle(Some(Err("database is locked".to_owned()))), None);
     }
 
     const ACTION_FIXTURE: &str =

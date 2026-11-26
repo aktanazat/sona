@@ -58,6 +58,28 @@ final class WorkTodayTests: XCTestCase {
         await today.reconcile(nil)
         XCTAssertEqual(transport.deleted, ["object-0", "object-1"])
     }
+
+    /// A Mac that never answers (asleep, or too old to know decisions) cannot hold a row
+    /// for good: after the stated time the row takes a new decision.
+    @MainActor
+    func testAnUnansweredDecisionCanBeTriedAgain() async throws {
+        let transport = FakeTodayTransport()
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let today = PhoneToday(transport: transport, file: scratchFile(), now: { clock })
+        let snapshot = try JSONDecoder().decode(WorkToday.self, from: fixture("work-today-v1"))
+        try await today.decide(.accept, row: "t2", title: "Call the venue", in: snapshot, deviceId: "phone", taskId: "t2")
+        let waiting = try XCTUnwrap(today.pending(for: "t2"))
+        XCTAssertFalse(today.canRetry(waiting))
+
+        clock += PhoneToday.retryAfter + 1
+        XCTAssertTrue(today.canRetry(waiting))
+        await today.retry(waiting)
+
+        XCTAssertNil(today.pending(for: "t2"))
+        XCTAssertEqual(transport.deleted, ["object-0"])
+        try await today.decide(.decline, row: "t2", title: "Call the venue", in: snapshot, deviceId: "phone", taskId: "t2")
+        XCTAssertEqual(transport.sent.map(\.action), [.accept, .decline])
+    }
 }
 
 @MainActor

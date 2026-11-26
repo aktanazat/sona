@@ -409,6 +409,7 @@
 "today.updated %@" = "From your Mac, %@";
 "today.sent" = "Sent to your Mac";
 "today.waiting" = "Waiting for your Mac";
+"today.retry" = "Try again";
 "today.asks %@ %@" = "%1$@ asks: %2$@";
 "today.reply" = "Reply";
 "today.accept" = "Accept";

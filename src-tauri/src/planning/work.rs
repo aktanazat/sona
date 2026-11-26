@@ -2316,44 +2316,64 @@ pub(crate) enum PhoneDecision<'a> {
 }
 
 /// Makes one phone decision as the user would in the app, under the
-/// change's operation id, so the same decision twice changes nothing.
+/// change's operation id, so the same decision twice changes nothing. The
+/// planner refusing it (the task moved on, the question was answered) is a
+/// value; any other error is storage trouble, for the caller to retry.
 fn decide(
     history: &mut Connection,
     meetings: Option<&Connection>,
     user_name: Option<&str>,
     change: Change<'_>,
     decision: &PhoneDecision<'_>,
-) -> StorageResult<Done<()>> {
-    let effects = match *decision {
+) -> StorageResult<Done<Result<(), Refusal>>> {
+    let made = match *decision {
         PhoneDecision::Done { task, revision } => {
             let patch = WorkPatch {
                 status: Some(WorkStatus::Done),
                 ..WorkPatch::default()
             };
-            update(history, meetings, change, task, revision, &patch)?.effects
+            update(history, meetings, change, task, revision, &patch).map(|done| done.effects)
         }
         PhoneDecision::Accept { task } => {
-            accept(history, meetings, user_name, change, &[task.to_owned()], true)?.effects
+            accept(history, meetings, user_name, change, &[task.to_owned()], true)
+                .map(|done| done.effects)
         }
         PhoneDecision::Decline { task } => {
-            decline(history, meetings, change, &[task.to_owned()], None)?.effects
+            decline(history, meetings, change, &[task.to_owned()], None).map(|done| done.effects)
         }
-        PhoneDecision::Mark { notices, how } => inbox::marked(history, change, notices, how)?.effects,
+        PhoneDecision::Mark { notices, how } => {
+            inbox::marked(history, change, notices, how).map(|done| done.effects)
+        }
         PhoneDecision::Answer {
             session,
             asked_at_ms,
             body,
             value,
-        } => sessions::replied(history, change, session, asked_at_ms, body, value)?.effects,
+        } => sessions::replied(history, change, session, asked_at_ms, body, value)
+            .map(|done| done.effects),
     };
-    Ok(Done { value: (), effects })
+    match made {
+        Ok(effects) => Ok(Done {
+            value: Ok(()),
+            effects,
+        }),
+        Err(error) => match error.downcast_ref::<Refusal>() {
+            Some(&refusal) => Ok(Done {
+                value: Err(refusal),
+                effects: Effects::default(),
+            }),
+            None => Err(error),
+        },
+    }
 }
 
+/// `Err` when the decision could not be made for now (the database was busy
+/// or unreadable); `Ok(Err(_))` when the planner refused it for good.
 pub(crate) async fn decide_as_me(
     app: &AppHandle,
     operation_id: &str,
     decision: &PhoneDecision<'_>,
-) -> Result<(), String> {
+) -> Result<Result<(), Refusal>, String> {
     let change = Change::now(operation_id, WorkActor::Me);
     let user_name = app.state::<Arc<MeetingSessionManager>>().user_name();
     run_with_meetings(app, |history, meetings| {

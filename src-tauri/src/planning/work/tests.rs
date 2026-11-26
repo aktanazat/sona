@@ -2902,7 +2902,10 @@ mod phone_decisions {
                     actor: WorkActor::Me,
                     at_ms: AT + 1,
                 };
-                decide(conn, None, None, change, decision).expect("the decision");
+                decide(conn, None, None, change, decision)
+                    .expect("the decision")
+                    .value
+                    .expect("made");
             }
         };
         let earlier_question = Change {
@@ -2922,6 +2925,8 @@ mod phone_decisions {
                 value: None,
             },
         )
+        .expect("refused, not failed")
+        .value
         .is_err());
         run(&mut conn);
 
@@ -2965,6 +2970,8 @@ mod phone_decisions {
                 revision: revision + 99,
             },
         )
+        .expect("refused, not failed")
+        .value
         .is_err());
     }
 }
