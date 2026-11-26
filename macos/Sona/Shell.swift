@@ -9,6 +9,7 @@ struct Shell: View {
     @Environment(AppModel.self) private var model
     @State private var sharedNote: ScratchNote?
     @State private var paneWidth: CGFloat = 0
+    @State private var dropTargeted = false
 
     var body: some View {
         ZStack {
@@ -46,10 +47,36 @@ struct Shell: View {
                         .padding(.bottom, 28)
                         .allowsHitTesting(false)
                 }
+                if dropTargeted {
+                    RoundedRectangle(cornerRadius: Theme.radiusCard)
+                        .strokeBorder(Theme.accent, lineWidth: 2)
+                        .overlay {
+                            Text("Drop audio to import")
+                                .bodyText(14)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .floatingControl(model.about.material)
+                        }
+                        .padding(6)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .background(Theme.page.ignoresSafeArea())
         .frame(minWidth: 900, minHeight: 640)
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            guard model.ready, model.onboarding.step == .done else { return false }
+            let model = model
+            Task {
+                for provider in providers {
+                    guard let data = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? Data,
+                          let url = URL(dataRepresentation: data, relativeTo: nil),
+                          ImportMedia.extensions.contains(url.pathExtension.lowercased()) else { continue }
+                    model.open(url: url)
+                }
+            }
+            return true
+        }
         .sheet(item: Bindable(model).sheet) { sheet in
             switch sheet {
             case .shortcuts:
