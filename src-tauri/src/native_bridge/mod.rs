@@ -18,11 +18,11 @@
 mod dispatch;
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -88,6 +88,10 @@ const PARENT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// emits, the after-call meeting pipeline included.
 const UNREAD_FRAMES: usize = 4096;
 
+/// How many bytes of queued frames are gathered into one write. A frame
+/// larger than this is written straight through.
+const WRITE_BUFFER_BYTES: usize = 64 * 1024;
+
 /// The parent that connected as the native Sona app, not merely a launcher
 /// that happened to spawn this core. Playback uses it to discount both Sona
 /// processes without discounting audio from an arbitrary parent application.
@@ -99,24 +103,6 @@ struct Request {
     id: u64,
     method: String,
     params: Option<Box<RawValue>>,
-}
-
-#[derive(Serialize)]
-struct Answer<'a> {
-    id: u64,
-    result: &'a RawValue,
-}
-
-#[derive(Serialize)]
-struct Failure<'a> {
-    id: u64,
-    error: &'a RawValue,
-}
-
-#[derive(Serialize)]
-struct EventFrame<'a> {
-    event: &'a str,
-    payload: &'a RawValue,
 }
 
 /// Why a request got no result.
@@ -167,21 +153,18 @@ impl Args {
 /// events queue for its writer thread, which writes them in order, so frames
 /// never interleave and a client that reads slowly never holds up a sender.
 struct Connection {
-    outbox: SyncSender<Arc<str>>,
+    outbox: SyncSender<Frame>,
     socket: UnixStream,
 }
 
 impl Connection {
     fn open(stream: &UnixStream) -> io::Result<Self> {
-        let mut writer = stream.try_clone()?;
+        let writer = stream.try_clone()?;
         let socket = stream.try_clone()?;
-        let (outbox, frames) = mpsc::sync_channel::<Arc<str>>(UNREAD_FRAMES);
+        let (outbox, frames) = mpsc::sync_channel::<Frame>(UNREAD_FRAMES);
         std::thread::spawn(move || {
-            for frame in frames {
-                if let Err(error) = writer.write_all(frame.as_bytes()) {
-                    log::debug!("Native shell connection stopped taking frames: {error}");
-                    break;
-                }
+            if let Err(error) = pump(&frames, writer) {
+                log::debug!("Native shell connection stopped taking frames: {error}");
             }
         });
         Ok(Self { outbox, socket })
@@ -190,7 +173,7 @@ impl Connection {
     /// Queues `frame` and returns at once. A connection that has left
     /// `UNREAD_FRAMES` unread, or that can no longer be written, is shut
     /// down instead, and `false` says it is gone.
-    fn send(&self, frame: Arc<str>) -> bool {
+    fn send(&self, frame: Frame) -> bool {
         let Err(error) = self.outbox.try_send(frame) else {
             return true;
         };
@@ -204,10 +187,33 @@ impl Connection {
     }
 }
 
-/// A frame as it goes on the wire, ended by its newline.
-fn wire(mut frame: String) -> Arc<str> {
-    frame.push('\n');
-    Arc::from(frame)
+/// Writes frames in order. Every frame already queued goes out in the same
+/// write as the one before it, and the socket is flushed once the queue is
+/// empty, so a frame never waits behind one that has not been sent yet.
+fn pump(frames: &Receiver<Frame>, writer: impl Write) -> io::Result<()> {
+    let mut writer = BufWriter::with_capacity(WRITE_BUFFER_BYTES, writer);
+    while let Ok(frame) = frames.recv() {
+        writer.write_all(frame.as_bytes())?;
+        while let Ok(frame) = frames.try_recv() {
+            writer.write_all(frame.as_bytes())?;
+        }
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+/// A frame as it goes on the wire, ended by its newline. Shared, so one
+/// event is built once for every connection.
+type Frame = Arc<String>;
+
+/// Joins `head`, a body that is already JSON, and the closing brace into one
+/// frame. Every body comes from `serde_json`, so it is not read again here.
+fn framed(head: &str, body: &str) -> Frame {
+    let mut frame = String::with_capacity(head.len() + body.len() + 2);
+    frame.push_str(head);
+    frame.push_str(body);
+    frame.push_str("}\n");
+    Arc::new(frame)
 }
 
 type Registry = Arc<Mutex<Vec<Arc<Connection>>>>;
@@ -422,24 +428,17 @@ fn verified_native_shell_pid(stream: &UnixStream) -> Option<u32> {
     })
 }
 
+/// `event` is the first key: the shell reads an event's name from the
+/// frame's first bytes (macos/Sona/Core.swift).
 fn broadcast(registry: &Registry, name: &str, payload: &str) {
-    let payload = match serde_json::from_str::<&RawValue>(payload) {
-        Ok(payload) => payload,
-        Err(error) => {
-            log::warn!("Event {name} carried an unreadable payload: {error}");
-            return;
-        }
-    };
-    let frame = match serde_json::to_string(&EventFrame {
-        event: name,
-        payload,
-    }) {
-        Ok(frame) => wire(frame),
+    let name = match serde_json::to_string(name) {
+        Ok(name) => name,
         Err(error) => {
             log::warn!("Event {name} could not be framed: {error}");
             return;
         }
     };
+    let frame = framed(&format!("{{\"event\":{name},\"payload\":"), payload);
     lock_recover(registry).retain(|connection| connection.send(Arc::clone(&frame)));
 }
 
@@ -469,7 +468,7 @@ fn serve(app: AppHandle, connection: Arc<Connection>, stream: UnixStream, regist
                 Ok(result) => answer(request.id, &result),
                 Err(fault) => failure(request.id, &fault),
             };
-            if !connection.send(wire(frame)) {
+            if !connection.send(frame) {
                 log::debug!("Native shell reply was not delivered: the connection is closed");
             }
         });
@@ -507,24 +506,14 @@ async fn call(app: &AppHandle, method: &str, params: Option<&RawValue>) -> Resul
     }
 }
 
-fn answer(id: u64, result: &str) -> String {
-    match serde_json::from_str::<&RawValue>(result)
-        .map_err(|error| Fault::Bridge(error.to_string()))
-        .and_then(|result| {
-            serde_json::to_string(&Answer { id, result })
-                .map_err(|error| Fault::Bridge(error.to_string()))
-        }) {
-        Ok(frame) => frame,
-        Err(fault) => failure(id, &fault),
-    }
+/// `id` is the first key: the shell matches a reply to its request from the
+/// frame's first bytes (macos/Sona/Core.swift).
+fn answer(id: u64, result: &str) -> Frame {
+    framed(&format!("{{\"id\":{id},\"result\":"), result)
 }
 
-fn failure(id: u64, fault: &Fault) -> String {
-    let error = fault.json();
-    serde_json::from_str::<&RawValue>(&error)
-        .ok()
-        .and_then(|error| serde_json::to_string(&Failure { id, error }).ok())
-        .unwrap_or_else(|| format!("{{\"id\":{id},\"error\":\"the error could not be encoded\"}}"))
+fn failure(id: u64, fault: &Fault) -> Frame {
+    framed(&format!("{{\"id\":{id},\"error\":"), &fault.json())
 }
 
 /// The reply for a command that returns its value directly.
@@ -584,9 +573,11 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{answer, failure, reply, wire, Args, Connection, Fault, UNREAD_FRAMES};
+    use super::{
+        answer, broadcast, failure, pump, reply, Args, Connection, Fault, Registry, UNREAD_FRAMES,
+    };
     use serde_json::value::RawValue;
-    use std::io::Read;
+    use std::io::{self, BufRead, Read, Write};
     use std::os::unix::net::UnixStream;
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
@@ -595,7 +586,7 @@ mod tests {
     fn a_client_that_stops_reading_is_closed_instead_of_stalling_the_sender() {
         let (core_end, mut client) = UnixStream::pair().expect("a socket pair");
         let connection = Connection::open(&core_end).expect("a connection");
-        let frame = wire("x".repeat(1023));
+        let frame = Arc::new(format!("{}\n", "x".repeat(1023)));
         let (report, outcome) = mpsc::channel();
         std::thread::spawn(move || {
             let open: Vec<bool> = (0..2 * UNREAD_FRAMES)
@@ -643,21 +634,94 @@ mod tests {
     #[test]
     fn frames_carry_the_result_verbatim_and_the_error_as_its_own_type() {
         assert_eq!(
-            answer(7, r#"{"entries":[],"has_more":false}"#),
-            r#"{"id":7,"result":{"entries":[],"has_more":false}}"#
+            answer(7, r#"{"entries":[],"has_more":false}"#).as_str(),
+            "{\"id\":7,\"result\":{\"entries\":[],\"has_more\":false}}\n"
         );
         let typed = match reply::<(), _>(Err(serde_json::json!({"kind":"unpaired"}))) {
             Err(fault) => fault,
             Ok(_) => panic!("an err must fault"),
         };
         assert_eq!(
-            failure(7, &typed),
-            r#"{"id":7,"error":{"kind":"unpaired"}}"#
+            failure(7, &typed).as_str(),
+            "{\"id\":7,\"error\":{\"kind\":\"unpaired\"}}\n"
         );
         assert_eq!(
-            failure(7, &Fault::Bridge("bad \"quote\"".to_string())),
-            r#"{"id":7,"error":"bad \"quote\""}"#
+            failure(7, &Fault::Bridge("bad \"quote\"".to_string())).as_str(),
+            "{\"id\":7,\"error\":\"bad \\\"quote\\\"\"}\n"
         );
+    }
+
+    #[test]
+    fn an_event_goes_to_every_connection_with_its_payload_verbatim() {
+        let (core_end, client) = UnixStream::pair().expect("a socket pair");
+        client
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("a read timeout");
+        let connection = Arc::new(Connection::open(&core_end).expect("a connection"));
+        let registry: Registry = Arc::new(std::sync::Mutex::new(vec![connection]));
+        broadcast(
+            &registry,
+            "history-update-payload",
+            r#"{"action":"deleted","id":5}"#,
+        );
+        let mut received = String::new();
+        std::io::BufReader::new(client)
+            .read_line(&mut received)
+            .expect("the frame");
+        assert_eq!(
+            received,
+            "{\"event\":\"history-update-payload\",\"payload\":{\"action\":\"deleted\",\"id\":5}}\n"
+        );
+    }
+
+    #[derive(Default)]
+    struct Socket {
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for Socket {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn frames_already_queued_leave_in_one_write() {
+        let (outbox, frames) = mpsc::sync_channel(UNREAD_FRAMES);
+        for id in 0..100 {
+            outbox.send(answer(id, "null")).expect("queued");
+        }
+        drop(outbox);
+        let mut socket = Socket::default();
+        pump(&frames, &mut socket).expect("written");
+        assert_eq!(socket.writes, 1);
+        let expected: String = (0..100)
+            .map(|id| format!("{{\"id\":{id},\"result\":null}}\n"))
+            .collect();
+        assert_eq!(String::from_utf8(socket.bytes).expect("utf-8"), expected);
+    }
+
+    #[test]
+    fn a_frame_larger_than_the_buffer_keeps_its_place() {
+        let (outbox, frames) = mpsc::sync_channel(UNREAD_FRAMES);
+        let large = format!("\"{}\"", "x".repeat(super::WRITE_BUFFER_BYTES * 2));
+        outbox.send(answer(1, "1")).expect("queued");
+        outbox.send(answer(2, &large)).expect("queued");
+        outbox.send(answer(3, "3")).expect("queued");
+        drop(outbox);
+        let mut socket = Socket::default();
+        pump(&frames, &mut socket).expect("written");
+        let expected = format!(
+            "{{\"id\":1,\"result\":1}}\n{{\"id\":2,\"result\":{large}}}\n{{\"id\":3,\"result\":3}}\n"
+        );
+        assert_eq!(String::from_utf8(socket.bytes).expect("utf-8"), expected);
     }
 
     #[cfg(target_os = "macos")]
