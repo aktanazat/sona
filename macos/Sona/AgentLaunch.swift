@@ -9,6 +9,14 @@ enum AgentLaunch: String, CaseIterable {
 
     var name: String { rawValue }
 
+    /// The agent as Settings > Agents names it.
+    var bridgeAgent: AgentBridgeAgent {
+        switch self {
+        case .claude: .claude
+        case .codex: .codex
+        }
+    }
+
     private var command: String {
         switch self {
         case .claude: "claude"
