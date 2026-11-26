@@ -63,7 +63,7 @@ enum ConversationBookmarkKind: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    var color: Color {
+    @MainActor var color: Color {
         switch self {
         case .mark: Theme.inkSecondary
         case .decision: Theme.accent

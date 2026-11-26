@@ -387,7 +387,7 @@ func promptCellText(_ value: JSONValue) -> String {
 
 /// "3 minutes ago", "yesterday", and an absolute date past a fortnight — the
 /// steps `src/lib/utils/format.ts` uses, in the same order.
-func promptRelativeTime(_ utcMs: Double, now: Date = .now) -> String {
+@MainActor func promptRelativeTime(_ utcMs: Double, now: Date = .now) -> String {
     let elapsed = max(0, now.timeIntervalSince1970 - utcMs / 1000)
     let moment = Date(timeIntervalSince1970: utcMs / 1000)
     if elapsed < 3600 {
@@ -404,7 +404,7 @@ func promptRelativeTime(_ utcMs: Double, now: Date = .now) -> String {
 }
 
 /// "yesterday" rather than "1 day ago", the way `numeric: "auto"` reads.
-let promptRelativeFormatter: RelativeDateTimeFormatter = {
+@MainActor let promptRelativeFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
     formatter.dateTimeStyle = .named
     formatter.unitsStyle = .full

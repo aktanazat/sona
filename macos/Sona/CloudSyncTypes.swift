@@ -86,7 +86,7 @@ enum CloudSyncObjectState: String, Decodable {
     }
 
     /// Colour follows the reason; the word is always present.
-    var tone: Color {
+    @MainActor var tone: Color {
         switch self {
         case .committed: Theme.ink
         case .local, .queued, .uploading, .deleted: Theme.inkSecondary
@@ -116,7 +116,7 @@ enum CloudSyncAccountStatus {
         }
     }
 
-    var tone: Color {
+    @MainActor var tone: Color {
         switch self {
         case .loading: Theme.inkTertiary
         case .attention, .unavailable: Theme.live
@@ -278,7 +278,7 @@ struct CloudShareSummary: Decodable, Identifiable, Equatable {
             }
         }
 
-        var tone: Color {
+        @MainActor var tone: Color {
             switch self {
             case .uploading, .revoking: Theme.accent
             case .active: Theme.inkSecondary
@@ -412,7 +412,7 @@ enum PairingCandidate {
         }
     }
 
-    var tone: Color {
+    @MainActor var tone: Color {
         if case .invalid = self { return Theme.live }
         return Theme.inkTertiary
     }

@@ -842,7 +842,7 @@ private struct MeetingRecordingDock: View {
     /// The strip and the drawer share a height, so the drawer covers the
     /// strip it comes out of and leaving one is leaving both.
     private static let height: CGFloat = 152
-    private static let stripWidth: CGFloat = 32
+    nonisolated private static let stripWidth: CGFloat = 32
 
     /// The strip is hidden, never removed: SwiftUI draws a view on its way
     /// out where it last sat, and the drawer comes out over it.

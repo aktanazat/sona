@@ -48,7 +48,7 @@ struct Model: Identifiable, Hashable {
     let size: String
     var status: Status
 
-    init(_ info: ModelInfo, current: String) {
+    @MainActor init(_ info: ModelInfo, current: String) {
         id = info.id
         name = info.name
         size = Self.bytes(info.sizeMb * 1_000_000)
@@ -63,13 +63,13 @@ struct Model: Identifiable, Hashable {
         }
     }
 
-    static let byteFormatter: ByteCountFormatter = {
+    @MainActor static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter
     }()
 
-    static func bytes(_ count: UInt64) -> String {
+    @MainActor static func bytes(_ count: UInt64) -> String {
         byteFormatter.string(fromByteCount: Int64(count))
     }
 }

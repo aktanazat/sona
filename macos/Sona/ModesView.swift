@@ -1062,7 +1062,7 @@ struct ModeConsentTerm: View {
 enum ModeNoticeTone {
     case plain, warning, danger
 
-    var color: Color {
+    @MainActor var color: Color {
         switch self {
         case .plain: Theme.inkSecondary
         case .warning: Theme.accent

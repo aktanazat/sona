@@ -17,7 +17,7 @@ extension WorkAttachmentSource {
         return []
     }
 
-    static func loading(_ providers: [NSItemProvider]) async -> [WorkAttachmentSource] {
+    @MainActor static func loading(_ providers: [NSItemProvider]) async -> [WorkAttachmentSource] {
         var sources: [WorkAttachmentSource] = []
         for provider in providers {
             if let source = await load(provider) { sources.append(source) }
@@ -33,7 +33,7 @@ extension WorkAttachmentSource {
         return url.host() == nil ? nil : url.absoluteString
     }
 
-    private static func load(_ provider: NSItemProvider) async -> WorkAttachmentSource? {
+    @MainActor private static func load(_ provider: NSItemProvider) async -> WorkAttachmentSource? {
         if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
            let url = await url(from: provider, type: .fileURL) {
             return .file(url)
@@ -49,7 +49,7 @@ extension WorkAttachmentSource {
         return nil
     }
 
-    private static func url(from provider: NSItemProvider, type: UTType) async -> URL? {
+    @MainActor private static func url(from provider: NSItemProvider, type: UTType) async -> URL? {
         await withCheckedContinuation { done in
             provider.loadItem(forTypeIdentifier: type.identifier) { item, _ in
                 if let data = item as? Data {
@@ -61,7 +61,7 @@ extension WorkAttachmentSource {
         }
     }
 
-    private static func imageData(from provider: NSItemProvider) async -> Data? {
+    @MainActor private static func imageData(from provider: NSItemProvider) async -> Data? {
         await withCheckedContinuation { done in
             provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
                 done.resume(returning: data.flatMap(png))

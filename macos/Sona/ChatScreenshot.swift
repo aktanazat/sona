@@ -1,6 +1,6 @@
 import AppKit
 import ImageIO
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 /// The preview and the bytes sent by Send describe the same single image.
@@ -106,7 +106,7 @@ final class ChatScreenshotPicker: NSObject, SCContentSharingPickerObserver {
         SCContentSharingPicker.shared.isActive = false
     }
 
-    private func finish(_ result: Result<SCContentFilter?, Error>) {
+    private func finish(_ result: sending Result<SCContentFilter?, Error>) {
         let pending = selection
         selection = nil
         pending?.resume(with: result)

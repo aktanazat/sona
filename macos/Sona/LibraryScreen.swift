@@ -984,6 +984,7 @@ private struct ReceiptCard: View {
     }
 }
 
+@MainActor
 private struct ReceiptPair: Identifiable {
     let id: String
     let label: String

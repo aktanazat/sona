@@ -4,6 +4,7 @@ import AppKit
 /// formatted text that pastes into a mail or a document with its headings and
 /// lists, and once as Markdown. The sections, labels and order are the page's:
 /// what Sona wrote, then the person's own notes.
+@MainActor
 enum MeetingNotesCopy {
     struct Item {
         let text: String

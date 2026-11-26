@@ -23,11 +23,11 @@ final class QuickEntry {
 
     private unowned let model: AppModel
     @ObservationIgnored private lazy var entryPanel: FloatingPanel = {
-        let panel = FloatingPanel(QuickEntryPanel(entry: self).environment(model), keyed: true)
+        let panel = FloatingPanel(AnyView(QuickEntryPanel(entry: self).environment(model)), keyed: true)
         panel.onResignKey = { [weak self] in self?.putAway() }
         return panel
     }()
-    @ObservationIgnored private lazy var filedPanel = FloatingPanel(RambleCard(entry: self).environment(model))
+    @ObservationIgnored private lazy var filedPanel = FloatingPanel(AnyView(RambleCard(entry: self).environment(model)))
     @ObservationIgnored private var shown = false
     /// Words put away by a click in another window, back with the shortcut.
     @ObservationIgnored private var kept = false

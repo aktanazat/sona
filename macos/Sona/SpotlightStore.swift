@@ -1,5 +1,5 @@
 import AppIntents
-import CoreSpotlight
+@preconcurrency import CoreSpotlight
 import CryptoKit
 
 /// Keeps Spotlight in step with the people, meetings, tasks, projects and

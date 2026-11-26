@@ -41,7 +41,7 @@ enum WorkOwner: Codable, Hashable {
 
 /// A patch field that can be emptied: `.clear` sends `null`, while a field
 /// left `nil` in `WorkPatch` is not sent and stays as it is.
-enum WorkPatchValue<T: Equatable>: Equatable {
+enum WorkPatchValue<T: Equatable & Sendable>: Equatable, Sendable {
     case set(T)
     case clear
 }

@@ -54,7 +54,7 @@ private struct ConversationContext: Decodable {
     let calendarLocation: String?
     let location: ConversationLocation?
 
-    var source: String {
+    @MainActor var source: String {
         var parts: [String] = []
         if !applicationBundleIds.isEmpty {
             let names = applicationBundleIds.map { InstalledApp.find($0)?.name ?? $0 }

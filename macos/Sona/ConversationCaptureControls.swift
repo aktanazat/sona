@@ -47,7 +47,7 @@ struct ConversationTypedBookmarks: View {
                 .keyboardShortcut(KeyEquivalent(key), modifiers: [.control, .option])
                 .accessibilityLabel("Mark a \(kind.label.lowercased())")
                 .accessibilityValue(counts.map { "\($0[kind, default: 0])" } ?? "")
-                .help("Mark a \(kind.label.lowercased()) (⌃⌥\(key))")
+                .help("Mark a \(kind.label.lowercased()) (⌃⌥\(index + 1))")
             }
         }
     }

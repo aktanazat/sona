@@ -12,7 +12,7 @@ private struct MeetingDetectionWrite: Encodable {
 
 /// Every fenced write carries the revision it was decided against. The inner
 /// body is snake_case; only the parameter around it is camelCase.
-private struct MeetingSettingsEnvelope<Body: Encodable>: Encodable {
+private struct MeetingSettingsEnvelope<Body: Encodable & Sendable>: Encodable, Sendable {
     let request: Body
 }
 
@@ -624,7 +624,7 @@ private struct MeetingSettingsSessionParam: Encodable {
     /// One settings write, then the read that proves it. The core also emits
     /// `settings-changed`, and a second read costs one round trip against a
     /// row that would otherwise show the old value until it arrives.
-    private func writeSetting<P: Encodable>(_ method: String, _ params: P) async {
+    private func writeSetting<P: Encodable & Sendable>(_ method: String, _ params: P) async {
         do {
             try await core.request(method, params)
             await loadSettings()

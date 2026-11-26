@@ -22,13 +22,13 @@ final class LogTailReader: @unchecked Sendable {
 
     private let url: URL
     private let queue = DispatchQueue(label: "sona.log-tail", qos: .utility)
-    private let deliver: @MainActor ([LogLine]) -> Void
+    private let deliver: @MainActor @Sendable ([LogLine]) -> Void
     private var timer: DispatchSourceTimer?
     private var offset: UInt64 = 0
     private var carried = ""
     private var nextID = 0
 
-    init(directory: String, fileName: String = LogTailReader.logFileName, deliver: @escaping @MainActor ([LogLine]) -> Void) {
+    init(directory: String, fileName: String = LogTailReader.logFileName, deliver: @escaping @MainActor @Sendable ([LogLine]) -> Void) {
         url = URL(fileURLWithPath: directory).appending(path: fileName)
         self.deliver = deliver
     }
@@ -92,7 +92,7 @@ final class LogTailReader: @unchecked Sendable {
         }
         guard !parsed.isEmpty else { return }
         let delivery = deliver
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [parsed] in
             MainActor.assumeIsolated { delivery(parsed) }
         }
     }

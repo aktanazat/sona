@@ -629,8 +629,9 @@ struct Sidebar: View {
     }
 
     private func favoritePlace(_ entry: WorkFavoriteEntry, in folder: String?) -> FavoritePlace {
-        var takeTasks: (([String]) -> Void)?
+        var takeTasks: (@MainActor @Sendable ([String]) -> Void)?
         if case let .favorite(.project, project) = entry {
+            let model = model
             takeTasks = { ids in
                 let moving = model.workRows(ids).filter { $0.projectId != project }.map(\.id)
                 guard !moving.isEmpty else { return }
@@ -765,7 +766,7 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
     @Binding var drop: FavoriteDrop?
     /// The project favorite tasks dragged from a list are over.
     @Binding var tasksOver: WorkFavoriteEntry?
-    let takeTasks: (([String]) -> Void)?
+    let takeTasks: (@MainActor @Sendable ([String]) -> Void)?
     let land: (WorkFavoriteEntry, FavoriteDrop) -> Void
 
     func body(content: Content) -> some View {

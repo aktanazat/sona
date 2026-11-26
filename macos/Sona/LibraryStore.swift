@@ -388,7 +388,9 @@ final class LibraryStore {
                     }
                 }
             }
-            return await group.reduce(into: [:]) { read, answer in read[answer.0] = answer.1 }
+            var read: [Int64: ReceiptLoad] = [:]
+            for await (id, load) in group { read[id] = load }
+            return read
         }
         receipts.merge(read) { _, new in new }
         receiptsAsked.subtract(ids)

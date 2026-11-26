@@ -146,7 +146,7 @@ struct WorkCondition: Codable, Equatable, Hashable, Identifiable {
 
 /// A condition, or a group of filters of which any or all must hold. The
 /// core sends a group as `{"any": [...]}` or `{"all": [...]}`.
-enum WorkFilter: Codable, Hashable {
+enum WorkFilter: Codable, Hashable, Sendable {
     case condition(WorkCondition)
     case any([WorkFilter])
     case all([WorkFilter])

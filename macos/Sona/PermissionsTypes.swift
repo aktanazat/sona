@@ -118,7 +118,7 @@ enum AccessibilityTrust {
     /// True when already trusted, in which case no dialog appears.
     @discardableResult
     static func prompt() -> Bool {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        let options = ["AXTrustedCheckOptionPrompt" as CFString: true] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }
 }

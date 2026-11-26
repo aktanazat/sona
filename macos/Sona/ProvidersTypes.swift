@@ -185,7 +185,7 @@ struct LocalCleanupStatus: Decodable, Equatable, Sendable {
         sizeBytes == 0 ? 0 : min(1, Double(downloadedBytes) / Double(sizeBytes))
     }
 
-    var progress: String {
+    @MainActor var progress: String {
         "\(Model.bytes(downloadedBytes)) of \(Model.bytes(sizeBytes))"
     }
 }

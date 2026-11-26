@@ -17,7 +17,7 @@ enum ProjectPageTab: String, CaseIterable, Hashable {
 }
 
 extension PlanningProjectHealth {
-    var tint: Color {
+    @MainActor var tint: Color {
         switch self {
         case .onTrack: Theme.statusDone
         case .atRisk: Theme.statusInProgress

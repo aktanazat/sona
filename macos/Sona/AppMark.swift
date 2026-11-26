@@ -9,7 +9,7 @@ struct InstalledApp {
     let icon: NSImage
 
     /// The app LaunchServices finds for `bundleId`, read once per id.
-    static func find(_ bundleId: String) -> InstalledApp? {
+    @MainActor static func find(_ bundleId: String) -> InstalledApp? {
         let key = bundleId as NSString
         if let found = cache.object(forKey: key) { return found.app }
         let app = read(bundleId)
@@ -22,7 +22,7 @@ struct InstalledApp {
         init(_ app: InstalledApp?) { self.app = app }
     }
 
-    private static let cache = NSCache<NSString, Found>()
+    @MainActor private static let cache = NSCache<NSString, Found>()
 
     private static func read(_ bundleId: String) -> InstalledApp? {
         let workspace = NSWorkspace.shared

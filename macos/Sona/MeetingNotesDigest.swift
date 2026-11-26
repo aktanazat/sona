@@ -51,7 +51,7 @@ struct MeetingNotesDigest {
     /// do not already say.
     let covered: [Line]
 
-    init(
+    @MainActor init(
         _ content: MeetingGeneratedArtifacts,
         transcript: [TranscriptEffectiveSegment],
         speakerNames: [SpeakerId: String]
@@ -189,7 +189,7 @@ struct MeetingNotesDigest {
 
     /// Money, shares, calendar dates, clock times, and counts of time or
     /// people: the figures a reader looks for first.
-    private static let figure = #/
+    @MainActor private static let figure = #/
         [$€£¥] \d[\d,]* (?:\.\d+)? (?:k|m|bn|\s(?:thousand|million|billion))? \b
       | \b \d[\d,]* (?:\.\d+)? (?:k|m|bn|\s(?:thousand|million|billion))? \s? (?:dollars?|usd|euros?|eur|pounds?|gbp|yen) \b
       | \b \d+ (?:\.\d+)? \s? (?:%|percent\b)

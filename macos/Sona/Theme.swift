@@ -7,6 +7,7 @@ import simd
 /// contrast, the way Linear builds its themes: steps in LCH lightness and
 /// chroma rather than alpha, drawn in Display P3. Each role resolves per
 /// appearance, and Increase Contrast picks the same seeds at full contrast.
+@MainActor
 enum Theme {
     static var rail: Color { color(.rail) }
     static var page: Color { color(.page) }
@@ -75,32 +76,32 @@ enum Theme {
 
     /// A monogram's ground, the same in either appearance: dark enough that
     /// white initials stay above 4.5:1.
-    static func monogram(hue: Double, chroma: Double) -> Color {
+    nonisolated static func monogram(hue: Double, chroma: Double) -> Color {
         Color(nsColor: LCH(l: 41, c: chroma, h: hue).nsColor)
     }
 
     /// Bars, ticks and carets: data marks, a step below the control radii.
-    static let radiusMark: CGFloat = 2
-    static let radiusKey: CGFloat = 4
-    static let radiusRow: CGFloat = 6
-    static let radiusControl: CGFloat = 8
-    static let radiusCard: CGFloat = 12
-    static let radiusDialog: CGFloat = 16
+    nonisolated static let radiusMark: CGFloat = 2
+    nonisolated static let radiusKey: CGFloat = 4
+    nonisolated static let radiusRow: CGFloat = 6
+    nonisolated static let radiusControl: CGFloat = 8
+    nonisolated static let radiusCard: CGFloat = 12
+    nonisolated static let radiusDialog: CGFloat = 16
 
-    static let sidebarWidth: CGFloat = 232
+    nonisolated static let sidebarWidth: CGFloat = 232
     /// What the close, minimize and zoom buttons take of the toolbar's line
     /// when no sidebar sits under them.
-    static let windowControlsWidth: CGFloat = 90
-    static let sidebarRow: CGFloat = 28
-    static let headerHeight: CGFloat = 44
-    static let listRow: CGFloat = 36
-    static let margin: CGFloat = 28
-    static let contentMax: CGFloat = 880
+    nonisolated static let windowControlsWidth: CGFloat = 90
+    nonisolated static let sidebarRow: CGFloat = 28
+    nonisolated static let headerHeight: CGFloat = 44
+    nonisolated static let listRow: CGFloat = 36
+    nonisolated static let margin: CGFloat = 28
+    nonisolated static let contentMax: CGFloat = 880
 
     /// Buttons, fields, tabs and icon buttons in bars, forms and sheets.
-    static let controlHeight: CGFloat = 28
+    nonisolated static let controlHeight: CGFloat = 28
     /// The smaller control a row or a card carries.
-    static let compactHeight: CGFloat = 26
+    nonisolated static let compactHeight: CGFloat = 26
 
     /// The one curve panels move on, in AppKit and SwiftUI alike: 0.25 s,
     /// quick off the screen's edge and settling without a bounce. With
@@ -142,7 +143,7 @@ enum ThemeRole: Int, CaseIterable {
 }
 
 /// The contrast every color is generated at, kept across launches.
-@Observable
+@MainActor @Observable
 final class ThemeStore {
     static let shared = ThemeStore()
 
@@ -503,12 +504,12 @@ extension View {
         font(TypeScale.headline).foregroundStyle(Theme.ink)
     }
 
-    func bodyText(_ size: CGFloat = 14, _ color: Color = Theme.ink) -> some View {
-        font(TypeScale.body(size)).foregroundStyle(color).lineSpacing(size * 0.16)
+    func bodyText(_ size: CGFloat = 14, _ color: Color? = nil) -> some View {
+        font(TypeScale.body(size)).foregroundStyle(color ?? Theme.ink).lineSpacing(size * 0.16)
     }
 
-    func metaText(_ color: Color = Theme.inkTertiary) -> some View {
-        font(TypeScale.meta).foregroundStyle(color)
+    func metaText(_ color: Color? = nil) -> some View {
+        font(TypeScale.meta).foregroundStyle(color ?? Theme.inkTertiary)
     }
 
     func sectionLabel() -> some View {

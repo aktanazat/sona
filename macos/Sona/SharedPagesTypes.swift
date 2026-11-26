@@ -311,7 +311,7 @@ enum SharedState: Equatable {
         }
     }
 
-    var tone: Color {
+    @MainActor var tone: Color {
         switch self {
         case .live: Theme.ink
         case .goingLive, .removing: Theme.accent

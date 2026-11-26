@@ -217,8 +217,8 @@ final class Core: @unchecked Sendable {
     private var socket: Int32 = -1
     private var pending: [UInt64: CheckedContinuation<Data, Error>] = [:]
     private var nextID: UInt64 = 0
-    private var observers: [String: [@MainActor (Data) -> Void]] = [:]
-    private var closed: (@MainActor () -> Void)?
+    private var observers: [String: [@MainActor @Sendable (Data) -> Void]] = [:]
+    private var closed: (@MainActor @Sendable () -> Void)?
 
     init() {
         socketPath = NSTemporaryDirectory() + "sona-core-\(getpid()).sock"
@@ -227,14 +227,14 @@ final class Core: @unchecked Sendable {
     /// Registers interest in one event. The handler gets the whole frame,
     /// which `payload` decodes. Observers of a name run in registration
     /// order; an observer is for the life of the app.
-    func observe(_ name: String, _ handler: @escaping @MainActor (Data) -> Void) {
+    func observe(_ name: String, _ handler: @escaping @MainActor @Sendable (Data) -> Void) {
         lock.withLock { observers[name, default: []].append(handler) }
     }
 
     /// Registers what runs when the socket closes under the shell: once per
     /// close, on the main actor, after every pending request has failed. A
     /// close the shell asked for through `shutdown` is not announced.
-    func onClose(_ handler: @escaping @MainActor () -> Void) {
+    func onClose(_ handler: @escaping @MainActor @Sendable () -> Void) {
         lock.withLock { closed = handler }
     }
 
@@ -310,7 +310,7 @@ final class Core: @unchecked Sendable {
         _ = try await exchange(method, NoParams?.none)
     }
 
-    func request<P: Encodable>(_ method: String, _ params: P) async throws {
+    func request<P: Encodable & Sendable>(_ method: String, _ params: P) async throws {
         _ = try await exchange(method, params)
     }
 
@@ -318,7 +318,7 @@ final class Core: @unchecked Sendable {
         try decode(try await exchange(method, NoParams?.none))
     }
 
-    func request<T: Decodable, P: Encodable>(_ method: String, _ params: P) async throws -> T {
+    func request<T: Decodable, P: Encodable & Sendable>(_ method: String, _ params: P) async throws -> T {
         try decode(try await exchange(method, params))
     }
 
@@ -462,7 +462,7 @@ final class Core: @unchecked Sendable {
                 carried.removeSubrange(carried.startIndex..<lineStart)
             }
         }
-        let (waiting, closed) = lock.withLock { () -> ([CheckedContinuation<Data, Error>], (@MainActor () -> Void)?) in
+        let (waiting, closed) = lock.withLock { () -> ([CheckedContinuation<Data, Error>], (@MainActor @Sendable () -> Void)?) in
             self.socket = -1
             let all = Array(pending.values)
             pending.removeAll()

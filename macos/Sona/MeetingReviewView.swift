@@ -408,11 +408,11 @@ struct MeetingReviewHeader: View {
     }
 
     private func statusLine<Actions: View>(
-        _ text: AttributedString, color: Color = Theme.inkSecondary, @ViewBuilder actions: () -> Actions
+        _ text: AttributedString, color: Color? = nil, @ViewBuilder actions: () -> Actions
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
             Text(text)
-                .metaText(color)
+                .metaText(color ?? Theme.inkSecondary)
                 .textSelection(.enabled)
                 .help(String(text.characters))
             actions()
@@ -896,6 +896,7 @@ private struct QuoteDrag: ViewModifier {
 /// A voice's color in a transcript, by its place among the meeting's
 /// speakers, so a name keeps one color from line to line. A line no voice is
 /// sure of stays gray.
+@MainActor
 enum SpeakerInk {
     private static let hues: [Double] = [276, 55, 145, 350, 205, 85]
 
@@ -906,6 +907,7 @@ enum SpeakerInk {
 }
 
 /// The query, marked in the words it matched.
+@MainActor
 enum TranscriptHighlight {
     static func mark(_ text: String, query: String) -> AttributedString {
         var result = AttributedString(text)
