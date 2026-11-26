@@ -87,6 +87,14 @@ struct CloudSyncView: View {
                         .metaText()
                         .textSelection(.enabled)
                 }
+                ToggleRow(
+                    title: "Sort phone thoughts on this Mac",
+                    detail: "Uses your local notes model, on-device transcription and image reading. It does not stop a paired server sorter.",
+                    isOn: Binding(
+                        get: { store.overview?.sortThoughtsHere ?? false },
+                        set: { enabled in Task { await store.setSortThoughtsHere(enabled) } })
+                )
+                .disabled(store.busy || store.overview?.enabled != true)
                 if store.overview?.portableMode == true {
                     CardRow {
                         VStack(alignment: .leading, spacing: 4) {

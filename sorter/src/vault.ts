@@ -185,18 +185,24 @@ export class Sorter {
       if (attempt !== undefined && now < attempt.next_at_utc_ms) continue;
       try {
         const card = await this.file(feed, thoughtId, object.revision_id, now);
-        feed.objects[card.objectId] = {
-          cluster: card.cluster,
-          kind: "card",
-          revision_id: card.revisionId,
-          thought_id: thoughtId,
-        };
         delete feed.attempts[thoughtId];
         filed.add(thoughtId);
-        sorted += 1;
-        this.deps.log(
-          `filed thought ${thoughtId} as "${card.title}" in ${card.cluster.name}`,
-        );
+        if (card === null) {
+          this.deps.log(
+            `thought ${thoughtId} was filed by another sorter first`,
+          );
+        } else {
+          feed.objects[card.objectId] = {
+            cluster: card.cluster,
+            kind: "card",
+            revision_id: card.revisionId,
+            thought_id: thoughtId,
+          };
+          sorted += 1;
+          this.deps.log(
+            `filed thought ${thoughtId} as "${card.title}" in ${card.cluster.name}`,
+          );
+        }
       } catch (error) {
         const count = (attempt?.count ?? 0) + 1;
         feed.attempts[thoughtId] = {
@@ -212,6 +218,10 @@ export class Sorter {
     return sorted;
   }
 
+  /**
+   * Write the thought's card, or `null` when its card object already exists:
+   * another sorter committed it first, and the change feed brings it here.
+   */
   private async file(
     feed: Feed,
     thoughtId: string,
@@ -222,7 +232,7 @@ export class Sorter {
     objectId: string;
     revisionId: string;
     title: string;
-  }> {
+  } | null> {
     const { client, identity, keys, model } = this.deps;
     const opened = await openManifest(
       keys,
@@ -257,7 +267,17 @@ export class Sorter {
       sealed.chunkDigest,
       await key("chunk-0"),
     );
-    await client.commitUpload(uploadId, await key("commit"));
+    try {
+      await client.commitUpload(uploadId, await key("commit"));
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "stale_revision") {
+        await client.cancelUpload(uploadId, await key("cancel")).catch(() => {
+          this.deps.log(`abandoned card upload ${uploadId} will expire`);
+        });
+        return null;
+      }
+      throw error;
+    }
     return {
       cluster: card.cluster,
       objectId,

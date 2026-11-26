@@ -136,6 +136,7 @@ struct CloudSyncOverview: Decodable {
     let pendingDeletions: UInt32
     /// The failure the runtime is stuck on, if it is stuck.
     let terminalError: CloudSyncErrorKind?
+    let sortThoughtsHere: Bool
 }
 
 /// Where one meeting stands: `CloudMeetingStatus`.

@@ -103,6 +103,9 @@ pub(crate) mod phone_thoughts;
 #[path = "revision_upload.rs"]
 mod revision_upload;
 
+#[path = "thought_sorter.rs"]
+mod thought_sorter;
+
 #[path = "work_today.rs"]
 mod work_today;
 
@@ -327,6 +330,7 @@ pub(crate) fn overview_in(
         queued_objects: counts.queued_outbox.saturating_add(counts.claimed_outbox),
         pending_deletions: counts.pending_tombstones,
         terminal_error: status_error.or(terminal_error),
+        sort_thoughts_here: settings.sort_thoughts_here,
     })
 }
 
@@ -637,6 +641,8 @@ enum RemoteObject {
     /// A paired device's recording, decrypted to a file this process owns.
     DeviceRecording(DeviceRecordingImport),
     Thought(phone_thoughts::ThoughtImport),
+    /// A sorter's card for one of the phone's thoughts.
+    Card(thought_sorter::CardManifest),
     /// A question from the phone, for the worker that answers it.
     AgentAsk(agent_asks::AgentAsk),
     /// A decision the phone made about this Mac's work.
@@ -1104,6 +1110,7 @@ impl CloudSyncRuntime {
                 queued_objects: 0,
                 pending_deletions: 0,
                 terminal_error: self.status_error_for(&settings, portable_mode),
+                sort_thoughts_here: settings.sort_thoughts_here,
             });
         };
         let status_error = self.status_error_for(&settings, portable_mode);
@@ -1553,6 +1560,17 @@ impl CloudSyncRuntime {
         self.overview().await
     }
 
+    pub(crate) async fn set_sort_thoughts_here(
+        &self,
+        enabled: bool,
+    ) -> Result<CloudSyncOverview, CloudRuntimeError> {
+        settings::update_settings(&self.app, |settings| {
+            settings.cloud_sync.sort_thoughts_here = enabled;
+        })?;
+        self.emit_changed(None, None);
+        self.overview().await
+    }
+
     pub(crate) async fn retry(
         &self,
         session_id: MeetingSessionId,
@@ -1824,6 +1842,7 @@ impl CloudSyncRuntime {
             dictation_profile::sync(self, &access).await?;
             memory_index::sync(self, &access).await?;
             work_today::sync(self, &access).await?;
+            self.sort_phone_thoughts(&access).await?;
         }
         Ok(())
     }
@@ -3319,6 +3338,9 @@ impl CloudSyncRuntime {
             RemoteObject::Thought(thought) => {
                 self.install_phone_thought(access, object_id, revision_id, sequence, thought)
             }
+            RemoteObject::Card(card) => {
+                self.remember_card(access, object_id, revision_id, sequence, card)
+            }
             RemoteObject::AgentAsk(ask) => {
                 self.remember_agent_ask(access, object_id, revision_id, sequence, ask)
             }
@@ -3406,6 +3428,13 @@ impl CloudSyncRuntime {
                 )
                 .await
                 .map(RemoteObject::Thought);
+        }
+        if let Some(card) = thought_sorter::open_card(
+            &*access.keys.vault_root,
+            &manifest_context,
+            &encrypted_manifest,
+        )? {
+            return Ok(RemoteObject::Card(card));
         }
         if let Some(ask) = agent_asks::open_ask(
             &*access.keys.vault_root,
@@ -4907,6 +4936,7 @@ mod tests {
             paused: false,
             consent_version: Some(CLOUD_SYNC_CONSENT_VERSION),
             endpoint: Some("https://sync.example.test/v1".to_owned()),
+            sort_thoughts_here: false,
         };
         let running = SyncGate {
             portable: false,

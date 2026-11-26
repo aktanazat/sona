@@ -1,0 +1,20 @@
+{
+  "object_id": "rr5feVJMsR91jsgmiCzMXec5MRKmVyEs7KmBTQwyx4M",
+  "revision_id": "fixture_card_revision",
+  "manifest": "AwMDAwMDAwMDAwMDdGw7W0bOovmEWSQvjy8NlsHATJQFvJmrhpfVll5pAi_9wJ92pdd-TXmmURTcZ6EpgOhHLsIZz4G0wi_uhLa9coWqCNS3-pgwWY7ssOpDjRBv3vjaQxEbcs39spVdSuzXwgmA4Lkq-gAl5U0FcZuxmW3F88nx0edgG55Z19RYiIiiXB0qdMSpI2ddezY_eqZ2CnSTVv0iQ783P-fhO3RSEg2Ozhqczn1DEEBXzoUDi65aGvjSs5L_K49lFFdLWB5BOXHm7n4XI13I5Yk5B0v7sao0gHV-0Y4VuawXcp3Djv05L1dlE4Z_mKylM7OBH2L7h-yZSOgg33sd47FhywsQdbABiZM0qUQSs8xnLGVj-gH982oHbGxJYZSH3kiVt8nIp-IbdVQkkzrkxX5f6fsSBjdQ4qyLwVQtiaLYW5nX5SnbpfItjTIjPfTLP-sopq4gs93vyw6oHihxN78ZIm_MlJQzS5ukIAsuJGI5vFCTmCD8_JhvuQCXvw85G2MxL0K25bQS1eYyidN1DGB-MpvkI_s2hiQrqgFfpDpFd3a5OrCZ6YPIdCh4qwyrJt8vW7c3mlg",
+  "card": {
+    "archived": false,
+    "cluster": { "hue": 57, "key": "garden", "name": "Garden" },
+    "format_version": 1,
+    "kind": "card",
+    "pinned": false,
+    "sorter": { "model": "fixture-local-notes", "prompt_version": 1 },
+    "summary": "Grow tomatoes this spring.",
+    "tags": ["garden"],
+    "thought_id": "thought_01",
+    "thought_revision_id": "thought_revision_01",
+    "title": "Garden plans",
+    "writer": { "device_id": "fixture-sorter", "role": "sorter" },
+    "written_at_utc_ms": 1700000000000
+  }
+}

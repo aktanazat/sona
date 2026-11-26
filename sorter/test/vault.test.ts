@@ -3,10 +3,23 @@
 // is found only through the change feed, so a manifest read that fails in
 // transit must fail the pass instead of indexing the card as `other`.
 import { afterEach, expect, test } from "bun:test";
+import { z } from "zod";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { encryptObjectRevisionPayload } from "../../cloudflare/sona-companion/src/crypto";
+import {
+  base64UrlEncode,
+  sha256Base64Url,
+} from "../../cloudflare/sona-companion/src/encoding";
 import { ApiError, CompanionClient } from "../src/client";
-import { type CardManifest, type VaultKeys, sealCard } from "../src/objects";
+import {
+  type CardManifest,
+  THOUGHT_SOURCE_FORMAT,
+  type VaultKeys,
+  canonicalJson,
+  cardObjectId,
+  sealCard,
+} from "../src/objects";
 import { StateDir } from "../src/state";
 import { Sorter } from "../src/vault";
 
@@ -114,4 +127,131 @@ test("a manifest read that fails in transit leaves the card unread, not indexed 
     revision_id: plan.revisionId,
     thought_id: "thought_01",
   });
+});
+
+// The Mac's sorter files a thought under the same card object id. When it
+// commits first, this sorter's commit is refused as stale: that thought is
+// filed, so it is neither counted nor retried.
+test("a card another sorter committed first is taken as filed, not retried", async () => {
+  const thoughtId = "thought_voice_01";
+  const thoughtRevision = "thought_rev_voice_01";
+  const plaintext = canonicalJson({
+    audio: null,
+    captured_at_utc_ms: 1_700_000_000_000,
+    device_id: "phone_device_01",
+    format_version: 1,
+    images: [],
+    kind: "thought",
+    link: null,
+    origin: "voice",
+    text: "",
+  });
+  const manifest = await encryptObjectRevisionPayload({
+    contentKind: "manifest",
+    index: 0,
+    nonce: new Uint8Array(12).fill(3),
+    objectId: thoughtId,
+    plaintext,
+    revisionId: thoughtRevision,
+    sourceFormat: THOUGHT_SOURCE_FORMAT,
+    total: 1,
+    vaultId: KEYS.vaultId,
+    vaultRoot: KEYS.vaultRoot,
+  });
+  const committed: string[] = [];
+  let cancellations = 0;
+  server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const path = new URL(request.url).pathname;
+      if (request.method === "DELETE") {
+        cancellations += 1;
+        return Response.json({
+          state: "cancelled",
+          upload_id: path.split("/")[3],
+        });
+      }
+      if (path === "/v1/changes") {
+        return Response.json({
+          changes: [
+            {
+              object_id: thoughtId,
+              revision_id: thoughtRevision,
+              sequence: 1,
+              tombstone: false,
+            },
+          ],
+          has_more: false,
+          high_water: 1,
+          next_cursor: "cursor_after_1",
+        });
+      }
+      if (path.endsWith("/manifest")) {
+        return Response.json({
+          envelope: {
+            chunk_count: 1,
+            crypto_version: 1,
+            manifest_sha256: await sha256Base64Url(manifest),
+            object_id: thoughtId,
+            parent_revision_id: null,
+            revision_id: thoughtRevision,
+            total_bytes: 0,
+            writer_device_id: "phone_device_01",
+            writer_signature: "unused",
+          },
+          manifest: base64UrlEncode(manifest),
+        });
+      }
+      if (path === "/v1/uploads") {
+        const plan = z
+          .object({
+            objectId: z.string(),
+            uploadId: z.string(),
+          })
+          .parse(await request.json());
+        committed.push(plan.objectId);
+        return Response.json({
+          accepted_indexes: [],
+          state: "active",
+          upload_id: plan.uploadId,
+        });
+      }
+      if (path.endsWith("/chunks/0")) {
+        return Response.json({
+          accepted: true,
+          index: 0,
+          upload_id: path.split("/")[3],
+        });
+      }
+      return Response.json(
+        { code: "stale_revision", retryable: false },
+        { status: 409 },
+      );
+    },
+  });
+  root = await mkdtemp(join("/private/var/tmp", "sona-sorter-test-"));
+  const state = new StateDir(root);
+  const sorter = new Sorter({
+    client: new CompanionClient(
+      `http://localhost:${server.port}`,
+      IDENTITY,
+      KEYS.vaultId,
+    ),
+    identity: IDENTITY,
+    keys: KEYS,
+    log: () => undefined,
+    model: { apiKey: "test-key", baseUrl: "http://localhost:9", model: "m" },
+    state,
+  });
+
+  expect(await sorter.pass()).toStrictEqual({ sorted: 0, synced: 1 });
+  expect(committed).toStrictEqual([await cardObjectId(thoughtId)]);
+  expect(cancellations).toBe(1);
+  expect((await state.feed()).attempts).toStrictEqual({});
+});
+
+test("a thought's card object id is the one the Mac derives", async () => {
+  expect(await cardObjectId("thought_01")).toBe(
+    "rr5feVJMsR91jsgmiCzMXec5MRKmVyEs7KmBTQwyx4M",
+  );
 });

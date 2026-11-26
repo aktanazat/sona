@@ -679,6 +679,9 @@ pub struct CloudSyncSettings {
     pub paused: bool,
     pub consent_version: Option<u32>,
     pub endpoint: Option<String>,
+    /// File the phone's thoughts into board clusters on this Mac, with the
+    /// models already on it, instead of leaving that to a server sorter.
+    pub sort_thoughts_here: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4781,6 +4784,7 @@ mod tests {
         assert!(!settings.cloud_sync.paused);
         assert_eq!(settings.cloud_sync.consent_version, None);
         assert_eq!(settings.cloud_sync.endpoint, None);
+        assert!(!settings.cloud_sync.sort_thoughts_here);
 
         let serialized = default_settings_document();
         let cloud_sync = serialized
@@ -4788,10 +4792,20 @@ mod tests {
             .get("cloud_sync")
             .and_then(serde_json::Value::as_object)
             .expect("cloud sync settings object");
-        assert_eq!(cloud_sync.len(), 4);
-        for key in ["enabled", "paused", "consent_version", "endpoint"] {
+        assert_eq!(cloud_sync.len(), 5);
+        for key in [
+            "enabled",
+            "paused",
+            "consent_version",
+            "endpoint",
+            "sort_thoughts_here",
+        ] {
             assert!(cloud_sync.contains_key(key));
         }
+        assert_eq!(
+            cloud_sync.get("sort_thoughts_here"),
+            Some(&serde_json::Value::Bool(false))
+        );
         for key in [
             "key",
             "keys",

@@ -1,9 +1,14 @@
 // A card the sorter cannot read back is a thought it files again on every pass,
 // so the seal and open sides must agree on the revision context byte for byte.
 import { expect, test } from "bun:test";
+import {
+  base64UrlDecode,
+  sha256Base64Url,
+} from "../../cloudflare/sona-companion/src/encoding";
+import fixture from "./fixtures/card-v1.json";
 import type { RevisionManifest } from "../src/client";
 import {
-  type CardManifest,
+  CardManifest,
   type VaultKeys,
   openManifest,
   sealCard,
@@ -55,5 +60,29 @@ test("openManifest returns the card sealCard sealed, read through the Worker's r
   expect(await openManifest(KEYS, reply)).toStrictEqual({
     kind: "card",
     manifest: CARD,
+  });
+});
+
+test("the server sorter reads the shared card fixture the Mac reads", async () => {
+  const ciphertext = base64UrlDecode(fixture.manifest);
+  if (ciphertext === null)
+    throw new Error("fixture ciphertext is not base64url");
+  const reply: RevisionManifest = {
+    envelope: {
+      chunk_count: 1,
+      crypto_version: 1,
+      manifest_sha256: await sha256Base64Url(ciphertext),
+      object_id: fixture.object_id,
+      parent_revision_id: null,
+      revision_id: fixture.revision_id,
+      total_bytes: 29,
+      writer_device_id: "fixture-sorter",
+      writer_signature: "unused",
+    },
+    manifest: fixture.manifest,
+  };
+  expect(await openManifest(KEYS, reply)).toStrictEqual({
+    kind: "card",
+    manifest: CardManifest.parse(fixture.card),
   });
 });

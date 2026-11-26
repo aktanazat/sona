@@ -3,7 +3,7 @@ import XCTest
 final class BoardIndexTests: XCTestCase {
     /// The board leads with what is not sorted yet, then clusters by name; inside a
     /// cluster pinned cards lead and the rest run newest first. An archived card hides
-    /// its thought, and the newest card about a thought is the one that counts.
+    /// its thought, and the newest card within a filing group counts.
     func testSectionsOrderUnsortedFirstThenClustersWithPinnedLeading() {
         var index = BoardIndex(vaultId: "vault")
         index.heads["t-old"] = head(.thought(thought(capturedAt: 10)))
@@ -63,6 +63,40 @@ final class BoardIndexTests: XCTestCase {
             "c." + Base64URL.encode(Data(#"{"v":1,"a":42}"#.utf8))
         )
         XCTAssertNil(VaultReader.snapshotSequence("c." + Base64URL.encode(Data(#"{"v":1,"a":42}"#.utf8))))
+    }
+
+    func testNewerLegacyUnsortedPlaceholderDoesNotHideAClassifiedCard() {
+        var index = BoardIndex(vaultId: "vault")
+        index.heads["thought"] = head(.thought(thought(capturedAt: 10, text: "")))
+        let garden = CardManifest.Cluster(key: "garden", name: "Garden", hue: 200)
+        let unsorted = CardManifest.Cluster(key: "unsorted", name: "Unsorted", hue: 20)
+        var classified = card(thought: "thought", cluster: garden, at: 100)
+        classified.sorter = CardManifest.Sorter(model: "local-notes", prompt_version: 1)
+        index.heads["mac-card"] = head(.card(classified))
+        index.heads["legacy-server-card"] = head(.card(card(
+            thought: "thought", cluster: unsorted, at: 200)))
+
+        XCTAssertEqual(index.sections().map(\.id), ["garden"])
+        XCTAssertEqual(index.sections()[0].tiles[0].card, classified)
+    }
+
+    func testUserFilingBeatsNewerModelAndPlaceholderCards() {
+        var index = BoardIndex(vaultId: "vault")
+        index.heads["thought"] = head(.thought(thought(capturedAt: 10)))
+        let chosen = CardManifest.Cluster(key: "chosen", name: "Chosen", hue: 100)
+        let model = CardManifest.Cluster(key: "model", name: "Model", hue: 200)
+        let unsorted = CardManifest.Cluster(key: "unsorted", name: "Unsorted", hue: 20)
+        var user = card(thought: "thought", cluster: chosen, at: 100, pinned: true)
+        user.writer = CardManifest.Writer(device_id: "phone", role: "user")
+        var classified = card(thought: "thought", cluster: model, at: 200)
+        classified.sorter = CardManifest.Sorter(model: "local-notes", prompt_version: 1)
+        index.heads["user-card"] = head(.card(user))
+        index.heads["mac-card"] = head(.card(classified))
+        index.heads["legacy-server-card"] = head(.card(card(
+            thought: "thought", cluster: unsorted, at: 300)))
+
+        XCTAssertEqual(index.sections().map(\.id), ["chosen"])
+        XCTAssertEqual(index.sections()[0].tiles[0].card, user)
     }
 
     // MARK: - Fixtures

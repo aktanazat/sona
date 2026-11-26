@@ -186,15 +186,25 @@ export interface SealedCard {
 }
 
 /**
- * Seal a new card as a fresh object: manifest plus the one empty chunk crypto v1
- * requires, and the upload plan the Worker verifies against this device's key.
+ * The one object id a thought's card has, as the Mac's sorter derives it: two
+ * sorters filing the same thought both create this object, and the Worker
+ * commits only the first.
+ */
+export function cardObjectId(thoughtId: string): Promise<string> {
+  return sha256Base64Url(utf8(`${CARD_SOURCE_FORMAT}:${thoughtId}`));
+}
+
+/**
+ * Seal a thought's card as a new object: manifest plus the one empty chunk
+ * crypto v1 requires, and the upload plan the Worker verifies against this
+ * device's key.
  */
 export async function sealCard(
   keys: VaultKeys,
   identity: DeviceIdentity,
   card: CardManifest,
 ): Promise<SealedCard> {
-  const objectId = randomId();
+  const objectId = await cardObjectId(card.thought_id);
   const revisionId = randomId();
   const context = {
     objectId,

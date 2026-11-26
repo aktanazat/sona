@@ -136,12 +136,18 @@ struct BoardSection: Identifiable, Equatable {
 extension BoardIndex {
     /// The board: unsorted thoughts first, then clusters by name. Inside a section,
     /// pinned tiles lead and the rest run newest first. An archived card hides its
-    /// thought; the newest card about a thought is the one that counts.
+    /// thought. User filings beat model filings, which beat placeholders;
+    /// the newest card within each of those groups counts.
     func sections() -> [BoardSection] {
         var newest: [String: CardManifest] = [:]
         for (_, _, card) in cards {
-            if let known = newest[card.thought_id], known.written_at_utc_ms >= card.written_at_utc_ms {
-                continue
+            if let known = newest[card.thought_id] {
+                let knownRank = Self.filingRank(known)
+                let rank = Self.filingRank(card)
+                if knownRank > rank
+                    || (knownRank == rank && known.written_at_utc_ms >= card.written_at_utc_ms) {
+                    continue
+                }
             }
             newest[card.thought_id] = card
         }
@@ -161,6 +167,11 @@ extension BoardIndex {
                 return sorted
             }
             .sorted(by: BoardIndex.leads)
+    }
+
+    private static func filingRank(_ card: CardManifest) -> Int {
+        if card.writer.role == "user" { return 2 }
+        return card.sorter == nil ? 0 : 1
     }
 
     /// Pinned before unpinned, then newest first.
