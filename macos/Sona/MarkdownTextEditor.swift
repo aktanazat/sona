@@ -34,6 +34,9 @@ struct MarkdownTextEditor: View {
     @Binding var text: String
     @Binding var selection: TextSelection?
     @Binding var focused: Bool
+    /// Which document the words belong to. A new one starts a fresh undo
+    /// history: undoing must never bring one note's words into another.
+    let document: AnyHashable
     let label: String
     var fontSize: CGFloat = 14
     var lineSpacing: CGFloat = 0
@@ -53,7 +56,7 @@ struct MarkdownTextEditor: View {
 
     var body: some View {
         MarkdownTextField(
-            text: $text, selection: $selection, focused: $focused, label: label, fontSize: fontSize,
+            text: $text, selection: $selection, focused: $focused, document: document, label: label, fontSize: fontSize,
             lineSpacing: lineSpacing, minHeight: minHeight, writingTools: writingTools, keys: keys,
             handle: editor
         ) { bottom in
@@ -84,6 +87,7 @@ private struct MarkdownTextField: NSViewRepresentable {
     @Binding var text: String
     @Binding var selection: TextSelection?
     @Binding var focused: Bool
+    let document: AnyHashable
     let label: String
     let fontSize: CGFloat
     let lineSpacing: CGFloat
@@ -114,6 +118,7 @@ private struct MarkdownTextField: NSViewRepresentable {
         view.typingAttributes[.paragraphStyle] = paragraph
         if !writingTools { view.writingToolsBehavior = .none }
         view.string = text
+        context.coordinator.document = document
         handle.view = view
         return view
     }
@@ -127,7 +132,12 @@ private struct MarkdownTextField: NSViewRepresentable {
         view.setAccessibilityLabel(label)
         coordinator.applying = true
         defer { coordinator.applying = false }
-        if !view.hasMarkedText(), view.string != text {
+        if coordinator.document != document {
+            coordinator.document = document
+            view.unmarkText()
+            view.string = text
+            coordinator.undo.removeAllActions()
+        } else if !view.hasMarkedText(), view.string != text {
             if view.window?.firstResponder === view {
                 view.replace(with: text)
             } else {
@@ -167,6 +177,7 @@ private struct MarkdownTextField: NSViewRepresentable {
         var focused = false
         /// The editor's own history, cleared when other words are put in.
         let undo = UndoManager()
+        var document: AnyHashable?
         private var bottom: CGFloat?
 
         init(parent: MarkdownTextField) {

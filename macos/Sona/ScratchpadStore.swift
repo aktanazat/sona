@@ -373,7 +373,7 @@ final class ScratchpadStore {
     @ObservationIgnored private var inFlight: Task<Bool, Never>?
     /// Changes when a different note takes the editor. A save that comes back
     /// for an earlier one updates the list and leaves the editor alone.
-    @ObservationIgnored private var session = UUID()
+    private(set) var session = UUID()
 
     private static let searchPause = Duration.milliseconds(200)
     private static let savePause = Duration.milliseconds(1200)

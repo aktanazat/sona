@@ -117,6 +117,7 @@ final class MarkdownEditorTests: XCTestCase {
         var text: String
         var selection: TextSelection?
         var focused = false
+        var document = UUID()
         var keys: [MarkdownEditorKey] = []
 
         init(_ text: String) {
@@ -125,23 +126,29 @@ final class MarkdownEditorTests: XCTestCase {
     }
 
     private var window: NSWindow?
+    private var host: NSHostingView<AnyView>?
 
     override func tearDown() async throws {
         window?.close()
         window = nil
+        host = nil
     }
 
-    private func open(_ note: Note) throws -> MarkdownTextView {
-        let editor = MarkdownTextEditor(
+    private func editor(_ note: Note) -> AnyView {
+        AnyView(MarkdownTextEditor(
             text: Binding { note.text } set: { note.text = $0 },
             selection: Binding { note.selection } set: { note.selection = $0 },
             focused: Binding { note.focused } set: { note.focused = $0 },
+            document: note.document,
             label: "Note",
             keys: { key in
                 note.keys.append(key)
                 return key == .escape
-            })
-        let host = NSHostingView(rootView: editor.frame(width: 400))
+            }).frame(width: 400))
+    }
+
+    private func open(_ note: Note) throws -> MarkdownTextView {
+        let host = NSHostingView(rootView: editor(note))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 600), styleMask: [.titled],
             backing: .buffered, defer: false)
@@ -149,6 +156,7 @@ final class MarkdownEditorTests: XCTestCase {
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         self.window = window
+        self.host = host
         let view = try XCTUnwrap(Self.textView(in: host))
         XCTAssertTrue(window.makeFirstResponder(view))
         return view
@@ -195,5 +203,64 @@ final class MarkdownEditorTests: XCTestCase {
         undo.undo()
         undo.undo()
         XCTAssertEqual(note.text, "make this bold")
+    }
+
+    func testShortcutLettersFollowTheLayoutWithUsPositionsForOtherScripts() throws {
+        // Dvorak types B on the key US ANSI calls N (45), and X where US has B (11).
+        XCTAssertEqual(MarkdownTextView.command(typed: "b", code: 45, modifiers: .command, link: nil), .mark("**"))
+        XCTAssertNil(MarkdownTextView.command(typed: "x", code: 11, modifiers: .command, link: nil))
+        // A Cyrillic layout types a letter on the US B key; the menus read it as Command-B.
+        XCTAssertEqual(
+            MarkdownTextView.command(typed: "\u{438}", code: 11, modifiers: .command, link: nil), .mark("**"))
+        XCTAssertEqual(
+            MarkdownTextView.command(typed: "S", code: 1, modifiers: [.command, .shift], link: nil), .mark("~~"))
+        // AZERTY types an accented e on the US 2 key; headings stay on the key position.
+        XCTAssertEqual(
+            MarkdownTextView.command(typed: "\u{E9}", code: 19, modifiers: [.command, .option], link: nil),
+            .heading(2))
+        let note = Note("dvorak")
+        let view = try open(note)
+        view.setSelectedRange(NSRange(location: 0, length: 6))
+        XCTAssertTrue(view.performKeyEquivalent(with: try XCTUnwrap(command("b", code: 45))))
+        XCTAssertEqual(note.text, "**dvorak**")
+    }
+
+    func testComposedWordsLandWhileReturnAndEscapeReachTheirOwners() throws {
+        let note = Note("- one")
+        let view = try open(note)
+        view.setSelectedRange(NSRange(location: 5, length: 0))
+        view.setMarkedText("ka", selectedRange: NSRange(location: 2, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText())
+        view.insertText("\u{304B}", replacementRange: view.markedRange())
+        XCTAssertFalse(view.hasMarkedText())
+        XCTAssertEqual(note.text, "- one\u{304B}")
+        view.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(note.text, "- one\u{304B}\n- ")
+        view.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        XCTAssertEqual(note.keys, [.newline, .escape])
+    }
+
+    /// The note editor stays focused while another note is opened in it, by
+    /// the add button, a note link or Spotlight.
+    func testUndoAfterOpeningAnotherNoteKeepsThatNotesWords() throws {
+        let note = Note("first note")
+        let view = try open(note)
+        let undo = try XCTUnwrap(view.undoManager)
+        undo.groupsByEvent = false
+        undo.beginUndoGrouping()
+        view.insertText("!", replacementRange: NSRange(location: 10, length: 0))
+        undo.endUndoGrouping()
+        // The app has heard the focus report by the time another note opens.
+        note.focused = true
+        note.text = "second note"
+        note.document = UUID()
+        host?.rootView = editor(note)
+        host?.layoutSubtreeIfNeeded()
+        XCTAssertEqual(view.string, "second note")
+        XCTAssertTrue(window?.firstResponder === view)
+        undo.undo()
+        XCTAssertEqual(view.string, "second note")
+        XCTAssertEqual(note.text, "second note")
     }
 }

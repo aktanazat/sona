@@ -411,7 +411,8 @@ private struct DetailNotes: View {
                     .allowsHitTesting(false)
             }
             MarkdownTextEditor(
-                text: $text, selection: $selection, focused: $focused, label: "Details", lineSpacing: 3,
+                text: $text, selection: $selection, focused: $focused, document: row.id, label: "Details",
+                lineSpacing: 3,
                 writingTools: false,
                 keys: { key in
                     guard key == .escape else { return false }

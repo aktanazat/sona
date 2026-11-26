@@ -272,7 +272,9 @@ private struct ScratchNoteEditorPage: View {
             .padding(.bottom, 20)
             ErrorNote(store.error)
             ErrorNote(sourceError)
-            ScratchNoteEditor(text: bodyText, focused: $editorFocused, mentions: mentions, mention: mention, noteId: store.openId)
+            ScratchNoteEditor(
+                text: bodyText, focused: $editorFocused, mentions: mentions, mention: mention, noteId: store.openId,
+                document: store.session)
             .padding(.bottom, 24)
             .zIndex(1)
             connections
@@ -701,6 +703,7 @@ private struct ScratchNoteEditor: View {
     let mentions: (String) -> [ScratchMention]
     let mention: (ScratchMention) -> Void
     let noteId: String?
+    let document: UUID
 
     @State private var selection: TextSelection?
     @State private var highlighted = 0
@@ -734,7 +737,8 @@ private struct ScratchNoteEditor: View {
 
     var body: some View {
         MarkdownTextEditor(
-            text: $text, selection: $selection, focused: $focused, label: "Note", minHeight: 240, keys: key,
+            text: $text, selection: $selection, focused: $focused, document: document, label: "Note", minHeight: 240,
+            keys: key,
             selectionMoved: { caretBottom = $0 })
             .padding(.bottom, 8)
             .focusedValue(\.quotedSelection, quoted)
