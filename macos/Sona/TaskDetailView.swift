@@ -375,10 +375,19 @@ private struct DetailNotes: View {
                     }
                 }
                 .help("Double-click to edit")
+                .dropDestination(for: String.self) { items, _ in
+                    let dropped = items.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !dropped.isEmpty else { return false }
+                    save(details.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + dropped)
+                    return true
+                }
             }
         }
         .onChange(of: row.details, initial: true) { _, details in
             if !focused { text = details ?? "" }
+        }
+        .onChange(of: text) {
+            if !focused, text != (row.details ?? "") { commit() }
         }
     }
 

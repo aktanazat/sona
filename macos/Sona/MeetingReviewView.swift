@@ -848,6 +848,9 @@ struct TranscriptTurnRow: View {
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Correct these words" : "")
             .id(segment.base.segmentId)
+            .draggable(QuotedSelection(
+                text: "\(store.speakerName(turn.speakerId)): \(store.displayedText(segment))",
+                link: source(segment)).draft)
             .contextMenu {
                 if store.canPlay(segment.base.segmentId) {
                     Button("Listen with context") { store.playContribution(segment.base.segmentId) }
@@ -855,10 +858,8 @@ struct TranscriptTurnRow: View {
                 if !segment.removed && !store.transcriptDeleted {
                     Button("Save passage…") { savingPassage = segment }
                     Button("Copy source link") {
-                        let milliseconds = max(0, segment.base.startOffsetNs) / 1_000_000
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            "sona://meeting/\(store.openSessionId ?? "")?atMs=\(milliseconds)&segmentId=\(segment.base.segmentId)", forType: .string)
+                        NSPasteboard.general.setString(source(segment), forType: .string)
                     }
                 }
             }
@@ -866,6 +867,11 @@ struct TranscriptTurnRow: View {
                 RelistenPrompt(store: store.relisten)
             }
         }
+    }
+
+    private func source(_ segment: TranscriptEffectiveSegment) -> String {
+        let milliseconds = max(0, segment.base.startOffsetNs) / 1_000_000
+        return "sona://meeting/\(store.openSessionId ?? "")?atMs=\(milliseconds)&segmentId=\(segment.base.segmentId)"
     }
 }
 
