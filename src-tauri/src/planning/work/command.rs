@@ -795,6 +795,357 @@ pub(crate) fn is_command(passage: &str, lexicon: &Lexicon) -> bool {
     read(passage, lexicon, &Local::now()).is_some()
 }
 
+/// What one spoken sentence decides about the triage task in front of the
+/// speaker: "accept, assign to Alex, due Friday", "decline, duplicate of
+/// 19", "next". Its fields are read by the command grammar, as if the
+/// sentence had said "it".
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TriageSaid {
+    /// A verdict, fields to set, or both. Without a verdict the task stays
+    /// in Triage with its fields set.
+    Decide {
+        verdict: Option<TriageVerdict>,
+        patch: WorkPatch,
+        /// "Accept, Assign to Alex, Move to Friday, Nov 27".
+        summary: String,
+        /// Go on to the next task after this one.
+        next: bool,
+    },
+    Next,
+    Back,
+    Undo,
+    Stop,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TriageVerdict {
+    Accept,
+    Decline {
+        reason: Option<String>,
+    },
+    /// It repeats the task numbered `number`.
+    Duplicate {
+        number: i64,
+    },
+}
+
+const ACCEPTS: &[&str] = &["accept", "approve", "yes", "yep", "keep"];
+const DECLINES: &[&str] = &["decline", "reject", "dismiss", "drop", "no", "nope"];
+const DUPLICATES: &[&str] = &["duplicate", "duplicates", "dupe", "dup"];
+const TRIAGE_LEAD_INS: &[&str] = &[
+    "please", "sona", "hey", "ok", "okay", "and", "then", "so", "um", "uh",
+];
+/// Words that open a clause, where a decision said without punctuation is
+/// cut. "Yes", "no" and "keep" are left out: inside a clause they are words.
+const TRIAGE_OPENERS: &[&str] = &[
+    "accept",
+    "approve",
+    "decline",
+    "reject",
+    "dismiss",
+    "due",
+    "priority",
+    "project",
+    "owner",
+    "duplicate",
+    "dupe",
+    "next",
+    "undo",
+];
+
+enum Clause {
+    Move(TriageSaid),
+    Verdict(TriageVerdict),
+    Fields(WorkPatch, String),
+}
+
+/// Reads `text` as a decision on one triage task, or `None` when any part
+/// of it is not one: nothing is applied from a sentence half understood.
+pub(crate) fn triage_said<Tz: TimeZone>(
+    text: &str,
+    lexicon: &Lexicon,
+    now: &DateTime<Tz>,
+) -> Option<TriageSaid> {
+    let mut verdict = None;
+    let mut patch = WorkPatch::default();
+    let mut summary = Vec::new();
+    let mut reason = Vec::new();
+    let mut moves = Vec::new();
+    let mut clauses = 0;
+    for piece in text.split([',', ';', '.', '!', '?', ':', '\u{2014}', '\u{2013}']) {
+        let all = words(piece);
+        let Some(start) = all
+            .iter()
+            .position(|word| !TRIAGE_LEAD_INS.contains(&word.key.as_str()))
+        else {
+            continue;
+        };
+        let said = &all[start..];
+        let Some(read) = piece_clauses(piece, said, lexicon, now) else {
+            if matches!(verdict, Some(TriageVerdict::Decline { .. })) {
+                reason.push(joined(piece, said)?);
+                continue;
+            }
+            return None;
+        };
+        for clause in read {
+            clauses += 1;
+            match clause {
+                Clause::Move(said) => moves.push(said),
+                Clause::Verdict(said) => {
+                    verdict = match (verdict, said) {
+                        (
+                            None | Some(TriageVerdict::Decline { .. }),
+                            duplicate @ TriageVerdict::Duplicate { .. },
+                        ) => Some(duplicate),
+                        (None, said) => Some(said),
+                        _ => return None,
+                    }
+                }
+                Clause::Fields(fields, said) => {
+                    merge(&mut patch, fields);
+                    summary.push(said);
+                }
+            }
+        }
+    }
+    if let [only] = moves.as_slice() {
+        if clauses == 1 {
+            return Some(only.clone());
+        }
+    }
+    if moves.iter().any(|said| *said != TriageSaid::Next) {
+        return None;
+    }
+    let verdict = match verdict {
+        Some(TriageVerdict::Decline { .. }) if !reason.is_empty() => Some(TriageVerdict::Decline {
+            reason: Some(reason.join(", ")),
+        }),
+        verdict => verdict,
+    };
+    let fields = patch != WorkPatch::default();
+    match &verdict {
+        Some(TriageVerdict::Accept) => summary.insert(0, "Accept".to_owned()),
+        Some(TriageVerdict::Decline { .. }) if !fields => summary.insert(0, "Decline".to_owned()),
+        Some(TriageVerdict::Duplicate { number }) if !fields => {
+            summary.insert(0, format!("Mark as a duplicate of #{number}"));
+        }
+        Some(_) => return None,
+        None if !fields && moves.is_empty() => return None,
+        None if !fields => return Some(TriageSaid::Next),
+        None => {}
+    }
+    Some(TriageSaid::Decide {
+        next: verdict.is_some() || !moves.is_empty(),
+        verdict,
+        patch,
+        summary: summary.join(", "),
+    })
+}
+
+/// One stretch between punctuation: one clause, or, said without
+/// punctuation, several cut where a clause opens.
+fn piece_clauses<Tz: TimeZone>(
+    piece: &str,
+    said: &[Word<'_>],
+    lexicon: &Lexicon,
+    now: &DateTime<Tz>,
+) -> Option<Vec<Clause>> {
+    if let Some(read) = clause(piece, said, lexicon, now) {
+        return Some(read);
+    }
+    let cuts: Vec<usize> = (1..said.len())
+        .filter(|&at| {
+            let key = said[at].key.as_str();
+            TRIAGE_OPENERS.contains(&key) || VERBS.iter().any(|(verb, _)| *verb == key)
+        })
+        .collect();
+    if cuts.is_empty() {
+        return None;
+    }
+    let mut read = Vec::new();
+    let mut from = 0;
+    for to in cuts.into_iter().chain([said.len()]) {
+        let mut part = &said[from..to];
+        while let [first, rest @ ..] = part {
+            if !TRIAGE_LEAD_INS.contains(&first.key.as_str()) {
+                break;
+            }
+            part = rest;
+        }
+        while let [rest @ .., last] = part {
+            if !matches!(last.key.as_str(), "and" | "then") {
+                break;
+            }
+            part = rest;
+        }
+        if !part.is_empty() {
+            read.extend(clause(piece, part, lexicon, now)?);
+        }
+        from = to;
+    }
+    Some(read)
+}
+
+fn clause<Tz: TimeZone>(
+    piece: &str,
+    said: &[Word<'_>],
+    lexicon: &Lexicon,
+    now: &DateTime<Tz>,
+) -> Option<Vec<Clause>> {
+    let keys: Vec<&str> = said.iter().map(|word| word.key.as_str()).collect();
+    let moved = match keys.as_slice() {
+        ["next"] | ["next", "one"] | ["skip"] | ["skip", "it"] | ["skip", "this", "one"] => {
+            Some(TriageSaid::Next)
+        }
+        ["back"] | ["go", "back"] | ["previous"] | ["previous", "one"] => Some(TriageSaid::Back),
+        ["undo"] | ["undo", "that"] | ["undo", "it"] => Some(TriageSaid::Undo),
+        ["stop"] | ["stop", "listening"] | ["that's", "all"] | ["i'm", "done"] => {
+            Some(TriageSaid::Stop)
+        }
+        _ => None,
+    };
+    if let Some(moved) = moved {
+        return Some(vec![Clause::Move(moved)]);
+    }
+    if let Some(number) = duplicate_of(&keys) {
+        return Some(vec![Clause::Verdict(TriageVerdict::Duplicate { number })]);
+    }
+    let first = *keys.first()?;
+    let mut rest = &said[1..];
+    while let [word, tail @ ..] = rest {
+        let key = word.key.as_str();
+        if !matches!(key, "it" | "this" | "that" | "one") && !TRIAGE_LEAD_INS.contains(&key) {
+            break;
+        }
+        rest = tail;
+    }
+    if ACCEPTS.contains(&first) {
+        let mut read = vec![Clause::Verdict(TriageVerdict::Accept)];
+        if !rest.is_empty() {
+            read.extend(piece_clauses(piece, rest, lexicon, now)?);
+        }
+        return Some(read);
+    }
+    if DECLINES.contains(&first) {
+        if let [word, tail @ ..] = rest {
+            if matches!(word.key.as_str(), "because" | "as" | "since") {
+                rest = tail;
+            }
+        }
+        let rest_keys: Vec<&str> = rest.iter().map(|word| word.key.as_str()).collect();
+        if let Some(number) = duplicate_of(&rest_keys) {
+            return Some(vec![Clause::Verdict(TriageVerdict::Duplicate { number })]);
+        }
+        return Some(vec![Clause::Verdict(TriageVerdict::Decline {
+            reason: joined(piece, rest),
+        })]);
+    }
+    let (patch, summary) = fields(piece, said, lexicon, now)?;
+    Some(vec![Clause::Fields(patch, summary)])
+}
+
+/// The number in "duplicate of 19", "it's a dupe of S-19", "same as #19".
+fn duplicate_of(keys: &[&str]) -> Option<i64> {
+    let mut rest = keys;
+    while let [first, tail @ ..] = rest {
+        if !matches!(
+            *first,
+            "it's" | "its" | "that's" | "thats" | "it" | "is" | "a"
+        ) {
+            break;
+        }
+        rest = tail;
+    }
+    let rest = match rest {
+        [first, tail @ ..] if DUPLICATES.contains(first) => tail,
+        ["same", "as", tail @ ..] => tail,
+        _ => return None,
+    };
+    let rest = match rest {
+        ["of", tail @ ..] => tail,
+        _ => rest,
+    };
+    let rest = match rest {
+        ["task" | "number" | "item", tail @ ..] => tail,
+        _ => rest,
+    };
+    let said = rest.concat();
+    let digits = said
+        .trim_start_matches('#')
+        .trim_start_matches(|character: char| character.is_ascii_alphabetic())
+        .trim_start_matches('-');
+    if digits.is_empty() || !digits.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The fields one clause sets, read as the command it would be with "it"
+/// for the task: "assign to Alex" as "assign it to Alex", "due Friday" as
+/// "move it to Friday", a bare "Alex", "Friday" or "urgent" as whichever
+/// of those reads.
+fn fields<Tz: TimeZone>(
+    piece: &str,
+    said: &[Word<'_>],
+    lexicon: &Lexicon,
+    now: &DateTime<Tz>,
+) -> Option<(WorkPatch, String)> {
+    let first = said.first()?.key.as_str();
+    let whole = joined(piece, said)?;
+    let rest = joined(piece, &said[1..]).unwrap_or_default();
+    let sentences = if VERBS.iter().any(|(verb, _)| *verb == first) {
+        if said
+            .get(1)
+            .is_some_and(|word| SELECTED.contains(&word.key.as_str()))
+        {
+            vec![whole]
+        } else {
+            vec![format!("{first} it {rest}")]
+        }
+    } else {
+        match first {
+            "due" | "by" | "project" | "in" => vec![format!("move it to {rest}")],
+            "priority" => vec![format!("set it to {rest}")],
+            "owner" => vec![format!("assign it to {rest}")],
+            "to" | "for" => vec![format!("assign it {whole}"), format!("move it {whole}")],
+            _ => vec![
+                format!("assign it to {whole}"),
+                format!("move it to {whole}"),
+                format!("set it to {whole}"),
+            ],
+        }
+    };
+    sentences.iter().find_map(|sentence| {
+        let reading = read(sentence, lexicon, now)?;
+        let WorkCommandChange::Update { patch } = reading.change else {
+            return None;
+        };
+        (reading.selected && reading.filters.is_empty() && patch.status.is_none())
+            .then_some((patch, reading.summary))
+    })
+}
+
+fn merge(into: &mut WorkPatch, from: WorkPatch) {
+    if from.priority.is_some() {
+        into.priority = from.priority;
+    }
+    if from.project_id.is_some() {
+        into.project_id = from.project_id;
+    }
+    if from.owner.is_some() {
+        into.owner = from.owner;
+    }
+    if from.due_at_ms.is_some() {
+        into.due_at_ms = from.due_at_ms;
+    }
+    if from.snoozed_until_ms.is_some() {
+        into.snoozed_until_ms = from.snoozed_until_ms;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,5 +1236,101 @@ mod tests {
             .collect();
 
         assert_eq!(read_as_commands, Vec::<&str>::new());
+    }
+
+    fn decided(said: &str) -> (Option<TriageVerdict>, WorkPatch, bool) {
+        match triage_said(said, &lexicon(), &wednesday()) {
+            Some(TriageSaid::Decide {
+                verdict,
+                patch,
+                next,
+                ..
+            }) => (verdict, patch, next),
+            other => panic!("{said:?} read as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_assign_and_due_said_with_or_without_commas_is_one_decision() {
+        let friday = NaiveDate::from_ymd_opt(2026, 11, 13).expect("a day");
+        for said in [
+            "Accept, assign to Dana, due Friday.",
+            "accept assign to dana due friday",
+            "Okay, accept it and give it to Dana. Due Friday",
+        ] {
+            let (verdict, patch, next) = decided(said);
+            assert_eq!(verdict, Some(TriageVerdict::Accept), "{said:?}");
+            assert_eq!(
+                patch.owner,
+                Some(WorkOwner::Person {
+                    person_id: "dana".to_owned()
+                }),
+                "{said:?}"
+            );
+            assert_eq!(patch.due_at_ms.flatten().and_then(local_day), Some(friday));
+            assert!(next, "{said:?}");
+        }
+    }
+
+    #[test]
+    fn a_decline_names_the_task_it_duplicates_or_keeps_its_reason() {
+        for said in [
+            "Decline, duplicate of S-19.",
+            "decline as a dupe of #19",
+            "Same as 19",
+        ] {
+            assert_eq!(
+                decided(said).0,
+                Some(TriageVerdict::Duplicate { number: 19 }),
+                "{said:?}"
+            );
+        }
+        assert_eq!(
+            decided("Decline, not mine.").0,
+            Some(TriageVerdict::Decline {
+                reason: Some("not mine".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn moves_stand_alone_and_half_understood_decisions_apply_nothing() {
+        let read = |said| triage_said(said, &lexicon(), &wednesday());
+        assert_eq!(read("Next."), Some(TriageSaid::Next));
+        assert_eq!(read("undo that"), Some(TriageSaid::Undo));
+        assert_eq!(read("Go back."), Some(TriageSaid::Back));
+        let (verdict, patch, next) = decided("Urgent, next");
+        assert_eq!((verdict, patch.priority, next), (None, Some(1), true));
+        for said in [
+            "Accept, buy milk",
+            "mark it done",
+            "archive it",
+            "accept, undo",
+            "Decline, due Friday",
+            "Thanks",
+        ] {
+            assert_eq!(read(said), None, "{said:?}");
+        }
+    }
+
+    /// The Mac reads a decision by these keys; a renamed one would make
+    /// every spoken decision read as nothing heard.
+    #[test]
+    fn a_decision_reaches_the_window_in_the_shape_it_reads() {
+        let said = triage_said("Decline, duplicate of 19", &lexicon(), &wednesday());
+        assert_eq!(
+            serde_json::to_value(said).expect("json"),
+            serde_json::json!({
+                "kind": "decide",
+                "verdict": { "kind": "duplicate", "number": 19 },
+                "patch": {},
+                "summary": "Mark as a duplicate of #19",
+                "next": true,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TriageSaid::Next).expect("json"),
+            serde_json::json!({ "kind": "next" })
+        );
     }
 }

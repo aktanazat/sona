@@ -470,6 +470,7 @@ final class AppModel {
     @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel(), arrival: .slide)
     @ObservationIgnored private let windowAttached: WindowAttachedCard
     @ObservationIgnored private lazy var quickEntry = QuickEntry(model: self)
+    @ObservationIgnored lazy var voiceTriage = VoiceTriage(model: self)
     @ObservationIgnored private lazy var quietReviewScheduler = QuietReviewScheduler(store: projects) { [weak self] in
         guard let self, ready, !coreStopped, !coreRestarting, onboarding.step == .done,
               capture == .idle, !live.starting, live.pending == nil, live.live == nil, live.active == nil,
@@ -578,6 +579,7 @@ final class AppModel {
         core.observe(QuickEntry.openEvent) { [weak self] line in self?.quickEntry.open(line) }
         core.observe(QuickEntry.filedEvent) { [weak self] line in self?.quickEntry.file(line) }
         core.observe(QuickEntry.commandEvent) { [weak self] line in self?.quickEntry.heard(line) }
+        core.observe(VoiceTriage.heardEvent) { [weak self] line in self?.voiceTriage.heard(line) }
         core.observe(Self.watchOpenedEvent) { [weak self] line in self?.watchOpened(line) }
         core.onClose { [weak self] in self?.coreClosed() }
         workKeys.install(self)
@@ -1660,7 +1662,9 @@ final class AppModel {
             case CoreEvent.recordingError:
                 let event: RecordingErrorEvent = try Core.payload(line)
                 if let runID = event.runId, runID != dictationRunID { return }
-                notice = CaptureNotice(text: Self.recordingErrorText(event.errorType))
+                let text = Self.recordingErrorText(event.errorType)
+                notice = CaptureNotice(text: text)
+                voiceTriage.interrupted(text)
                 switch event.errorType {
                 case "spoken_send_focus_unconfirmed", "spoken_send_secure_input",
                      "spoken_send_input_unavailable":

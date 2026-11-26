@@ -1844,6 +1844,24 @@ final class WorkStore {
         undoTitle = undoStack.last?.title
     }
 
+    /// Where the undo list stands, for `joinUndo(since:as:)`.
+    var undoMark: Int { undoSerial }
+
+    /// Folds the field changes remembered since `mark` into the first of
+    /// them, so one undo takes back a decision that made several.
+    func joinUndo(since mark: Int, as title: String) {
+        let joined = undoStack.filter { $0.id > mark }
+        guard let first = joined.first, joined.count > 1 else { return }
+        var groups: [(ids: [String], patch: WorkPatch)] = []
+        for undo in joined.reversed() {
+            guard case let .patches(reversed) = undo.reversal else { return }
+            groups += reversed
+        }
+        undoStack.removeAll { $0.id > mark }
+        undoStack.append(Undo(id: first.id, title: title, reversal: .patches(groups)))
+        undoTitle = title
+    }
+
     private func place(_ label: WorkLabel) {
         labels.removeAll { $0.id == label.id }
         labels.append(label)

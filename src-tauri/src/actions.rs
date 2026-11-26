@@ -2330,6 +2330,8 @@ impl TranscribeAction {
                 app: ah.clone(),
                 run_id: run.run_id,
             });
+            let triage_reply = (run.spoken_work() == Some(crate::modes::SpokenWork::Triage))
+                .then(|| crate::planning::work::capture::TriageReply::new(ah.clone()));
             debug!(
                 "Starting async transcription task for binding: {}",
                 binding_id
@@ -2616,7 +2618,7 @@ impl TranscribeAction {
                                     },
                                 );
 
-                                if run.tasks() {
+                                if let Some(work) = run.spoken_work() {
                                     let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     persist_delivery_attempt(
                                         &hm,
@@ -2624,12 +2626,21 @@ impl TranscribeAction {
                                         run.run_id,
                                         DeliveryReceipt::not_dispatched(),
                                     );
-                                    crate::planning::work::capture::file_spoken(
-                                        ah.clone(),
-                                        history_id,
-                                        processed.final_text,
-                                        Arc::clone(&completed_pcm),
-                                    );
+                                    match work {
+                                        crate::modes::SpokenWork::Tasks => {
+                                            crate::planning::work::capture::file_spoken(
+                                                ah.clone(),
+                                                history_id,
+                                                processed.final_text,
+                                                Arc::clone(&completed_pcm),
+                                            );
+                                        }
+                                        crate::modes::SpokenWork::Triage => {
+                                            if let Some(reply) = &triage_reply {
+                                                reply.heard(history_id, processed.final_text);
+                                            }
+                                        }
+                                    }
                                 } else if run.note() {
                                     let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     if let Some(event) = RewriteSkippedEvent::for_outcome(

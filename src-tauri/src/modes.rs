@@ -444,6 +444,9 @@ pub enum TranscriptionIntent {
     /// Start or stop a spoken task list: each task said goes to the
     /// tracker's Triage, and nothing is pasted.
     Tasks,
+    /// Start or stop a decision on the triage task in front of the speaker.
+    /// Only the Mac's voice triage starts one; no shortcut does.
+    Triage,
     /// Start or stop a dictation that becomes a new note under the active
     /// mode's rewrite, and nothing is pasted.
     Note,
@@ -477,7 +480,27 @@ impl TranscriptionIntent {
             Self::Mode { mode_id } => transcribe_binding_id(mode_id),
             Self::Command => crate::command_mode::COMMAND_BINDING_ID.to_string(),
             Self::Tasks => crate::planning::work::capture::RAMBLE_BINDING_ID.to_string(),
+            Self::Triage => crate::planning::work::capture::TRIAGE_RECORDING_ID.to_string(),
             Self::Note => crate::scratchpad::DICTATE_NOTE_BINDING_ID.to_string(),
+        }
+    }
+}
+
+/// What the tracker reads a run's words as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpokenWork {
+    /// New tasks for Triage.
+    Tasks,
+    /// A decision on the triage task in front of the speaker.
+    Triage,
+}
+
+impl SpokenWork {
+    fn of(intent: &TranscriptionIntent) -> Option<Self> {
+        match intent {
+            TranscriptionIntent::Tasks => Some(Self::Tasks),
+            TranscriptionIntent::Triage => Some(Self::Triage),
+            _ => None,
         }
     }
 }
@@ -1773,9 +1796,9 @@ pub struct RunPlan {
     /// Present exactly for a voice command run, carrying the selection it
     /// rewrites. See [`CommandPlan`].
     command: Option<CommandPlan>,
-    /// Set exactly for a spoken task list, whose words are filed as tasks
+    /// Set exactly for words said about tasks, which are read by the tracker
     /// instead of delivered.
-    tasks: bool,
+    spoken_work: Option<SpokenWork>,
     /// Set exactly for a dictation filed as a new note instead of delivered.
     note: bool,
 }
@@ -1849,8 +1872,8 @@ impl RunPlan {
         if matches!(intent, TranscriptionIntent::Command) {
             return Self::for_command(settings);
         }
-        if matches!(intent, TranscriptionIntent::Tasks) {
-            return Self::for_tasks(settings);
+        if let Some(work) = SpokenWork::of(intent) {
+            return Self::for_spoken_work(settings, work);
         }
         if matches!(intent, TranscriptionIntent::Note) {
             return Self::for_note(settings);
@@ -1888,7 +1911,12 @@ impl RunPlan {
             // this function is reached, and the ordering rationale lives on
             // that early return.
             TranscriptionIntent::Command => return Self::for_command(settings),
-            TranscriptionIntent::Tasks => return Self::for_tasks(settings),
+            TranscriptionIntent::Tasks => {
+                return Self::for_spoken_work(settings, SpokenWork::Tasks)
+            }
+            TranscriptionIntent::Triage => {
+                return Self::for_spoken_work(settings, SpokenWork::Triage)
+            }
             TranscriptionIntent::Note => return Self::for_note(settings),
             TranscriptionIntent::Mode { mode_id } => (
                 settings.modes.iter().find(|mode| mode.id == *mode_id),
@@ -1999,7 +2027,7 @@ impl RunPlan {
             mode_selection_source: ModeSelectionSource::ActiveMode,
             cloud: None,
             command: None,
-            tasks: false,
+            spoken_work: None,
             note: false,
         })
     }
@@ -2197,7 +2225,7 @@ impl RunPlan {
             cloud,
             mode_selection_source,
             command: None,
-            tasks: false,
+            spoken_work: None,
             note: false,
         })
     }
@@ -2280,9 +2308,9 @@ impl RunPlan {
         Ok(run)
     }
 
-    /// Freeze a spoken task list under the active mode. Its words become
-    /// tasks, so no rewrite runs and nothing is read from the screen.
-    fn for_tasks(settings: &AppSettings) -> Result<Self, RunPlanError> {
+    /// Freeze words said about tasks under the active mode. The tracker reads
+    /// them, so no rewrite runs and nothing is read from the screen.
+    fn for_spoken_work(settings: &AppSettings, work: SpokenWork) -> Result<Self, RunPlanError> {
         let mode = active_mode(settings)
             .cloned()
             .ok_or(RunPlanError::NoMatchingMode)?;
@@ -2295,7 +2323,7 @@ impl RunPlan {
             None,
         )?;
         run.context.without_live_capture();
-        run.tasks = true;
+        run.spoken_work = Some(work);
         Ok(run)
     }
 
@@ -2404,9 +2432,10 @@ impl RunPlan {
         self.command.as_ref()
     }
 
-    /// Whether this run's words are filed as tasks instead of delivered.
-    pub fn tasks(&self) -> bool {
-        self.tasks
+    /// Whether this run's words are read by the tracker instead of delivered,
+    /// and as what.
+    pub fn spoken_work(&self) -> Option<SpokenWork> {
+        self.spoken_work
     }
 
     /// Whether this run's words become a new note instead of being delivered.
@@ -2712,7 +2741,7 @@ mod tests {
         let note = RunPlan::for_intent(&settings, &TranscriptionIntent::Note).unwrap();
         let tasks = RunPlan::for_intent(&settings, &TranscriptionIntent::Tasks).unwrap();
 
-        assert!(note.note() && !note.tasks());
+        assert!(note.note() && note.spoken_work().is_none());
         assert!(note.post_process_requested());
         assert_eq!(note.context_plan().effective_policy(), ContextPolicy::None);
         assert!(!tasks.note() && !tasks.post_process_requested());

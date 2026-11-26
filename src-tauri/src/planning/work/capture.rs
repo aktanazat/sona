@@ -3,17 +3,22 @@
 //! beside it, and the tasks one recording says, each kept with the stretch
 //! of the recording that said it.
 
+use super::command::{triage_said, TriageSaid};
 use super::items;
 use super::parse::{parse, spoken_tasks, Lexicon, Said, SpokenTask, WorkField};
 use super::types::{WorkActor, WorkItem, WorkItemInput, WorkOwner, WorkStatus};
 use super::{insert_input, run_history, run_with_meetings, with_meetings, Change, Done, Effects};
 use crate::context::{read_front_window, FrontWindow, FrontWindowRead};
+use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
+use crate::managers::transcription::TranscriptionManager;
 use crate::meeting::open_windows::window_label;
 use crate::meeting::session::MeetingSessionManager;
+use crate::modes::TranscriptionIntent;
 use crate::planning::sources;
 use crate::planning::store::{self, Refusal};
 use crate::planning::types::EvidenceSourceKind;
+use crate::transcription_coordinator::TranscriptionCoordinator;
 use anyhow::Result as StorageResult;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -26,6 +31,8 @@ use uuid::Uuid;
 
 /// The shortcut that opens the new-task box over any app.
 pub(crate) const QUICK_ENTRY_BINDING_ID: &str = "work_quick_entry";
+/// What a voice triage recording runs under; no shortcut starts one.
+pub(crate) const TRIAGE_RECORDING_ID: &str = "work_triage";
 /// The shortcut held to say tasks.
 pub(crate) const RAMBLE_BINDING_ID: &str = "work_ramble";
 
@@ -99,6 +106,17 @@ pub struct WorkRambleFiled {
 pub struct WorkCommandHeard {
     pub said: String,
     pub history_id: Option<i64>,
+}
+
+/// What one voice triage recording heard, read as a decision on the triage
+/// task in front of the speaker. Empty words: nothing was heard before the
+/// recording ended. Words and no decision: they were not one.
+#[derive(Clone, Debug, Deserialize, Serialize, Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTriageHeard {
+    pub said: String,
+    pub history_id: Option<i64>,
+    pub decision: Option<TriageSaid>,
 }
 
 /// [`super::work_create`] with where the task came from kept beside it.
@@ -482,6 +500,105 @@ pub(crate) fn file_spoken(
             log::warn!("Filed spoken tasks could not be announced");
         }
     });
+}
+
+/// Starts listening for a decision on the triage task in front of the
+/// speaker, or stops waiting for one. The recording ends itself at the first
+/// pause after speech, or when nothing is said for a while, and its words
+/// come back as one [`WorkTriageHeard`].
+#[tauri::command]
+#[specta::specta]
+pub fn work_triage_listen(app: AppHandle, listen: bool) -> Result<(), String> {
+    let router = app.state::<Arc<TranscriptionManager>>().stream_router();
+    if !listen {
+        router.end_pause_watch();
+        return Ok(());
+    }
+    let audio = app.state::<Arc<AudioRecordingManager>>().inner().clone();
+    if audio.is_recording() {
+        return Err("Sona is already recording.".to_owned());
+    }
+    let generation = audio.cancel_generation();
+    let finisher = app.clone();
+    router.finish_at_pause(move || {
+        if audio.was_cancelled_since(generation) {
+            return;
+        }
+        if let Some(coordinator) = finisher.try_state::<TranscriptionCoordinator>() {
+            coordinator.send_finish("voice-triage");
+        }
+    });
+    crate::signal_handle::send_transcription_intent(
+        &app,
+        TranscriptionIntent::Triage,
+        "voice-triage",
+    );
+    Ok(())
+}
+
+/// The one answer a voice triage run gives the window, whatever ends it:
+/// the words it heard, or none when it ended before any were.
+pub(crate) struct TriageReply {
+    app: AppHandle,
+    heard: std::sync::Mutex<(Option<i64>, String)>,
+}
+
+impl TriageReply {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self {
+            app,
+            heard: std::sync::Mutex::new((None, String::new())),
+        }
+    }
+
+    pub(crate) fn heard(&self, history_id: Option<i64>, said: String) {
+        *self
+            .heard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = (history_id, said);
+    }
+}
+
+impl Drop for TriageReply {
+    fn drop(&mut self) {
+        let (history_id, said) = std::mem::take(
+            self.heard
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        let app = self.app.clone();
+        app.state::<Arc<TranscriptionManager>>()
+            .stream_router()
+            .end_pause_watch();
+        tauri::async_runtime::spawn(async move {
+            let decision = if said.trim().is_empty() {
+                None
+            } else {
+                let history = app.state::<Arc<HistoryManager>>();
+                let meetings = app.state::<Arc<MeetingSessionManager>>();
+                with_meetings(&history, &meetings, |history, meetings| {
+                    Ok(triage_said(
+                        &said,
+                        &Lexicon::read(history, meetings)?,
+                        &chrono::Local::now(),
+                    ))
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    log::warn!("A triage decision could not be read: {error}");
+                    None
+                })
+            };
+            let heard = WorkTriageHeard {
+                said,
+                history_id,
+                decision,
+            };
+            if heard.emit(&app).is_err() {
+                log::warn!("A triage decision could not reach the window");
+            }
+        });
+    }
 }
 
 /// Which 30 ms frames of the recording hold a voice; none when the
