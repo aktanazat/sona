@@ -1051,8 +1051,16 @@ final class WorkStore {
 
     func undo() {
         guard let last = undoStack.popLast() else { return }
+        var taken = [last]
+        while let group = last.group, let next = undoStack.last, next.group == group {
+            taken.append(undoStack.removeLast())
+        }
         undoTitle = undoStack.last?.title
-        switch last.reversal {
+        for undo in taken { reverse(undo.reversal) }
+    }
+
+    private func reverse(_ reversal: Reversal) {
+        switch reversal {
         case let .patches(groups):
             for group in groups { send(group.patch, to: group.ids, undo: nil) }
         case let .archive(ids):
@@ -1570,8 +1578,11 @@ final class WorkStore {
 
     private struct Undo {
         let id: Int
-        let title: String
+        var title: String
         let reversal: Reversal
+        /// Entries with one group undo together; each still goes on its own
+        /// when its change fails.
+        var group: Int?
     }
 
     private enum Reversal {
@@ -1847,18 +1858,15 @@ final class WorkStore {
     /// Where the undo list stands, for `joinUndo(since:as:)`.
     var undoMark: Int { undoSerial }
 
-    /// Folds the field changes remembered since `mark` into the first of
-    /// them, so one undo takes back a decision that made several.
+    /// Groups the changes remembered since `mark` under one title, so one
+    /// undo takes back a decision that made several, while a change that
+    /// fails still drops only its own entry.
     func joinUndo(since mark: Int, as title: String) {
-        let joined = undoStack.filter { $0.id > mark }
-        guard let first = joined.first, joined.count > 1 else { return }
-        var groups: [(ids: [String], patch: WorkPatch)] = []
-        for undo in joined.reversed() {
-            guard case let .patches(reversed) = undo.reversal else { return }
-            groups += reversed
+        guard let first = undoStack.first(where: { $0.id > mark }) else { return }
+        for index in undoStack.indices where undoStack[index].id > mark {
+            undoStack[index].group = first.id
+            undoStack[index].title = title
         }
-        undoStack.removeAll { $0.id > mark }
-        undoStack.append(Undo(id: first.id, title: title, reversal: .patches(groups)))
         undoTitle = title
     }
 

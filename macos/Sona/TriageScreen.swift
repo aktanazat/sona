@@ -39,6 +39,16 @@ final class VoiceTriage {
     /// What the last words did, or why they did nothing.
     private(set) var last: String?
 
+    /// The task the words being recorded are about: the one highlighted
+    /// when listening began, so a click or arrow while they are worked on
+    /// cannot move them to another.
+    private var hearing: String?
+    /// The task the last words accepted and moved on from, with where the
+    /// undo list stood before them. Fields said next, with no verdict, are
+    /// the rest of that sentence cut by a pause ("Accept… assign to Dana"),
+    /// so they go to it and undo with it.
+    @ObservationIgnored private var accepted: (id: String, mark: Int, summary: String)?
+
     private unowned let model: AppModel
 
     init(model: AppModel) {
@@ -86,6 +96,8 @@ final class VoiceTriage {
 
     func heard(_ line: Data) {
         guard phase == .listening, let event = try? Core.payload(line) as WorkTriageHeardEvent else { return }
+        let previous = accepted
+        accepted = nil
         let said = event.said.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else {
             pause("Nothing was said for a while.")
@@ -96,11 +108,11 @@ final class VoiceTriage {
             listen()
             return
         }
-        guard let id = settle() else {
+        guard let id = hearing else {
             stop()
             return
         }
-        apply(decision, to: id)
+        apply(decision, to: id, after: previous)
         guard phase == .listening else { return }
         if settle() == nil {
             stop()
@@ -111,6 +123,7 @@ final class VoiceTriage {
 
     private func listen() {
         phase = .listening
+        hearing = model.workFocus.highlighted
         let model = model
         Task {
             do {
@@ -144,7 +157,15 @@ final class VoiceTriage {
         return current
     }
 
-    private func apply(_ decision: TriageSaid, to id: String) {
+    /// "#12", how the list names a task.
+    private func named(_ id: String) -> String {
+        model.workRows([id]).first.map { "#\($0.number)" } ?? "The task"
+    }
+
+    /// The task being listened for, as the list names it.
+    var listeningFor: String? { hearing.map(named) }
+
+    private func apply(_ decision: TriageSaid, to id: String, after previous: (id: String, mark: Int, summary: String)?) {
         let focus = model.workFocus
         let work = model.work
         switch decision {
@@ -161,7 +182,20 @@ final class VoiceTriage {
             last = title.map { "Undid: \($0)" } ?? "Nothing to undo."
         case .stop:
             stop()
+        case let .decide(nil, patch, summary, _) where patch != WorkPatch() && previous != nil:
+            guard let previous else { return }
+            let joined = "\(previous.summary), \(summary)"
+            model.changeWork {
+                work.update([previous.id], patch)
+                work.joinUndo(since: previous.mark, as: joined)
+            }
+            accepted = (previous.id, previous.mark, joined)
+            last = "\(named(previous.id)): \(joined)"
         case let .decide(verdict, patch, summary, next):
+            guard model.workRows([id]).first?.status == .triage else {
+                last = "\(named(id)) was already decided."
+                return
+            }
             var original: String?
             if case let .duplicate(number) = verdict {
                 original = work.items?.first { $0.number == number && $0.id != id }?.id
@@ -182,8 +216,9 @@ final class VoiceTriage {
                 if patch != WorkPatch() { work.update([id], patch) }
                 work.joinUndo(since: mark, as: summary)
             }
+            if verdict == .accept, next { accepted = (id, mark, summary) }
             focus.highlighted = after
-            last = summary
+            last = "\(named(id)): \(summary)"
         }
     }
 
@@ -205,7 +240,7 @@ private struct VoiceTriageBar: View {
                 .foregroundStyle(listening ? Theme.accent : Theme.inkSecondary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(listening ? "Listening. Say accept, decline, or next." : "Paused")
+                Text(listening ? "Listening for \(voice.listeningFor ?? "a task"). Say accept, decline, or next." : "Paused")
                     .bodyText(13)
                     .lineLimit(1)
                 if let last = voice.last {
