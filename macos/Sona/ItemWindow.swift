@@ -11,6 +11,7 @@ enum ItemWindow: Codable, Hashable {
 struct ItemWindowView: View {
     let item: ItemWindow
     @Environment(AppModel.self) private var model
+    @State private var paneWidth: CGFloat = 0
 
     var body: some View {
         Group {
@@ -22,6 +23,8 @@ struct ItemWindowView: View {
         }
         .frame(minWidth: 640, minHeight: 480)
         .background(Theme.page.ignoresSafeArea())
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
+        .environment(\.paneWidth, paneWidth)
         .onAppear { model.windowOpened() }
         .onDisappear { model.windowClosed() }
     }
