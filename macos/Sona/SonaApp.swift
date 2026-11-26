@@ -32,6 +32,7 @@ struct SonaApp: App {
         .restorationBehavior(.disabled)
         .commands {
             CommandGroup(replacing: .newItem) { OpenInWindowMenuItem(model: model) }
+            SendSelectionCommand(model: model)
             CommandGroup(replacing: .sidebar) { SidebarMenuItem(model: model) }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
@@ -350,7 +351,7 @@ struct SidebarMenuItem: View {
     let model: AppModel
 
     var body: some View {
-        Button(model.sidebarHidden ? "Show Sidebar" : "Hide Sidebar") { model.sidebarHidden.toggle() }
+        Button(model.sidebarHidden ? "Show Sidebar" : "Hide Sidebar") { model.setSidebarHidden(!model.sidebarHidden) }
             .keyboardShortcut("s", modifiers: [.control, .command])
     }
 }

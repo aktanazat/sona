@@ -850,9 +850,11 @@ struct TranscriptTurnRow: View {
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Correct these words" : "")
             .id(segment.base.segmentId)
-            .draggable(QuotedSelection(
-                text: "\(store.speakerName(turn.speakerId)): \(store.displayedText(segment))",
-                link: source(segment)).draft)
+            .modifier(QuoteDrag(quote: !segment.removed && !store.transcriptDeleted && store.canExport
+                ? QuotedSelection(
+                    text: "\(store.speakerName(turn.speakerId)): \(store.displayedText(segment))",
+                    link: source(segment)).draft
+                : nil))
             .contextMenu {
                 if store.canPlay(segment.base.segmentId) {
                     Button("Listen with context") { store.playContribution(segment.base.segmentId) }
@@ -874,6 +876,20 @@ struct TranscriptTurnRow: View {
     private func source(_ segment: TranscriptEffectiveSegment) -> String {
         let milliseconds = max(0, segment.base.startOffsetNs) / 1_000_000
         return "sona://meeting/\(store.openSessionId ?? "")?atMs=\(milliseconds)&segmentId=\(segment.base.segmentId)"
+    }
+}
+
+/// A transcript line dragged out as a quote with a link back; a line that
+/// is out of the record, or a meeting that may not leave Sona, has none.
+private struct QuoteDrag: ViewModifier {
+    let quote: String?
+
+    func body(content: Content) -> some View {
+        if let quote {
+            content.draggable(quote)
+        } else {
+            content
+        }
     }
 }
 

@@ -23,7 +23,7 @@ struct Shell: View {
                 } else {
                     NavigationSplitView(columnVisibility: Binding(
                         get: { .all },
-                        set: { model.sidebarHidden = $0 == .detailOnly })) {
+                        set: { model.setSidebarHidden($0 == .detailOnly) })) {
                         Sidebar()
                             .navigationSplitViewColumnWidth(Theme.sidebarWidth)
                             .toolbar(removing: .sidebarToggle)
@@ -504,7 +504,7 @@ struct Sidebar: View {
                         .overlay(alignment: .top) {
                             if endTargeted { Theme.accent.frame(height: 2).allowsHitTesting(false) }
                         }
-                        .onDrop(of: [.utf8PlainText], isTargeted: $endTargeted) { _ in
+                        .onDrop(of: [.sidebarFavorite], isTargeted: $endTargeted) { _ in
                             guard let dragged = draggedFavorite else { return false }
                             model.work.moveFavorite(dragged, into: nil, at: nil)
                             draggedFavorite = nil
@@ -784,9 +784,15 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
             }
             .onDrag {
                 dragged = entry
-                return NSItemProvider(object: "sona favorite" as NSString)
+                return NSItemProvider(item: Data() as NSData, typeIdentifier: UTType.sidebarFavorite.identifier)
             }
-            .onDrop(of: [.utf8PlainText], delegate: self)
+            .onDrop(of: [.sidebarFavorite, .utf8PlainText], delegate: self)
+    }
+
+    /// A favorite of this sidebar being dragged, told by its type: the row
+    /// it came from is what `dragged` recorded when that drag began.
+    private func favoriteDrag(_ info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.sidebarFavorite])
     }
 
     private var shown: (target: WorkFavoriteEntry, after: Bool)? {
@@ -795,7 +801,7 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
     }
 
     private func landing(_ info: DropInfo) -> FavoriteDrop? {
-        guard let dragged, dragged != entry else { return nil }
+        guard favoriteDrag(info), let dragged, dragged != entry else { return nil }
         let y = info.location.y
         switch (dragged, entry) {
         case (.folder, _) where folder != nil:
@@ -808,14 +814,14 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        dragged == nil ? takeTasks != nil : landing(info) != nil
+        favoriteDrag(info) ? landing(info) != nil : takeTasks != nil && info.hasItemsConforming(to: [.utf8PlainText])
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        if dragged == nil {
-            tasksOver = entry
-        } else {
+        if favoriteDrag(info) {
             drop = landing(info)
+        } else {
+            tasksOver = entry
         }
         return DropProposal(operation: .move)
     }
@@ -827,7 +833,7 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         defer { (drop, dragged, tasksOver) = (nil, nil, nil) }
-        guard let dragged else {
+        guard favoriteDrag(info) else {
             guard let takeTasks else { return false }
             for provider in info.itemProviders(for: [.utf8PlainText]) {
                 _ = provider.loadObject(ofClass: NSString.self) { text, _ in
@@ -838,10 +844,15 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
             }
             return true
         }
-        guard let landing = landing(info) else { return false }
+        guard let dragged, let landing = landing(info) else { return false }
         land(dragged, landing)
         return true
     }
+}
+
+extension UTType {
+    /// A favorite dragged within the sidebar.
+    static let sidebarFavorite = UTType(exportedAs: "com.aktanazat.sona.sidebar-favorite")
 }
 
 /// A favorites folder: a chevron that opens and closes it, and its name,

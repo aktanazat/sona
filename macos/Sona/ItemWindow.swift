@@ -86,7 +86,9 @@ private struct MeetingWindow: View {
 }
 
 /// The note has an editor of its own. The main window's editor saves and
-/// lets go of it first; a note that cannot be saved there stays there.
+/// lets go of it first; a note that cannot be saved there stays there. A
+/// window whose note cannot be saved comes back with its words, as the main
+/// editor keeps a note it could not save.
 private struct NoteWindow: View {
     let id: String
     @Environment(AppModel.self) private var model
@@ -108,6 +110,10 @@ private struct NoteWindow: View {
         }
         .task {
             guard store == nil else { return }
+            if let unsaved = model.windowNotes.first(where: { $0.saved?.id == id }) {
+                store = unsaved
+                return
+            }
             let main = model.scratchpad
             if main.editing, main.saved?.id == id {
                 await main.close()
@@ -128,8 +134,11 @@ private struct NoteWindow: View {
         .onDisappear {
             guard let store else { return }
             Task {
-                await store.flush()
-                model.windowNotes.removeAll { $0 === store }
+                if await store.flush() {
+                    model.windowNotes.removeAll { $0 === store }
+                } else {
+                    model.openWindow(.note(id))
+                }
             }
         }
     }

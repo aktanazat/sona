@@ -93,6 +93,16 @@
                 </array>
             </dict>
         </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.aktanazat.sona.sidebar-favorite</string>
+            <key>UTTypeDescription</key>
+            <string>Sona sidebar favorite</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+        </dict>
     </array>
 </dict>
 </plist>

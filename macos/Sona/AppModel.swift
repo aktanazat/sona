@@ -339,8 +339,18 @@ final class AppModel {
     }
     /// The first key of a two-key shortcut, while the second is awaited.
     var chordHint: String?
-    var sidebarHidden = UserDefaults.standard.bool(forKey: "sidebarHidden") {
+    private(set) var sidebarHidden = UserDefaults.standard.bool(forKey: "sidebarHidden") {
         didSet { UserDefaults.standard.set(sidebarHidden, forKey: "sidebarHidden") }
+    }
+
+    /// The page is built again when the sidebar comes or goes, so a field
+    /// being typed in on the main window is left first and saves what it
+    /// holds, as a click elsewhere would.
+    func setSidebarHidden(_ hidden: Bool) {
+        guard hidden != sidebarHidden else { return }
+        let main = NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("main") == true }
+        main?.makeFirstResponder(nil)
+        DispatchQueue.main.async { self.sidebarHidden = hidden }
     }
     /// The question a `sona://search` link carried, held until the palette
     /// opens and reads it.
