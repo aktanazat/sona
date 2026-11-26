@@ -6,6 +6,8 @@ import SwiftUI
 struct MeetingReviewView: View {
     let store: MeetingsStore
     let settings: MeetingSettingsStore
+    /// In a window of its own, with no list to go back to.
+    var windowed = false
     var openPerson: (String) -> Void = { _ in }
     var openMeetingSettings: () -> Void = {}
     /// Opens the agent with a question about this meeting begun, for the
@@ -18,7 +20,7 @@ struct MeetingReviewView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            Page(back: PageBack("Meetings") { store.closeReview() }) {
+            Page(back: windowed ? nil : PageBack("Meetings") { store.closeReview() }) {
                 if let snapshot = store.snapshot {
                     pane(snapshot)
                 } else {
@@ -848,6 +850,11 @@ struct TranscriptTurnRow: View {
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Correct these words" : "")
             .id(segment.base.segmentId)
+            .modifier(QuoteDrag(quote: !segment.removed && !store.transcriptDeleted && store.canExport
+                ? QuotedSelection(
+                    text: "\(store.speakerName(turn.speakerId)): \(store.displayedText(segment))",
+                    link: source(segment)).draft
+                : nil))
             .contextMenu {
                 if store.canPlay(segment.base.segmentId) {
                     Button("Listen with context") { store.playContribution(segment.base.segmentId) }
@@ -855,16 +862,33 @@ struct TranscriptTurnRow: View {
                 if !segment.removed && !store.transcriptDeleted {
                     Button("Save passage…") { savingPassage = segment }
                     Button("Copy source link") {
-                        let milliseconds = max(0, segment.base.startOffsetNs) / 1_000_000
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            "sona://meeting/\(store.openSessionId ?? "")?atMs=\(milliseconds)&segmentId=\(segment.base.segmentId)", forType: .string)
+                        NSPasteboard.general.setString(source(segment), forType: .string)
                     }
                 }
             }
             if store.relisten.fix?.segmentId == segment.base.segmentId {
                 RelistenPrompt(store: store.relisten)
             }
+        }
+    }
+
+    private func source(_ segment: TranscriptEffectiveSegment) -> String {
+        let milliseconds = max(0, segment.base.startOffsetNs) / 1_000_000
+        return "sona://meeting/\(store.openSessionId ?? "")?atMs=\(milliseconds)&segmentId=\(segment.base.segmentId)"
+    }
+}
+
+/// A transcript line dragged out as a quote with a link back; a line that
+/// is out of the record, or a meeting that may not leave Sona, has none.
+private struct QuoteDrag: ViewModifier {
+    let quote: String?
+
+    func body(content: Content) -> some View {
+        if let quote {
+            content.draggable(quote)
+        } else {
+            content
         }
     }
 }

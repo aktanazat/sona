@@ -34,8 +34,10 @@ final class WorkStore {
     private(set) var loading = false
     private(set) var listError: String?
     private(set) var mutationError: String?
-    private(set) var detail: WorkItemDetail?
-    private(set) var detailError: String?
+    /// Each shown task's full read, by item id: the main window's open task
+    /// and any task open in a window of its own.
+    private(set) var details: [String: WorkItemDetail] = [:]
+    private(set) var detailErrors: [String: String] = [:]
     private(set) var working: [String: WorkSession] = [:]
     private(set) var sessions: [String: [WorkSession]] = [:]
     private(set) var sessionsError: String?
@@ -73,7 +75,9 @@ final class WorkStore {
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var refreshAgain = false
-    @ObservationIgnored private var detailId: String?
+    /// How many views show each task's detail; a refresh reads these again.
+    @ObservationIgnored private var detailViewers: [String: Int] = [:]
+    @ObservationIgnored private var detailReads: [String: Int] = [:]
     @ObservationIgnored private var queue: Task<Void, Never>?
     @ObservationIgnored private var pending = 0
     @ObservationIgnored private var reloadWhenIdle = false
@@ -124,22 +128,36 @@ final class WorkStore {
         } while refreshAgain
     }
 
+    func showDetail(_ id: String) {
+        detailViewers[id, default: 0] += 1
+    }
+
+    func hideDetail(_ id: String) {
+        let left = (detailViewers[id] ?? 1) - 1
+        detailViewers[id] = left > 0 ? left : nil
+        guard left <= 0 else { return }
+        details[id] = nil
+        detailErrors[id] = nil
+        detailReads[id] = nil
+    }
+
     func loadDetail(_ id: String) async {
-        detailId = id
+        let read = (detailReads[id] ?? 0) + 1
+        detailReads[id] = read
         do {
             let result: WorkItemDetail = try await core.request("work_item", IdParams(id: id))
-            guard detailId == id else { return }
+            guard detailReads[id] == read else { return }
             if pending > 0 {
                 reloadWhenIdle = true
-                if detail?.item.id == id { return }
+                if details[id] != nil { return }
             }
-            detail = result
-            detailError = nil
+            details[id] = result
+            detailErrors[id] = nil
             fold(result.item)
         } catch {
-            guard detailId == id else { return }
-            detail = nil
-            detailError = error.localizedDescription
+            guard detailReads[id] == read else { return }
+            details[id] = nil
+            detailErrors[id] = error.localizedDescription
         }
     }
 
@@ -215,7 +233,7 @@ final class WorkStore {
     }
 
     func attach(_ sources: [WorkAttachmentSource], to itemId: String, comment commentId: String? = nil) async -> Int {
-        let had = Set(detail.map { $0.item.id == itemId ? $0.attachments.map(\.id) : [] } ?? [])
+        let had = Set(details[itemId]?.attachments.map(\.id) ?? [])
         var failure: String?
         var repeats = 0
         for source in sources {
@@ -650,10 +668,11 @@ final class WorkStore {
             do {
                 let relation: WorkRelation = try await self.core.request("work_relation_add", RelationParams(
                     operationId: Self.newId(), fromId: from, toId: to, kind: kind))
-                if var shown = self.detail, [relation.fromId, relation.toId].contains(shown.item.id),
-                   !shown.relations.contains(where: { $0.id == relation.id }) {
+                for id in [relation.fromId, relation.toId] {
+                    guard var shown = self.details[id], !shown.relations.contains(where: { $0.id == relation.id })
+                    else { continue }
                     shown.relations.append(relation)
-                    self.detail = shown
+                    self.details[id] = shown
                 }
             } catch {
                 self.mutationError = error.localizedDescription
@@ -662,15 +681,18 @@ final class WorkStore {
     }
 
     func removeRelation(_ id: String) {
-        let removed = detail?.relations.first { $0.id == id }
-        if removed != nil { detail?.relations.removeAll { $0.id == id } }
+        let removed = details.values.lazy.flatMap(\.relations).first { $0.id == id }
+        if let removed {
+            for shown in [removed.fromId, removed.toId] { details[shown]?.relations.removeAll { $0.id == id } }
+        }
         enqueue {
             do {
                 try await self.core.request("work_relation_remove", OperationIdParams(operationId: Self.newId(), id: id))
             } catch {
-                if let removed, var shown = self.detail, [removed.fromId, removed.toId].contains(shown.item.id) {
-                    shown.relations.append(removed)
-                    self.detail = shown
+                if let removed {
+                    for shown in [removed.fromId, removed.toId] where self.details[shown] != nil {
+                        self.details[shown]?.relations.append(removed)
+                    }
                 }
                 self.mutationError = error.localizedDescription
             }
@@ -680,7 +702,7 @@ final class WorkStore {
     /// An item's open proposals, oldest first: the open task's own read when
     /// it is that item, else the list's.
     func proposals(for id: String) -> [WorkProposal] {
-        if let detail, detail.item.id == id { return detail.proposals }
+        if let detail = details[id] { return detail.proposals }
         return proposals[id] ?? []
     }
 
@@ -1599,9 +1621,9 @@ final class WorkStore {
             listError = error.localizedDescription
         }
         await loadLifecycle()
-        if let detailId {
-            await loadDetail(detailId)
-            await loadSessions(detailId)
+        for id in detailViewers.keys.sorted() {
+            await loadDetail(id)
+            await loadSessions(id)
         }
     }
 
@@ -1696,10 +1718,10 @@ final class WorkStore {
             let kept = open.filter { !wanted.contains($0.id) }
             proposals[item] = kept.isEmpty ? nil : kept
         }
-        if var shown = detail, shown.proposals.contains(where: { wanted.contains($0.id) }) {
+        for (id, var shown) in details where shown.proposals.contains(where: { wanted.contains($0.id) }) {
             for proposal in shown.proposals where wanted.contains(proposal.id) { taken[proposal.id] = proposal }
             shown.proposals.removeAll { wanted.contains($0.id) }
-            detail = shown
+            details[id] = shown
         }
         return Self.oldestFirst(Array(taken.values))
     }
@@ -1708,9 +1730,9 @@ final class WorkStore {
     private func returnProposals(_ taken: [WorkProposal]) {
         for (item, back) in Dictionary(grouping: taken, by: \.itemId) {
             proposals[item] = Self.oldestFirst((proposals[item] ?? []) + back)
-            if var shown = detail, shown.item.id == item {
+            if var shown = details[item] {
                 shown.proposals = Self.oldestFirst(shown.proposals + back)
-                detail = shown
+                details[item] = shown
             }
         }
     }
@@ -1766,9 +1788,10 @@ final class WorkStore {
             items = rows
             keepTime()
         }
-        if var shown = detail, ids.contains(shown.item.id) {
+        for id in ids {
+            guard var shown = details[id] else { continue }
             transform(&shown.item)
-            detail = shown
+            details[id] = shown
         }
     }
 

@@ -9,6 +9,7 @@ struct Shell: View {
     @Environment(AppModel.self) private var model
     @State private var sharedNote: ScratchNote?
     @State private var paneWidth: CGFloat = 0
+    @State private var dropTargeted = false
 
     var body: some View {
         ZStack {
@@ -17,31 +18,53 @@ struct Shell: View {
             } else if model.onboarding.step != .done {
                 OnboardingView(store: model.onboarding).keepsWindowToolbar()
             } else {
-                NavigationSplitView(columnVisibility: .constant(.all)) {
-                    Sidebar()
-                        .navigationSplitViewColumnWidth(Theme.sidebarWidth)
-                        .toolbar(removing: .sidebarToggle)
-                } detail: {
-                    VStack(spacing: 0) {
-                        if model.coreStopped {
-                            CoreStoppedBanner()
-                        }
-                        content
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if model.sidebarHidden {
+                    pane
+                } else {
+                    NavigationSplitView(columnVisibility: Binding(
+                        get: { .all },
+                        set: { model.setSidebarHidden($0 == .detailOnly) })) {
+                        Sidebar()
+                            .navigationSplitViewColumnWidth(Theme.sidebarWidth)
+                            .toolbar(removing: .sidebarToggle)
+                    } detail: {
+                        pane
                     }
-                    .background(Theme.page.ignoresSafeArea())
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
-                    .environment(\.paneWidth, paneWidth)
-                    .toolbar(removing: .title)
                 }
                 if model.paletteShown {
                     CommandPalette()
                         .transition(.identity)
                 }
+                if dropTargeted {
+                    RoundedRectangle(cornerRadius: Theme.radiusCard)
+                        .strokeBorder(Theme.accent, lineWidth: 2)
+                        .overlay {
+                            Text("Drop audio to import")
+                                .bodyText(14)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .floatingControl(model.about.material)
+                        }
+                        .padding(6)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .background(Theme.page.ignoresSafeArea())
         .frame(minWidth: 900, minHeight: 640)
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            guard model.ready, model.onboarding.step == .done else { return false }
+            let model = model
+            Task {
+                for provider in providers {
+                    guard let data = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? Data,
+                          let url = URL(dataRepresentation: data, relativeTo: nil),
+                          ImportMedia.extensions.contains(url.pathExtension.lowercased()) else { continue }
+                    model.open(url: url)
+                }
+            }
+            return true
+        }
         .sheet(item: Bindable(model).sheet) { sheet in
             switch sheet {
             case .shortcuts:
@@ -88,14 +111,37 @@ struct Shell: View {
                 SaveTemplateSheet(id: id).environment(model)
             case let .problemReport(historyID):
                 ProblemReportSheet(historyID: historyID).environment(model)
-            case let .quicklinkEditor(id):
-                QuicklinkEditor(store: model.quicklinks, id: id)
             case let .quicklinkArgument(id):
                 QuicklinkArgumentSheet(link: model.quicklinks.links.first { $0.id == id }) {
                     try model.openQuicklink(id, argument: $0)
                 }
             }
         }
+    }
+
+    /// The page beside the sidebar. With the sidebar hidden it is the whole
+    /// window, outside the split view: a collapsed split view's toolbar
+    /// dropped the page's bar.
+    private var pane: some View {
+        VStack(spacing: 0) {
+            if model.coreStopped {
+                CoreStoppedBanner()
+            }
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Theme.page.ignoresSafeArea())
+        .overlay(alignment: .bottom) {
+            if let first = model.chordHint {
+                ChordHint(first: first)
+                    .padding(.bottom, 28)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
+        .environment(\.paneWidth, model.sidebarHidden ? max(0, paneWidth - Theme.windowControlsWidth) : paneWidth)
+        .toolbar(removing: .title)
+        .keepsWindowToolbar()
     }
 
     /// The core is starting, or could not. A failed start is not the end:
@@ -118,84 +164,80 @@ struct Shell: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.showingSettings {
-            SettingsScreen()
-        } else {
-            switch model.place {
-            case .capture:
-                CaptureScreen()
-                    .overlay(alignment: .bottomLeading) { UndoToast() }
-            case .activity:
-                ActivityScreen()
-            case .library:
-                LibraryScreen(
-                    store: model.library,
-                    importAudio: { model.showSettings(.importing) },
-                    addCorrection: { left, right in
-                        model.vocabulary.add(kind: .vocabulary, left: left, right: right)
-                    })
-            case .meetings:
-                MeetingsPlace()
-            case .people:
-                PeopleScreen(
-                    store: model.people,
-                    openMeeting: model.openMeeting,
-                    openContribution: { sessionId, atMilliseconds in
-                        model.meetings.open(sessionId, atMilliseconds: atMilliseconds)
-                        model.go(.meetings)
-                    },
-                    ingestDocument: { model.showSettings(.importing) },
-                    deleteDocument: { id in Task { await model.documents.delete(id: id) } })
-            case .scratchpad:
-                ScratchpadView(store: model.scratchpad, share: { note in
-                    Task {
-                        await model.scratchpad.flush()
-                        guard let saved = model.scratchpad.saved,
-                              saved.id == note.id,
-                              saved.body == model.scratchpad.body else { return }
-                        sharedNote = saved
-                    }
-                }, openSource: { model.open(link: $0) })
-                    .sheet(item: $sharedNote) { note in
-                        CloudNoteShareView(note: note)
-                    }
-            case .projects:
-                ProjectsView(
-                    store: model.projects,
-                    people: model.plannerPeople,
-                    peopleUnavailable: model.people.entries == nil || model.people.listFailed,
-                    material: model.about.material,
-                    photoRevision: model.people.photoRevision,
-                    openEvidence: model.openPlanningEvidence,
-                    discussProject: model.discussProject,
-                    planWithSona: model.planWithSona,
-                    showCalendar: { model.go(.calendar) })
-            case .calendar:
-                PlannerCalendarView(
-                    store: model.projects,
-                    material: model.about.material,
-                    openProject: model.openProject,
-                    openMeeting: model.openMeeting,
-                    showProjects: { model.go(.projects) })
-            case .tasks:
-                TasksScreen()
-            case .triage:
-                TriageScreen()
-            case .today:
-                MorningPlanView()
-            case .shared:
-                SharedPagesView()
-            case .inbox:
-                InboxScreen()
-            case .archive:
-                TaskArchiveScreen()
-            case .loops:
-                LoopsScreen()
-            case .initiatives:
-                InitiativesScreen(store: model.projects, people: model.plannerPeople, labels: model.work.labels, openProject: model.openProject)
-            case .updates:
-                UpdatesScreen()
-            }
+        switch model.place {
+        case .capture:
+            CaptureScreen()
+                .overlay(alignment: .bottomLeading) { UndoToast() }
+        case .activity:
+            ActivityScreen()
+        case .library:
+            LibraryScreen(
+                store: model.library,
+                importAudio: { model.showSettings(.importing) },
+                addCorrection: { left, right in
+                    model.vocabulary.add(kind: .vocabulary, left: left, right: right)
+                })
+        case .meetings:
+            MeetingsPlace()
+        case .people:
+            PeopleScreen(
+                store: model.people,
+                openMeeting: model.openMeeting,
+                openContribution: { sessionId, atMilliseconds in
+                    model.meetings.open(sessionId, atMilliseconds: atMilliseconds)
+                    model.go(.meetings)
+                },
+                ingestDocument: { model.showSettings(.importing) },
+                deleteDocument: { id in Task { await model.documents.delete(id: id) } })
+        case .scratchpad:
+            ScratchpadView(store: model.scratchpad, share: { note in
+                Task {
+                    await model.scratchpad.flush()
+                    guard let saved = model.scratchpad.saved,
+                          saved.id == note.id,
+                          saved.body == model.scratchpad.body else { return }
+                    sharedNote = saved
+                }
+            }, openSource: { model.open(link: $0) })
+                .sheet(item: $sharedNote) { note in
+                    CloudNoteShareView(note: note)
+                }
+        case .projects:
+            ProjectsView(
+                store: model.projects,
+                people: model.plannerPeople,
+                peopleUnavailable: model.people.entries == nil || model.people.listFailed,
+                material: model.about.material,
+                photoRevision: model.people.photoRevision,
+                openEvidence: model.openPlanningEvidence,
+                discussProject: model.discussProject,
+                planWithSona: model.planWithSona,
+                showCalendar: { model.go(.calendar) })
+        case .calendar:
+            PlannerCalendarView(
+                store: model.projects,
+                material: model.about.material,
+                openProject: model.openProject,
+                openMeeting: model.openMeeting,
+                showProjects: { model.go(.projects) })
+        case .tasks:
+            TasksScreen()
+        case .triage:
+            TriageScreen()
+        case .today:
+            MorningPlanView()
+        case .shared:
+            SharedPagesView()
+        case .inbox:
+            InboxScreen()
+        case .archive:
+            TaskArchiveScreen()
+        case .loops:
+            LoopsScreen()
+        case .initiatives:
+            InitiativesScreen(store: model.projects, people: model.plannerPeople, labels: model.work.labels, openProject: model.openProject)
+        case .updates:
+            UpdatesScreen()
         }
     }
 }
@@ -387,6 +429,7 @@ struct MeetingsPlace: View {
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
     @State private var draggedFavorite: WorkFavoriteEntry?
+    @State private var tasksOver: WorkFavoriteEntry?
     @State private var favoriteDrop: FavoriteDrop?
     @State private var endTargeted = false
     @State private var renamingFolder: String?
@@ -440,71 +483,47 @@ struct Sidebar: View {
             .frame(height: Theme.headerHeight)
             .padding(.bottom, Space.xs)
 
-            ScrollViewReader { scroller in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: Space.xxs) {
-                        let favorites = model.work.favorites
-                        let favoriteShown = favorites.contains(where: favoriteOpen)
-                        ForEach(Place.sidebar) { place in
-                            SidebarItem(
-                                icon: place.icon,
-                                title: place.title,
-                                selected: model.place.parent == place && !model.showingSettings && !favoriteShown,
-                                count: count(place),
-                                live: place == .capture && model.capture != .idle
-                                    || place == .meetings && model.live.live != nil
-                            ) {
-                                model.go(place)
-                            }
-                        }
-                        favoritesSection
-                        gap
-                            .overlay(alignment: .top) {
-                                if endTargeted { Theme.accent.frame(height: 2).allowsHitTesting(false) }
-                            }
-                            .onDrop(of: [.utf8PlainText], isTargeted: $endTargeted) { _ in
-                                guard let dragged = draggedFavorite else { return false }
-                                model.work.moveFavorite(dragged, into: nil, at: nil)
-                                draggedFavorite = nil
-                                return true
-                            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: Space.xxs) {
+                    let favorites = model.work.favorites
+                    let favoriteShown = favorites.contains(where: favoriteOpen)
+                    ForEach(Place.sidebar) { place in
                         SidebarItem(
-                            icon: Place.loops.icon,
-                            title: Place.loops.title,
-                            selected: model.place == .loops && !model.showingSettings && !favoriteShown
+                            icon: place.icon,
+                            title: place.title,
+                            selected: model.place.parent == place && !favoriteShown,
+                            count: count(place),
+                            live: place == .capture && model.capture != .idle
+                                || place == .meetings && model.live.live != nil
                         ) {
-                            model.go(.loops)
-                        }
-                        SidebarItem(
-                            icon: "gearshape",
-                            title: "Settings",
-                            selected: false
-                        ) {
-                            model.showSettings(model.showingSettings ? model.settingsPlace : .essentials)
-                        }
-                        .accessibilityAddTraits(model.showingSettings ? .isSelected : [])
-                        .id("settings")
-                        if model.showingSettings {
-                            ForEach(SettingsPlace.allCases.filter { $0 != .profile }) { page in
-                                SidebarSubItem(title: page.title, selected: model.settingsPlace == page) {
-                                    model.showSettings(page)
-                                }
-                                .id(page)
-                            }
+                            model.go(place)
                         }
                     }
-                    .padding(.bottom, Space.m)
+                    favoritesSection
+                    gap
+                        .overlay(alignment: .top) {
+                            if endTargeted { Theme.accent.frame(height: 2).allowsHitTesting(false) }
+                        }
+                        .onDrop(of: [.sidebarFavorite], isTargeted: $endTargeted) { _ in
+                            guard let dragged = draggedFavorite else { return false }
+                            model.work.moveFavorite(dragged, into: nil, at: nil)
+                            draggedFavorite = nil
+                            return true
+                        }
+                    SidebarItem(
+                        icon: Place.loops.icon,
+                        title: Place.loops.title,
+                        selected: model.place == .loops && !favoriteShown
+                    ) {
+                        model.go(.loops)
+                    }
+                    SidebarItem(icon: "gearshape", title: "Settings…", selected: false) {
+                        model.openSettings()
+                    }
                 }
-                .scrollIndicators(.never)
-                .onChange(of: model.showingSettings) { _, showing in
-                    guard showing else { return }
-                    withAnimation { scroller.scrollTo("settings", anchor: .top) }
-                }
-                .onChange(of: model.settingsPlace) { _, page in
-                    guard model.showingSettings else { return }
-                    withAnimation { scroller.scrollTo(page) }
-                }
+                .padding(.bottom, Space.m)
             }
+            .scrollIndicators(.never)
             SidebarProfileRow()
                 .padding(.bottom, Space.m)
         }
@@ -516,7 +535,6 @@ struct Sidebar: View {
     }
 
     private func favoriteOpen(_ favorite: WorkFavorite) -> Bool {
-        guard !model.showingSettings else { return false }
         switch favorite.kind {
         case .task:
             return model.place == .tasks && model.workFocus.opened(in: .tasks) == favorite.targetId
@@ -611,7 +629,18 @@ struct Sidebar: View {
     }
 
     private func favoritePlace(_ entry: WorkFavoriteEntry, in folder: String?) -> FavoritePlace {
-        FavoritePlace(entry: entry, folder: folder, dragged: $draggedFavorite, drop: $favoriteDrop) { dragged, drop in
+        var takeTasks: (([String]) -> Void)?
+        if case let .favorite(.project, project) = entry {
+            takeTasks = { ids in
+                let moving = model.workRows(ids).filter { $0.projectId != project }.map(\.id)
+                guard !moving.isEmpty else { return }
+                model.changeWork { model.work.update(moving, WorkPatch(projectId: .set(project))) }
+            }
+        }
+        return FavoritePlace(
+            entry: entry, folder: folder, dragged: $draggedFavorite, drop: $favoriteDrop,
+            tasksOver: $tasksOver, takeTasks: takeTasks
+        ) { dragged, drop in
             landFavorite(dragged, drop)
         }
     }
@@ -734,6 +763,9 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
     let folder: String?
     @Binding var dragged: WorkFavoriteEntry?
     @Binding var drop: FavoriteDrop?
+    /// The project favorite tasks dragged from a list are over.
+    @Binding var tasksOver: WorkFavoriteEntry?
+    let takeTasks: (([String]) -> Void)?
     let land: (WorkFavoriteEntry, FavoriteDrop) -> Void
 
     func body(content: Content) -> some View {
@@ -743,11 +775,24 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
                     Theme.accent.frame(height: 2).allowsHitTesting(false)
                 }
             }
+            .overlay {
+                if tasksOver == entry {
+                    RoundedRectangle(cornerRadius: Theme.radiusRow)
+                        .strokeBorder(Theme.accent, lineWidth: 2)
+                        .allowsHitTesting(false)
+                }
+            }
             .onDrag {
                 dragged = entry
-                return NSItemProvider(object: "sona favorite" as NSString)
+                return NSItemProvider(item: Data() as NSData, typeIdentifier: UTType.sidebarFavorite.identifier)
             }
-            .onDrop(of: [.utf8PlainText], delegate: self)
+            .onDrop(of: [.sidebarFavorite, .utf8PlainText], delegate: self)
+    }
+
+    /// A favorite of this sidebar being dragged, told by its type: the row
+    /// it came from is what `dragged` recorded when that drag began.
+    private func favoriteDrag(_ info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.sidebarFavorite])
     }
 
     private var shown: (target: WorkFavoriteEntry, after: Bool)? {
@@ -756,7 +801,7 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
     }
 
     private func landing(_ info: DropInfo) -> FavoriteDrop? {
-        guard let dragged, dragged != entry else { return nil }
+        guard favoriteDrag(info), let dragged, dragged != entry else { return nil }
         let y = info.location.y
         switch (dragged, entry) {
         case (.folder, _) where folder != nil:
@@ -768,21 +813,46 @@ private struct FavoritePlace: ViewModifier, DropDelegate {
         }
     }
 
-    func validateDrop(info: DropInfo) -> Bool { landing(info) != nil }
+    func validateDrop(info: DropInfo) -> Bool {
+        favoriteDrag(info) ? landing(info) != nil : takeTasks != nil && info.hasItemsConforming(to: [.utf8PlainText])
+    }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        drop = landing(info)
+        if favoriteDrag(info) {
+            drop = landing(info)
+        } else {
+            tasksOver = entry
+        }
         return DropProposal(operation: .move)
     }
 
-    func dropExited(info: DropInfo) { drop = nil }
+    func dropExited(info: DropInfo) {
+        drop = nil
+        if tasksOver == entry { tasksOver = nil }
+    }
 
     func performDrop(info: DropInfo) -> Bool {
-        defer { (drop, dragged) = (nil, nil) }
+        defer { (drop, dragged, tasksOver) = (nil, nil, nil) }
+        guard favoriteDrag(info) else {
+            guard let takeTasks else { return false }
+            for provider in info.itemProviders(for: [.utf8PlainText]) {
+                _ = provider.loadObject(ofClass: NSString.self) { text, _ in
+                    guard let text = text as? String else { return }
+                    let ids = text.split(separator: "\n").map(String.init)
+                    Task { @MainActor in takeTasks(ids) }
+                }
+            }
+            return true
+        }
         guard let dragged, let landing = landing(info) else { return false }
         land(dragged, landing)
         return true
     }
+}
+
+extension UTType {
+    /// A favorite dragged within the sidebar.
+    static let sidebarFavorite = UTType(exportedAs: "com.aktanazat.sona.sidebar-favorite")
 }
 
 /// A favorites folder: a chevron that opens and closes it, and its name,
@@ -922,33 +992,6 @@ private struct SidebarItem: View {
         .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityValue(live ? "In progress" : count.flatMap { $0.value > 0 ? "\($0.value) \($0.meaning)" : nil } ?? "")
-        .onHover { hovering = $0 }
-    }
-}
-
-/// A page under Settings, lined up with the titles above it.
-private struct SidebarSubItem: View {
-    let title: String
-    let selected: Bool
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(TypeScale.list)
-                .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
-                .padding(.leading, Space.s + 16 + Space.s)
-                .frame(maxWidth: .infinity, minHeight: Theme.sidebarRow, alignment: .leading)
-                .background(
-                    selected ? Theme.washSelected : (hovering ? Theme.wash : .clear),
-                    in: RoundedRectangle(cornerRadius: Theme.radiusRow)
-                )
-                .hoverFade(hovering)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
         .onHover { hovering = $0 }
     }
 }

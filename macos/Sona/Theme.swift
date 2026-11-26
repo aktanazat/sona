@@ -88,6 +88,9 @@ enum Theme {
     static let radiusDialog: CGFloat = 16
 
     static let sidebarWidth: CGFloat = 232
+    /// What the close, minimize and zoom buttons take of the toolbar's line
+    /// when no sidebar sits under them.
+    static let windowControlsWidth: CGFloat = 90
     static let sidebarRow: CGFloat = 28
     static let headerHeight: CGFloat = 44
     static let listRow: CGFloat = 36

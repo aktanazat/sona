@@ -138,6 +138,13 @@ struct ShortcutSheet: View {
         ],
     ]
 
+    /// The keys that may follow `first`, as the guide lists them.
+    static func chord(_ first: String) -> [(key: String, title: String)] {
+        columns.joined().flatMap { $0.entries }.compactMap { entry in
+            entry.keys.first { $0.hasPrefix(first + " ") }.map { (String($0.dropFirst(first.count + 1)), entry.title) }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -193,5 +200,34 @@ struct ShortcutSheet: View {
         .frame(height: 28)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(entry.title), \(entry.keys.joined(separator: " or "))")
+    }
+}
+
+/// The first key of a two-key shortcut was pressed: what each next key does,
+/// until one is pressed or the wait runs out.
+struct ChordHint: View {
+    let first: String
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let next = ShortcutSheet.chord(first)
+        HStack(spacing: 14) {
+            Shortcut(first)
+            ForEach(next, id: \.key) { entry in
+                HStack(spacing: 5) {
+                    Shortcut(entry.key)
+                    Text(entry.title)
+                        .font(TypeScale.body(12))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .floatingControl(model.about.material)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(first.uppercased()), then " + next.map { "\($0.key.uppercased()) \($0.title)" }.joined(separator: ", "))
     }
 }

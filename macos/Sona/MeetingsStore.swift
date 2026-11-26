@@ -385,6 +385,9 @@ final class MeetingsStore {
     /// The note revision the core acknowledged: what the next save expects.
     @ObservationIgnored private var savedNoteRevision = 0
     @ObservationIgnored private var jumpNonce = 0
+    /// False for a store that never listed meetings, one window's: it follows
+    /// only the meeting open in it.
+    @ObservationIgnored private var listed = false
 
     init(core: Core) {
         self.core = core
@@ -418,6 +421,7 @@ final class MeetingsStore {
             if let removed = payload?.sessionId, removed == self.openSessionId {
                 self.closeReview()
             }
+            guard self.listed else { return }
             self.reloadListSoon()
             Task { await self.loadFolders() }
         }
@@ -433,7 +437,7 @@ final class MeetingsStore {
         // A preflight is the live store's gate, not a page to read; opening it
         // here would put an empty review in front of the consent.
         core.observe(CoreEvent.meetingNavigationRequested) { [weak self] line in
-            guard let self, let payload: MeetingNavigationPayload = try? Core.payload(line) else { return }
+            guard let self, self.listed, let payload: MeetingNavigationPayload = try? Core.payload(line) else { return }
             switch payload.destination {
             case .list:
                 self.closeReview()
@@ -450,6 +454,7 @@ final class MeetingsStore {
     /// The first load: a page of meetings, the trend over them, and the
     /// folders. Progress heard from a core that has since gone is dropped.
     func start() async {
+        listed = true
         processing = [:]
         await loadPage()
         await loadTrend()
@@ -460,7 +465,7 @@ final class MeetingsStore {
 
     private func sessionChanged(_ line: Data) {
         let payload: MeetingEventPayload? = try? Core.payload(line)
-        reloadListSoon()
+        if listed { reloadListSoon() }
         guard let sessionId = payload?.sessionId, sessionId == openSessionId else { return }
         eventTask?.cancel()
         eventTask = Task { [weak self] in

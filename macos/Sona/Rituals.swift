@@ -214,7 +214,7 @@ extension AppModel {
               work.items != nil, place != .today,
               UserDefaults.standard.string(forKey: RitualStore.shownKey) != today,
               Calendar.current.component(.hour, from: .now) >= 6,
-              sheet == nil, !paletteShown, !showingSettings, capture == .idle,
+              sheet == nil, !paletteShown, capture == .idle,
               live.live == nil, live.active == nil, workFocus.composing == nil,
               !morningPlan(now: TaskDates.now()).isEmpty
         else { return }
@@ -329,7 +329,7 @@ extension AppModel {
 
     /// The Overdue group of the task list showing.
     var overdueTargets: [String] {
-        guard !showingSettings, place == .tasks, workFocus.opened(in: .tasks) == nil else { return [] }
+        guard place == .tasks, workFocus.opened(in: .tasks) == nil else { return [] }
         let groups = taskGroups(workFocus.listing(work.views), now: TaskDates.now())
         return groups.first { $0.mark == .bucket(.overdue) }?.rows.map(\.id) ?? []
     }

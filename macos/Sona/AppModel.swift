@@ -122,7 +122,6 @@ enum Sheet: Identifiable, Hashable {
     case share(String)
     case saveTemplate(String)
     case problemReport(Int64?)
-    case quicklinkEditor(UUID?)
     case quicklinkArgument(UUID)
 
     var id: Self { self }
@@ -330,7 +329,6 @@ final class AppModel {
     /// A Home section to bring into view once Home shows, set from another tab.
     var homeAnchor: String?
     var settingsPlace: SettingsPlace = .essentials
-    var showingSettings = false
     /// The user's name from their profile, when they gave one.
     var myName: String? {
         let name = prep.preferences?.aboutMe.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -338,6 +336,21 @@ final class AppModel {
     }
     var paletteShown = false {
         didSet { if !paletteShown { workFocus.picker = nil } }
+    }
+    /// The first key of a two-key shortcut, while the second is awaited.
+    var chordHint: String?
+    private(set) var sidebarHidden = UserDefaults.standard.bool(forKey: "sidebarHidden") {
+        didSet { UserDefaults.standard.set(sidebarHidden, forKey: "sidebarHidden") }
+    }
+
+    /// The page is built again when the sidebar comes or goes, so a field
+    /// being typed in on the main window is left first and saves what it
+    /// holds, as a click elsewhere would.
+    func setSidebarHidden(_ hidden: Bool) {
+        guard hidden != sidebarHidden else { return }
+        let main = NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("main") == true }
+        main?.makeFirstResponder(nil)
+        DispatchQueue.main.async { self.sidebarHidden = hidden }
     }
     /// The question a `sona://search` link carried, held until the palette
     /// opens and reads it.
@@ -479,7 +492,12 @@ final class AppModel {
     /// the menu bar mark hands it over when it first appears. Observed, so a
     /// reveal the core asked for before then runs again once it can.
     var presentMainWindow: () -> Void = {}
+    @ObservationIgnored var presentItemWindow: (ItemWindow) -> Void = { _ in }
+    @ObservationIgnored var presentSettings: () -> Void = {}
     @ObservationIgnored var mainWindowOpen = false
+    @ObservationIgnored var openWindows = 0
+    /// Notes open in windows of their own, saved before Sona quits.
+    @ObservationIgnored var windowNotes: [ScratchpadStore] = []
     private static let reopenWindowKey = "reopenMainWindow"
 
     init() {
@@ -628,12 +646,13 @@ final class AppModel {
 
     func go(_ place: Place) {
         self.place = place
-        showingSettings = false
     }
 
+    /// The Settings window, in front, on one page.
     func showSettings(_ tab: SettingsPlace) {
         settingsPlace = tab
-        showingSettings = true
+        presentSettings()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func openQuicklink(_ id: UUID) {
@@ -642,6 +661,7 @@ final class AppModel {
                 throw QuicklinkError.changed
             }
             if link.needsArgument {
+                reveal()
                 sheet = .quicklinkArgument(id)
             } else {
                 try openQuicklink(id, argument: nil)
@@ -681,9 +701,8 @@ final class AppModel {
         reveal()
     }
 
-    /// The settings, on the tab last shown, from the app menu or the menu bar.
+    /// The settings, on the page last shown, from the app menu or the menu bar.
     func openSettings() {
-        reveal()
         showSettings(settingsPlace)
     }
 

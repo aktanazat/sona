@@ -477,9 +477,7 @@ enum WorkChoices {
     /// for Blocks.
     private static func relations(_ kind: WorkPicker.Kind, of ids: [String], text: String, model: AppModel) -> [WorkChoice] {
         let work = model.work
-        let linked = work.detail.flatMap { detail in
-            ids == [detail.item.id] ? detail.relations.flatMap { [$0.fromId, $0.toId] } : nil
-        } ?? []
+        let linked = ids.count == 1 ? work.details[ids[0]]?.relations.flatMap { [$0.fromId, $0.toId] } ?? [] : []
         let taken = Set(ids + linked)
         let number = text.hasPrefix("#") ? String(text.dropFirst()) : text
         let pool = (work.items ?? []).filter { row in

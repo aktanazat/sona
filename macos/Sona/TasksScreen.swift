@@ -522,6 +522,7 @@ struct TaskListBody<Row: View, Lead: View>: View {
                 row(entry.item)
             }
             .modifier(TaskRowInteractions(id: entry.item.id))
+            .draggable(model.menuTargets(entry.item.id).joined(separator: "\n"))
             .transition(WorkMotion.insert(reduced: reduceMotion))
         }
     }
@@ -647,6 +648,12 @@ struct WorkActionMenu: View {
                 }
             }
             if rows.count == 1, let row = rows.first {
+                Button {
+                    model.openWindow(.task(row.id))
+                } label: {
+                    Label("Open in New Window", systemImage: "macwindow.badge.plus")
+                }
+                .keyboardShortcut(keys ? KeyboardShortcut("o", modifiers: [.command, .option]) : nil)
                 Button {
                     model.sheet = .saveTemplate(row.id)
                 } label: {

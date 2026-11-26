@@ -705,6 +705,7 @@ final class WorkKeys {
     private var goPressedAt: TimeInterval?
     private var openPressedAt: TimeInterval?
     private var relatePressedAt: TimeInterval?
+    private var hintEnd: Task<Void, Never>?
     private static let destinations: [String: Place] = [
         "h": .capture, "d": .today, "m": .meetings, "t": .tasks, "i": .triage, "p": .people, "j": .projects,
         "n": .inbox, "x": .archive,
@@ -727,13 +728,14 @@ final class WorkKeys {
     }
 
     private func handle(_ event: NSEvent, _ model: AppModel) -> Bool {
-        guard let window = event.window, window.canBecomeMain, !window.isSheet,
+        guard let window = event.window, window.identifier?.rawValue.hasPrefix("main") == true, !window.isSheet,
               window.attachedSheet == nil, model.ready, model.onboarding.step == .done,
               model.sheet == nil, !model.paletteShown
         else { return false }
         if window.firstResponder is NSText || window.firstResponder is NSTextField { return false }
         let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let key = (event.charactersIgnoringModifiers ?? "").lowercased()
+        hint(nil, model)
         if let pressed = goPressedAt {
             goPressedAt = nil
             if event.timestamp - pressed < 1.5, flags.isEmpty {
@@ -764,9 +766,9 @@ final class WorkKeys {
         }
         if flags.isEmpty, key == "g" || key == "o" {
             if key == "g" { goPressedAt = event.timestamp } else { openPressedAt = event.timestamp }
+            hint(key, model)
             return true
         }
-        guard !model.showingSettings else { return false }
         if flags.isEmpty, key == "/" {
             model.toggleSearch()
             return true
@@ -995,6 +997,7 @@ final class WorkKeys {
         case "m":
             guard !targets.isEmpty else { return false }
             relatePressedAt = event.timestamp
+            hint("m", model)
             return true
         case "s": return run(.status)
         case "p": return run(.priority)
@@ -1018,6 +1021,20 @@ final class WorkKeys {
             return false
         }
     }
+
+    /// Shows what may follow the first key of a pair for as long as the pair
+    /// waits for its second key.
+    private func hint(_ first: String?, _ model: AppModel) {
+        hintEnd?.cancel()
+        hintEnd = nil
+        if model.chordHint != first { model.chordHint = first }
+        guard first != nil else { return }
+        hintEnd = Task { [weak model] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            model?.chordHint = nil
+        }
+    }
 }
 
 extension AppModel {
@@ -1035,7 +1052,7 @@ extension AppModel {
 
     /// The tasks a verb acts on now, when a task screen is showing.
     var workTargets: [String] {
-        guard !showingSettings, showsTasks else { return [] }
+        guard showsTasks else { return [] }
         return workFocus.targets(in: place)
     }
 

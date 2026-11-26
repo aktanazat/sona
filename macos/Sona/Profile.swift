@@ -115,7 +115,6 @@ struct SidebarProfileRow: View {
     @State private var hovering = false
 
     var body: some View {
-        let selected = model.showingSettings && model.settingsPlace == .profile
         let name = model.myName
         Button {
             model.showSettings(.profile)
@@ -127,18 +126,17 @@ struct SidebarProfileRow: View {
                     .lineLimit(1)
                 Spacer(minLength: 4)
             }
-            .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
+            .foregroundStyle(Theme.inkSecondary)
             .padding(.horizontal, Space.s)
             .frame(height: Theme.sidebarRow)
             .background(
-                selected ? Theme.washSelected : (hovering ? Theme.wash : .clear),
+                hovering ? Theme.wash : .clear,
                 in: RoundedRectangle(cornerRadius: Theme.radiusRow)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(name.map { "Profile, \($0)" } ?? "Profile")
-        .accessibilityAddTraits(selected ? .isSelected : [])
         .onHover { hovering = $0 }
         .task {
             if model.prep.preferences == nil { await model.prep.loadPreferences() }

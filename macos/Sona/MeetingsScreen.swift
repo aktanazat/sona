@@ -632,6 +632,7 @@ struct MeetingFilingSheet: View {
 
 struct MeetingsFeed: View {
     let store: MeetingsStore
+    @Environment(AppModel.self) private var model
     @State private var pendingDelete: MeetingHistorySummary?
 
     var body: some View {
@@ -653,6 +654,7 @@ struct MeetingsFeed: View {
                                 entry: entry,
                                 processing: store.processingUpdate(entry.sessionId, phase: entry.phase),
                                 open: { store.open(entry.sessionId) },
+                                openWindow: { model.openWindow(.meeting(entry.sessionId)) },
                                 export: { store.export(entry.sessionId, format: $0) },
                                 ledger: { store.exportLedger(entry.sessionId) },
                                 file: { store.openFiling(entry.sessionId, title: entry.title) },
@@ -702,6 +704,7 @@ struct MeetingsRow: View {
     let entry: MeetingHistorySummary
     let processing: MeetingProcessingUpdate?
     let open: () -> Void
+    let openWindow: () -> Void
     let export: (MeetingExportFormat) -> Void
     let ledger: () -> Void
     let file: () -> Void
@@ -742,6 +745,7 @@ struct MeetingsRow: View {
                         .monospacedDigit()
                         .foregroundStyle(Theme.inkTertiary)
                     Menu {
+                        Button("Open in New Window", action: openWindow)
                         Button("Add to folder…", action: file)
                         Divider()
                         Button("Export as Markdown") { export(.markdown) }
@@ -765,6 +769,9 @@ struct MeetingsRow: View {
                     .accessibilityLabel("Options for \(entry.title)")
                 }
             }
+        }
+        .contextMenu {
+            Button("Open in New Window", action: openWindow)
         }
     }
 

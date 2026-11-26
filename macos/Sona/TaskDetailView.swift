@@ -6,6 +6,9 @@ import SwiftUI
 struct TaskDetailView: View {
     let id: String
     let place: Place
+    /// In a window of its own: no way back to a list and no stepping to the
+    /// tasks either side.
+    var windowed = false
     @Environment(AppModel.self) private var model
     @State private var width: CGFloat = 1100
     @State private var flashed: String?
@@ -13,10 +16,12 @@ struct TaskDetailView: View {
     var body: some View {
         let store = model.work
         let row = model.workRows([id]).first
-        let detail = store.detail.flatMap { $0.item.id == id ? $0 : nil }
+        let detail = store.details[id]
         VStack(spacing: 0) {
             WorkBar {
-                BackLink(title: back) { close() }
+                if !windowed {
+                    BackLink(title: back) { close() }
+                }
                 if let row {
                     if let parent = parent(of: row, detail: detail) {
                         ParentLink(parent: parent, place: place)
@@ -35,7 +40,9 @@ struct TaskDetailView: View {
                         TriageButtons(ids: [row.id])
                     }
                     TaskLifecycleButtons(row: row)
-                    DetailStepper(id: row.id)
+                    if !windowed {
+                        DetailStepper(id: row.id)
+                    }
                     Menu {
                         WorkActionMenu(ids: [row.id], omit: [.peek, .open], keys: false)
                         Divider()
@@ -87,6 +94,12 @@ struct TaskDetailView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .task(id: "\(id):\(row?.revision ?? -1)") { await store.loadDetail(id) }
         .task(id: id) { store.markTaskRead(id) }
+        .onAppear { store.showDetail(id) }
+        .onChange(of: id) { old, new in
+            store.hideDetail(old)
+            store.showDetail(new)
+        }
+        .onDisappear { store.hideDetail(id) }
         .environment(\.openURL, OpenURLAction { url in
             guard url.scheme == TaskMention.scheme else { return .systemAction }
             guard let number = Int64(url.host() ?? ""),
@@ -117,12 +130,12 @@ struct TaskDetailView: View {
         case .link: proxy.scrollTo(TaskPageAnchor.attachments, anchor: .top)
         case .history: break
         case let .comment(comment):
-            guard let detail = model.work.detail, detail.item.id == id else { return }
+            guard let detail = model.work.details[id] else { return }
             model.workFocus.pageAsk = nil
             guard let thread = detail.comments.first(where: { $0.id == comment || $0.replies.contains { $0.id == comment } }) else {
                 Task {
                     await model.work.loadDetail(id)
-                    let threads = model.work.detail?.comments ?? []
+                    let threads = model.work.details[id]?.comments ?? []
                     if threads.contains(where: { $0.id == comment || $0.replies.contains { $0.id == comment } }) {
                         model.workFocus.pageAsk = ask
                     } else {
@@ -375,10 +388,19 @@ private struct DetailNotes: View {
                     }
                 }
                 .help("Double-click to edit")
+                .dropDestination(for: String.self) { items, _ in
+                    let dropped = items.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !dropped.isEmpty else { return false }
+                    save(details.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + dropped)
+                    return true
+                }
             }
         }
         .onChange(of: row.details, initial: true) { _, details in
             if !focused { text = details ?? "" }
+        }
+        .onChange(of: text) {
+            if !focused, text != (row.details ?? "") { commit() }
         }
     }
 
@@ -1000,7 +1022,7 @@ private struct TaskRelations: View {
     @State private var adding: RelationAdd?
 
     var body: some View {
-        let relations = model.work.detail.flatMap { $0.item.id == row.id ? $0.relations : nil } ?? []
+        let relations = model.work.details[row.id]?.relations ?? []
         let entries = RelationEntry.all(for: row.id, in: relations) { id in
             model.workRows([id]).first?.status.isOpen ?? true
         }
@@ -1189,7 +1211,7 @@ private struct DetailActivity: View {
                     }
                     .padding(.vertical, 5)
                 }
-            } else if let error = model.work.detailError {
+            } else if let error = model.work.detailErrors[row.id] {
                 HStack(spacing: 10) {
                     Text(error).metaText(Theme.live).lineLimit(2)
                     Button("Retry") {
@@ -1862,7 +1884,7 @@ struct TaskPropertyList: View {
             }
             PropertyLine(title: "Repeats") {
                 RepeatMenu(row: row, rule: row.repeat?.every
-                    ?? work.detail.flatMap({ $0.item.id == row.id ? $0.recurrence : nil }), shown: shown(.repeats))
+                    ?? work.details[row.id]?.recurrence, shown: shown(.repeats))
                     .modifier(focus(.repeats))
             }
             if (row.status.isOpen || row.cycle != nil) && visible(.cycle) {
