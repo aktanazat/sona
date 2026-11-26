@@ -3361,7 +3361,11 @@ pub fn agent_chat_history_list(
     Ok(manager.history_list())
 }
 
-#[tauri::command(async)]
+/// Sync and so on the main thread, like `agent_chat_new`: the shell can send
+/// an open and a new before either answers, and one thread runs them in the
+/// order they came, so the conversation the core keeps is the one the last
+/// answer names.
+#[tauri::command]
 #[specta::specta]
 pub fn agent_chat_open(
     manager: State<'_, AgentPanelManager>,
@@ -3370,7 +3374,7 @@ pub fn agent_chat_open(
     manager.open_conversation(&conversation_id)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 #[specta::specta]
 pub fn agent_chat_new(
     manager: State<'_, AgentPanelManager>,

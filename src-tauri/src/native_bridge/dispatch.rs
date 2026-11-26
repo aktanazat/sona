@@ -546,7 +546,7 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let conversation_id = args.take("conversationId")?;
             let handle = app.clone();
-            off_main_thread(move || {
+            on_main_thread(app, move || {
                 reply(crate::agent_panel::agent_chat_open(
                     handle.state(),
                     conversation_id,
@@ -556,8 +556,10 @@ pub(super) async fn call(
         }
         "agent_chat_new" => {
             let handle = app.clone();
-            off_main_thread(move || reply(crate::agent_panel::agent_chat_new(handle.state())))
-                .await?
+            on_main_thread(app, move || {
+                reply(crate::agent_panel::agent_chat_new(handle.state()))
+            })
+            .await?
         }
         "agent_panel_public_identity" => {
             reply(crate::agent_panel::agent_panel_public_identity(app.state()).await)
