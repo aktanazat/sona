@@ -10,6 +10,12 @@ struct QueuedRecording: Codable, Equatable {
     var calendarEvent: DeviceRecordingManifest.CalendarEvent?
     var bookmarkOffsetsMs: [Int64]?
     var placeReading: DeviceRecordingManifest.PlaceReading?
+    /// nil for a recording queued before uploads were encoded: capture-format PCM.
+    var audioCodec: String? = nil
+
+    var audioFile: String {
+        audioCodec == UploadAudioFormat.codec ? UploadAudioFormat.fileName : UploadQueue.captureAudioFile
+    }
 }
 
 /// A thought's part of a queued object. Attachment files live in the item directory
@@ -103,7 +109,7 @@ enum UploadQueueError: Error, Equatable {
 /// The on-disk outbox. Capture writes into it; uploading drains it; nothing else owns
 /// a queued object's lifetime.
 actor UploadQueue {
-    private static let recordingAudioFile = "audio.pcm"
+    static let captureAudioFile = "audio.pcm"
     /// Chunks of one upload sent at once, so a long recording or a thought with several
     /// photos does not wait a round trip per chunk.
     private static let chunksInFlight = 3
@@ -138,7 +144,8 @@ actor UploadQueue {
     }
 
     /// Take ownership of a finished capture. The audio file is moved, not copied, so
-    /// there is one copy of the bytes from here on.
+    /// there is one copy of the bytes from here on. A capture directory that arrives
+    /// with its encoded copy loses the capture-format file once it is queued.
     func enqueue(
         audio: CapturedAudio,
         recordedAtUtcMs: Int64,
@@ -150,29 +157,29 @@ actor UploadQueue {
         captureDirectory: URL? = nil
     ) throws -> QueuedObject {
         let objectId = randomOpaqueId()
-        let item = newItem(
-            objectId: objectId,
-            capturedAtUtcMs: recordedAtUtcMs,
-            payload: .recording(
-                QueuedRecording(
-                    durationMs: audio.durationMs,
-                    title: title,
-                    audioByteLength: audio.byteLength,
-                    audioSha256: audio.sha256,
-                    personalNotes: notes,
-                    calendarEvent: calendarEvent,
-                    bookmarkOffsetsMs: bookmarkOffsetsMs,
-                    placeReading: placeReading
-                )
-            )
+        let recording = QueuedRecording(
+            durationMs: audio.durationMs,
+            title: title,
+            audioByteLength: audio.byteLength,
+            audioSha256: audio.sha256,
+            personalNotes: notes,
+            calendarEvent: calendarEvent,
+            bookmarkOffsetsMs: bookmarkOffsetsMs,
+            placeReading: placeReading,
+            audioCodec: audio.codec
         )
+        let item = newItem(objectId: objectId, capturedAtUtcMs: recordedAtUtcMs, payload: .recording(recording))
         if let captureDirectory {
-            let audioURL = captureDirectory.appending(path: Self.recordingAudioFile)
+            let audioURL = captureDirectory.appending(path: recording.audioFile)
             guard audio.url.path == audioURL.path else { throw CaptureError.unsupportedFormat }
             try writeItem(item, in: captureDirectory)
-            try FileManager.default.moveItem(at: captureDirectory, to: root.appending(path: directoryName(objectId)))
+            let queued = root.appending(path: directoryName(objectId))
+            try FileManager.default.moveItem(at: captureDirectory, to: queued)
+            if recording.audioFile != Self.captureAudioFile {
+                try? FileManager.default.removeItem(at: queued.appending(path: Self.captureAudioFile))
+            }
         } else {
-            try adopt(audio.url, as: Self.recordingAudioFile, objectId: objectId)
+            try adopt(audio.url, as: recording.audioFile, objectId: objectId)
             try save(item)
         }
         return item
@@ -549,6 +556,7 @@ actor UploadQueue {
                     title: recording.title,
                     audioByteLength: recording.audioByteLength,
                     audioSha256: recording.audioSha256,
+                    audioCodec: recording.audioCodec ?? RecordingAudioFormat.codec,
                     notes: recording.personalNotes,
                     calendarEvent: recording.calendarEvent,
                     bookmarkOffsetsMs: recording.bookmarkOffsetsMs ?? [],
@@ -584,7 +592,7 @@ actor UploadQueue {
             let range = DeviceRecordingObject.chunkRange(
                 index: index, audioByteLength: recording.audioByteLength
             )
-            return try readSlice(itemFile(item, UploadQueue.recordingAudioFile), range)
+            return try readSlice(itemFile(item, recording.audioFile), range)
         case let .thought(thought):
             guard let (attachment, range) = ThoughtObject.slice(thought.attachments, index: index)
             else { return Data() }

@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 
 /// The shape of a `device_recording` object is a cross-process contract: the desktop
@@ -258,4 +259,109 @@ final class DeviceRecordingTests: XCTestCase {
         /* The null separator is what keeps neighbouring parts from merging. */
         XCTAssertNotEqual(stableIdempotencyKey(["ab", "c"]), stableIdempotencyKey(["a", "bc"]))
     }
+
+    /// The upload copy is a tenth of the capture or less, at the capture's rate and
+    /// channel count, and as long as the capture give or take the encoder's priming.
+    func testUploadCopyIsATenthOfTheCaptureAndAsLong() throws {
+        let capture = try writeSpeechLikeCapture(seconds: 60)
+        let destination = capture.url.deletingPathExtension().appendingPathExtension("aac")
+        addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
+
+        let upload = try encodeForUpload(capture, destination: destination)
+
+        XCTAssertEqual(upload.codec, "aac_adts")
+        XCTAssertEqual(upload.durationMs, capture.durationMs)
+        let bytes = try Data(contentsOf: destination)
+        XCTAssertEqual(Array(bytes.prefix(2)), [0xff, 0xf1], "the Mac's decoder recognizes MPEG-4 ADTS")
+        XCTAssertEqual(upload.byteLength, bytes.count)
+        XCTAssertEqual(upload.sha256, sha256Base64URL(bytes))
+        XCTAssertLessThan(upload.byteLength * 9, capture.byteLength, "\(upload.byteLength) of \(capture.byteLength)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: capture.url.path), "the capture stays for crash recovery")
+        let file = try AVAudioFile(forReading: destination)
+        XCTAssertEqual(file.fileFormat.streamDescription.pointee.mFormatID, kAudioFormatMPEG4AAC)
+        XCTAssertEqual(file.fileFormat.sampleRate, 16_000)
+        XCTAssertEqual(file.fileFormat.channelCount, 1)
+        let captureFrames = AVAudioFramePosition(capture.byteLength / 2)
+        XCTAssertTrue((captureFrames - 1024...captureFrames + 4096).contains(file.length), "\(file.length) frames")
+    }
+
+    func testEncodedRecordingManifestNamesItsCodec() throws {
+        let manifest = DeviceRecordingObject.manifest(
+            deviceId: "phone_device_0001", recordedAtUtcMs: 1, durationMs: 1500,
+            title: "Phone recording", audioByteLength: 4500, audioSha256: "sha",
+            audioCodec: UploadAudioFormat.codec
+        )
+        let decoded = try JSONDecoder().decode(
+            DeviceRecordingManifest.self, from: DeviceRecordingObject.encodeManifest(manifest)
+        )
+        XCTAssertEqual(decoded.audio.codec, "aac_adts")
+        XCTAssertEqual(decoded.audio.sample_rate_hz, 16000)
+        XCTAssertEqual(decoded.audio.channels, 1)
+    }
+
+    func testCompactWatchAudioIsNotEncodedTwice() throws {
+        let capture = try writeSpeechLikeCapture(seconds: 1)
+        let source = capture.url.deletingPathExtension().appendingPathExtension("aac")
+        let destination = source.deletingPathExtension().appendingPathExtension("decoded.pcm")
+        addTeardownBlock {
+            for url in [capture.url, source, destination] { try? FileManager.default.removeItem(at: url) }
+        }
+        let encoded = try encodeForUpload(capture, destination: source)
+        let original = try Data(contentsOf: source)
+
+        let prepared = try prepareWatchAudio(source: source, destination: destination, durationMs: 1000)
+
+        let upload = try XCTUnwrap(prepared.upload)
+        XCTAssertEqual(upload.url, source)
+        XCTAssertEqual(upload.codec, "aac_adts")
+        XCTAssertEqual(upload.sha256, encoded.sha256)
+        XCTAssertEqual(upload.durationMs, 1000)
+        XCTAssertEqual(try Data(contentsOf: source), original, "not a second lossy encode")
+        XCTAssertGreaterThan(prepared.capture.byteLength, 0, "the phone's local library still has decoded audio")
+    }
+
+    /// The older phone names every incoming watch file .wav before AVAudioFile opens it.
+    /// Its existing decode still reads a new watch's AAC from that name.
+    func testAnOlderPhoneCanDecodeACompactWatchFileNamedWave() throws {
+        let capture = try writeSpeechLikeCapture(seconds: 1)
+        let aac = capture.url.deletingPathExtension().appendingPathExtension("aac")
+        let wave = capture.url.deletingPathExtension().appendingPathExtension("wav")
+        let decoded = capture.url.deletingPathExtension().appendingPathExtension("decoded.pcm")
+        addTeardownBlock {
+            for url in [capture.url, aac, wave, decoded] { try? FileManager.default.removeItem(at: url) }
+        }
+        _ = try encodeForUpload(capture, destination: aac)
+        try FileManager.default.moveItem(at: aac, to: wave)
+
+        let prepared = try prepareWatchAudio(source: wave, destination: decoded, durationMs: 1000)
+
+        XCTAssertNil(prepared.upload, "the older phone follows its existing decode-then-encode path")
+        XCTAssertGreaterThan(prepared.capture.byteLength, 0)
+    }
+}
+
+/// Capture-format PCM shaped like speech: a gliding voiced tone in syllable-length
+/// bursts with some breath noise, deterministic so sizes repeat.
+func writeSpeechLikeCapture(seconds: Int) throws -> CapturedAudio {
+    let rate = Double(RecordingAudioFormat.sampleRateHz)
+    var seed: UInt32 = 0x5EED
+    var phase = 0.0
+    var pcm = Data(capacity: seconds * RecordingAudioFormat.sampleRateHz * 2)
+    for index in 0..<(seconds * RecordingAudioFormat.sampleRateHz) {
+        let time = Double(index) / rate
+        let pitch = 140 + 60 * sin(2 * .pi * 0.3 * time)
+        phase += 2 * .pi * pitch / rate
+        let syllable = max(0, sin(2 * .pi * 4 * time))
+        var voiced = 0.0
+        for harmonic in 1...8 { voiced += sin(phase * Double(harmonic)) / Double(harmonic) }
+        seed = seed &* 1_664_525 &+ 1_013_904_223
+        let noise = Double(Int32(bitPattern: seed)) / Double(Int32.max)
+        let sample = 0.3 * syllable * voiced + 0.02 * noise
+        var value = Int16(max(-1, min(1, sample)) * Double(Int16.max)).littleEndian
+        withUnsafeBytes(of: &value) { pcm.append(contentsOf: $0) }
+    }
+    let url = FileManager.default.temporaryDirectory.appending(path: "capture-\(UUID().uuidString).pcm")
+    try pcm.write(to: url)
+    return CapturedAudio(url: url, byteLength: pcm.count, sha256: sha256Base64URL(pcm),
+                         durationMs: Int64(seconds * 1000))
 }

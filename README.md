@@ -89,6 +89,8 @@ Under Sessions, turn off Voice replies to pause one conversation without changin
 ### Phone and watch
 
 - `mobile/` holds one iPhone app with an embedded Apple Watch companion and keyboard extension. They pair with your Mac through the same end-to-end encrypted vault the desktop syncs through, record in-person conversations, and hand them to the Mac as meetings. The iPhone app requires iOS 26; its Watch companion targets watchOS 10 or later. On iPhone, Sona offers to record a note when a call ends; iOS gives no app access to ordinary call audio.
+- New phone uploads and Watch captures use 24 kbps AAC-LC instead of raw PCM, about 11 MB per hour rather than 115 MB per hour on the speech fixtures tested. Phone capture journals and the local playback library remain PCM/WAV. The Mac accepts both upload formats and decodes compact audio locally before transcription.
+- Update the Mac before updating the phone. Older Macs refuse compact uploads without downloading their audio or blocking later sync changes, but mark those revisions as handled and do not import them after an update. An older phone still accepts a new Watch's AAC and uploads PCM; a new phone accepts an older Watch's WAV and uploads AAC.
 
 Local runs keep captured audio on the device. Cloud transcription sends audio only after you configure a provider key and accept that provider's transfer notice. Sona does not store provider keys in its settings file.
 

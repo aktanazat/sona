@@ -4,9 +4,9 @@ import Foundation
 import SwiftUI
 import WatchConnectivity
 
-/// The watch records a plain WAV and hands the file to the phone.
+/// The watch records compact AAC and hands the file to the phone.
 ///
-/// It holds no vault key and speaks no vault protocol: the phone resamples and encrypts,
+/// It holds no vault key and speaks no vault protocol: the phone encrypts,
 /// so a lost or stolen watch carries nothing but its own unsent recordings.
 @MainActor
 final class WatchRecorder: NSObject, ObservableObject {
@@ -48,18 +48,15 @@ final class WatchRecorder: NSObject, ObservableObject {
             let folder = try FileManager.default.url(
                 for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
             )
-            let url = folder.appending(path: "watch-\(UUID().uuidString).wav")
-            /* 16 kHz mono is what the phone uploads, so asking for it here avoids a
-             * resample; the phone resamples whatever actually arrives regardless. */
+            let url = folder.appending(path: "watch-\(UUID().uuidString).aac")
             let recorder = try AVAudioRecorder(
                 url: url,
                 settings: [
-                    AVFormatIDKey: Int(kAudioFormatLinearPCM),
+                    AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
                     AVSampleRateKey: 16000,
                     AVNumberOfChannelsKey: 1,
-                    AVLinearPCMBitDepthKey: 16,
-                    AVLinearPCMIsFloatKey: false,
-                    AVLinearPCMIsBigEndianKey: false,
+                    AVEncoderBitRateKey: 24_000,
+                    AVEncoderBitRateStrategyKey: AVAudioBitRateStrategy_Constant,
                 ]
             )
             guard recorder.record() else {
@@ -98,6 +95,7 @@ final class WatchRecorder: NSObject, ObservableObject {
             metadata: [
                 "recorded_at_utc_ms": NSNumber(value: startedAtUtcMs),
                 "duration_ms": NSNumber(value: durationMs),
+                "audio_codec": "aac_adts",
             ]
         )
         status = "watch.sent"
