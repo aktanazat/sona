@@ -375,12 +375,19 @@ final class MarkdownTextView: NSTextView {
         didChangeText()
     }
 
-    /// The height the words take at this width.
+    /// The height the words take at this width. SwiftUI asks at several
+    /// widths before it places the view, and the frame it then sets may not
+    /// change, which would leave the words wrapped at the last width asked;
+    /// so the container goes back to the view's own width.
     func height(at width: CGFloat) -> CGFloat {
         guard let layout = layoutManager, let container = textContainer else { return 0 }
         container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
         layout.ensureLayout(for: container)
-        return ceil(layout.usedRect(for: container).height)
+        let height = ceil(layout.usedRect(for: container).height)
+        if bounds.width > 0, bounds.width != width {
+            container.containerSize = NSSize(width: bounds.width, height: .greatestFiniteMagnitude)
+        }
+        return height
     }
 
     /// Where the line the selection ends on ends, from the top.
