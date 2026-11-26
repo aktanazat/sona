@@ -54,6 +54,7 @@ struct CaptureScreen: View {
                 .padding(.vertical, 8)
             }
             .scrollDismissesKeyboard(.interactively)
+            .readableColumn()
             .background(Theme.background)
             .navigationTitle("tab.capture")
             .navigationBarTitleDisplayMode(.inline)

@@ -61,6 +61,7 @@ struct RecordingScreen: View {
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            .readableColumn()
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.background)
             .navigationTitle("tab.recording")

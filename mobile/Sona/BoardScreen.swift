@@ -3,13 +3,63 @@ import UIKit
 
 struct BoardScreen: View {
     @ObservedObject var model: AppModel
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var open: BoardTile?
     @State private var showsPairing = false
 
     var body: some View {
         NavigationStack {
+            board
+                .scrollContentBackground(.hidden)
+                .background(Theme.background)
+                .navigationTitle("tab.board")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .primaryAction) { AskSonaButton(model: model) } }
+                .refreshable { await model.refreshBoard() }
+                .safeAreaInset(edge: .bottom) { status }
+                .sheet(item: $open.yielding(to: model)) { tile in
+                    ThoughtDetailScreen(model: model, tile: tile)
+                }
+                .sheet(isPresented: $showsPairing.yielding(to: model)) {
+                    PairingScreen(model: model)
+                }
+                .task { await model.refreshBoard() }
+        }
+        .tint(Theme.accent)
+    }
+
+    /// A list on a phone; on a wide screen such as an iPad's, the thoughts as cards in as
+    /// many columns as fit.
+    @ViewBuilder
+    private var board: some View {
+        let sections = model.board?.sections() ?? []
+        if sizeClass == .regular {
+            ScrollView {
+                if sections.isEmpty {
+                    empty
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 16)], alignment: .leading, spacing: 16) {
+                        ForEach(sections) { section in
+                            Section {
+                                ForEach(section.tiles) { tile in
+                                    tileButton(tile)
+                                        .padding(16)
+                                        .frame(maxHeight: .infinity, alignment: .top)
+                                        .background(
+                                            Theme.surface,
+                                            in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                                        )
+                                }
+                            } header: {
+                                header(section).padding(.top, 8)
+                            }
+                        }
+                    }
+                }
+            }
+            .contentMargins(Theme.pageInset, for: .scrollContent)
+        } else {
             List {
-                let sections = model.board?.sections() ?? []
                 if sections.isEmpty {
                     empty
                         .listRowBackground(Color.clear)
@@ -17,14 +67,8 @@ struct BoardScreen: View {
                     ForEach(sections) { section in
                         Section {
                             ForEach(section.tiles) { tile in
-                                Button { open = tile } label: {
-                                    BoardTileView(model: model, tile: tile)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityElement(children: .combine)
-                                .accessibilityHint(Text("a11y.thought"))
-                                .accessibilityIdentifier("tile-\(tile.id)")
-                                .listRowBackground(Theme.surface)
+                                tileButton(tile)
+                                    .listRowBackground(Theme.surface)
                             }
                         } header: {
                             header(section)
@@ -34,22 +78,18 @@ struct BoardScreen: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .background(Theme.background)
-            .navigationTitle("tab.board")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .primaryAction) { AskSonaButton(model: model) } }
-            .refreshable { await model.refreshBoard() }
-            .safeAreaInset(edge: .bottom) { status }
-            .sheet(item: $open.yielding(to: model)) { tile in
-                ThoughtDetailScreen(model: model, tile: tile)
-            }
-            .sheet(isPresented: $showsPairing.yielding(to: model)) {
-                PairingScreen(model: model)
-            }
-            .task { await model.refreshBoard() }
+            .readableColumn()
         }
-        .tint(Theme.accent)
+    }
+
+    private func tileButton(_ tile: BoardTile) -> some View {
+        Button { open = tile } label: {
+            BoardTileView(model: model, tile: tile)
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(Text("a11y.thought"))
+        .accessibilityIdentifier("tile-\(tile.id)")
     }
 
     private func header(_ section: BoardSection) -> some View {

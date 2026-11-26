@@ -24,6 +24,9 @@ enum Theme {
     static let pageInset: CGFloat = 20
     static let controlRadius: CGFloat = 8
     static let cardRadius: CGFloat = 26
+    /// The widest a column of text and controls gets, so an iPad or the inner display of
+    /// iPhone Duo shows a readable column instead of lines that run edge to edge.
+    static let readableWidth: CGFloat = 640
 
     /// A cluster's colour on the board, from the hue the sorter chose for it. The one
     /// colour that comes from data rather than the desktop's tokens.
@@ -46,6 +49,24 @@ enum Theme {
             )
         }
     #endif
+}
+
+extension View {
+    /// Keeps the content in a centred column no wider than `Theme.readableWidth`, while
+    /// scrolling and the background still reach the edges. A narrower screen is untouched.
+    func readableColumn() -> some View {
+        modifier(ReadableColumn())
+    }
+}
+
+private struct ReadableColumn: ViewModifier {
+    @State private var width: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .safeAreaPadding(.horizontal, max((width - Theme.readableWidth) / 2, 0))
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+    }
 }
 
 /// The record control's face: a red capsule inside a ring. The caller owns the button.

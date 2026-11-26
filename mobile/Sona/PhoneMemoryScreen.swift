@@ -88,7 +88,7 @@ private struct PhoneMemoryContent: View {
         .navigationTitle(selection.title)
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search)
-        .toolbar(.hidden, for: .tabBar)
+        .tabBarHiddenWhenPushed()
         .task { await model.refreshBoard() }
         .refreshable { await model.refreshBoard() }
     }
@@ -271,7 +271,7 @@ private struct PhoneMemoryPersonScreen: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
+        .tabBarHiddenWhenPushed()
     }
 }
 
@@ -332,7 +332,7 @@ private struct PhoneMemoryNoteScreen: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
+        .tabBarHiddenWhenPushed()
     }
 }
 
@@ -564,6 +564,7 @@ private extension View {
         listStyle(.insetGrouped)
             .listSectionSpacing(.custom(12))
             .scrollContentBackground(.hidden)
+            .readableColumn()
             .background(Theme.background)
             .tint(Theme.accent)
     }

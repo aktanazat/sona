@@ -11,9 +11,10 @@ struct PhoneLibraryScreen: View {
     @State private var importing = false
     @State private var importBusy = false
     @State private var search = ""
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        NavigationStack {
+        LibraryNavigation(split: sizeClass == .regular) {
             List {
                 Section {
                     Picker("library.filter", selection: $filter) {
@@ -141,6 +142,7 @@ struct PhoneLibraryScreen: View {
             .listStyle(.insetGrouped)
             .listSectionSpacing(.custom(12))
             .scrollContentBackground(.hidden)
+            .readableColumn()
             .background(Theme.background)
             .navigationTitle("library.title")
             .navigationBarTitleDisplayMode(.inline)
@@ -204,6 +206,26 @@ struct PhoneLibraryScreen: View {
             }
         }
         .tint(Theme.accent)
+    }
+
+    /// A stack on a phone; on a wide screen such as an iPad's, the list beside the note or
+    /// meeting it opens.
+    private struct LibraryNavigation<Content: View>: View {
+        let split: Bool
+        @ViewBuilder let content: Content
+
+        var body: some View {
+            if split {
+                NavigationSplitView {
+                    content
+                } detail: {
+                    ContentUnavailableView("library.choose", systemImage: "note.text")
+                        .background(Theme.background)
+                }
+            } else {
+                NavigationStack { content }
+            }
+        }
     }
 
     private func row(_ note: PhoneNote) -> some View {
@@ -314,6 +336,22 @@ struct PhoneLibraryScreen: View {
     }
 }
 
+extension View {
+    /// Hides the tab bar under a screen pushed on a phone. Beside the list on a wide screen,
+    /// such as an iPad's, the tabs stay.
+    func tabBarHiddenWhenPushed() -> some View {
+        modifier(PushedTabBar())
+    }
+}
+
+private struct PushedTabBar: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    func body(content: Content) -> some View {
+        content.toolbar(sizeClass == .regular ? .automatic : .hidden, for: .tabBar)
+    }
+}
+
 private struct PhoneNoteScreen: View {
     @ObservedObject var model: AppModel
     @ObservedObject var library: PhoneLibrary
@@ -351,13 +389,14 @@ private struct PhoneNoteScreen: View {
                 audio
             }
         }
+        .frame(maxWidth: Theme.readableWidth)
         .padding(.horizontal, Theme.pageInset)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.background)
         .navigationTitle("library.note")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
+        .tabBarHiddenWhenPushed()
         .toolbar {
             ToolbarItem(placement: .bottomBar) {
                 Button("library.saveChanges") {

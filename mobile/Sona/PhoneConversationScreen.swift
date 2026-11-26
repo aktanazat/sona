@@ -35,10 +35,11 @@ struct PhoneConversationScreen: View {
                 }
                 .padding(Theme.pageInset)
             }
+            .readableColumn()
             .background(Theme.background)
             .navigationTitle(meeting.session.title)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar(.hidden, for: .tabBar)
+            .tabBarHiddenWhenPushed()
             .toolbar {
                 ShareLink(item: shareText) {
                     Label("library.share", systemImage: "square.and.arrow.up")
@@ -483,6 +484,7 @@ private struct PhoneConversationEvidenceScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(Theme.pageInset)
         }
+        .readableColumn()
         .background(Theme.background)
         .navigationTitle(String(localized: "conversation.source", defaultValue: "Source"))
         .navigationBarTitleDisplayMode(.inline)

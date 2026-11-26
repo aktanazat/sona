@@ -172,6 +172,7 @@ struct PhoneCallsScreen: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        .readableColumn()
         .background(Theme.background)
         .navigationTitle("calls.title")
         .navigationBarTitleDisplayMode(.inline)
@@ -235,6 +236,7 @@ private struct CallSetupScreen: View {
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            .readableColumn()
             .background(Theme.background)
             .navigationTitle("calls.settings")
             .navigationBarTitleDisplayMode(.inline)
