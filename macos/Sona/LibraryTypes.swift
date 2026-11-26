@@ -434,10 +434,10 @@ enum ReceiptDeliveryOutcome: String, Decodable {
     }
 }
 
-/// What the page knows about one row's receipts. Three ways to have none, and
-/// they are not the same thing, so the inspector says which.
+/// What the page knows about one row's receipts once they are read. A failed
+/// read and a run with none are not the same thing, so the inspector says
+/// which.
 enum ReceiptLoad {
-    case loading
     case failed
     case ready([HistoryRunReceipt])
 }

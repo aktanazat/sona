@@ -84,6 +84,9 @@ final class LibraryStore {
     /// What is known about each visible row's receipts. A row asks for its own
     /// when it is drawn, and rows that leave the page drop theirs.
     private(set) var receipts: [Int64: ReceiptLoad] = [:]
+    /// Rows that asked and are not answered yet, and the read answering them.
+    @ObservationIgnored private var receiptsAsked: Set<Int64> = []
+    @ObservationIgnored private var receiptRead: Task<Void, Never>?
 
     // MARK: Playback
 
@@ -310,7 +313,7 @@ final class LibraryStore {
                 rebuildDays()
                 // A retry or a reprocess writes a new receipt for this row.
                 receipts[row.id] = nil
-                Task { await loadReceipts(for: row.id) }
+                loadReceipts(for: row.id)
             } else {
                 reload()
             }
@@ -363,17 +366,33 @@ final class LibraryStore {
 
     /// The receipts for one row, read once per row per page. The row asks when
     /// it is drawn, which is what keeps the read to the rows in front of the
-    /// reader.
-    func loadReceipts(for id: Int64) async {
-        guard receipts[id] == nil else { return }
-        receipts[id] = .loading
-        do {
-            let list: [HistoryRunReceipt] = try await core.request(
-                "get_history_run_receipts", HistoryEntryParam(historyId: id))
-            receipts[id] = .ready(list.sorted { $0.completedAtMs > $1.completedAtMs })
-        } catch {
-            receipts[id] = .failed
+    /// reader. The rows drawn together are answered together in one change,
+    /// so the page redraws once rather than twice for every row.
+    func loadReceipts(for id: Int64) {
+        guard receipts[id] == nil, receiptsAsked.insert(id).inserted, receiptRead == nil else { return }
+        receiptRead = Task { await readAskedReceipts() }
+    }
+
+    private func readAskedReceipts() async {
+        let ids = receiptsAsked
+        let core = core
+        let read = await withTaskGroup(of: (Int64, ReceiptLoad).self) { group in
+            for id in ids {
+                group.addTask {
+                    do {
+                        let list: [HistoryRunReceipt] = try await core.request(
+                            "get_history_run_receipts", HistoryEntryParam(historyId: id))
+                        return (id, .ready(list.sorted { $0.completedAtMs > $1.completedAtMs }))
+                    } catch {
+                        return (id, .failed)
+                    }
+                }
+            }
+            return await group.reduce(into: [:]) { read, answer in read[answer.0] = answer.1 }
         }
+        receipts.merge(read) { _, new in new }
+        receiptsAsked.subtract(ids)
+        receiptRead = receiptsAsked.isEmpty ? nil : Task { await readAskedReceipts() }
     }
 
     /// The run that finished last, which is the one that describes the row.
