@@ -1047,7 +1047,8 @@ fn clause<Tz: TimeZone>(
     Some(vec![Clause::Fields(patch, summary)])
 }
 
-/// The number in "duplicate of 19", "it's a dupe of S-19", "same as #19".
+/// The number in "duplicate of 19", "it's a dupe of S-19", "same as #19",
+/// or, as speech is often written out, "duplicate of S nineteen".
 fn duplicate_of(keys: &[&str]) -> Option<i64> {
     let mut rest = keys;
     while let [first, tail @ ..] = rest {
@@ -1072,6 +1073,21 @@ fn duplicate_of(keys: &[&str]) -> Option<i64> {
         ["task" | "number" | "item", tail @ ..] => tail,
         _ => rest,
     };
+    let spoken = match rest {
+        [prefix, tail @ ..]
+            if prefix.len() <= 3
+                && prefix
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic())
+                && spoken_number(&[prefix]).is_none() =>
+        {
+            tail
+        }
+        _ => rest,
+    };
+    if let Some(number) = spoken_number(spoken) {
+        return Some(number);
+    }
     let said = rest.concat();
     let digits = said
         .trim_start_matches('#')
@@ -1081,6 +1097,31 @@ fn duplicate_of(keys: &[&str]) -> Option<i64> {
         return None;
     }
     digits.parse().ok()
+}
+
+/// "nineteen", "forty two", "one hundred and five": a number said in
+/// words, every word part of it.
+fn spoken_number(words: &[&str]) -> Option<i64> {
+    const ONES: &str = "zero one two three four five six seven eight nine ten eleven twelve \
+                        thirteen fourteen fifteen sixteen seventeen eighteen nineteen";
+    const TENS: &str = "twenty thirty forty fifty sixty seventy eighty ninety";
+    let mut number = None;
+    for word in words.iter().flat_map(|word| word.split('-')) {
+        let so_far = number.unwrap_or(0);
+        let said = if let Some(one) = ONES.split(' ').position(|said| said == word) {
+            so_far + i64::try_from(one).ok()?
+        } else if let Some(ten) = TENS.split(' ').position(|said| said == word) {
+            so_far + 20 + 10 * i64::try_from(ten).ok()?
+        } else if word == "hundred" {
+            so_far.max(1) * 100
+        } else if word == "and" && number.is_some() {
+            so_far
+        } else {
+            return None;
+        };
+        number = Some(said);
+    }
+    number
 }
 
 /// The fields one clause sets, read as the command it would be with "it"
@@ -1278,6 +1319,8 @@ mod tests {
             "Decline, duplicate of S-19.",
             "decline as a dupe of #19",
             "Same as 19",
+            "Decline, duplicate of S nineteen.",
+            "it's a dupe of number nineteen",
         ] {
             assert_eq!(
                 decided(said).0,
