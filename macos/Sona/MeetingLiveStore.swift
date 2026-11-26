@@ -851,29 +851,42 @@ final class MeetingLiveStore {
     func stopFromPanel() {
         guard let session = active?.snapshot else { return }
         Task {
-            await act("Stopping") {
-                let savedNotes = self.live?.session.sessionId == session.sessionId
-                    ? await self.flushLiveNotes() : true
-                let result: MeetingMutationResult = try await self.core.request(
-                    "meeting_stop",
-                    MeetingLiveRequest.stop(
-                        session.sessionId, revision: session.revision, surface: .consentPanel))
-                guard self.receive(result.receipt) else {
-                    await self.loadActive()
-                    return
-                }
-                self.active = nil
-                if self.live?.session.sessionId == session.sessionId {
-                    guard savedNotes else {
-                        await self.adoptLive(session.sessionId)
-                        self.error = "Recording stopped. Your notes have not saved; they are still here."
-                        return
-                    }
-                    self.closeLive()
-                }
-                self.opened = session.sessionId
-            }
+            await act("Stopping") { _ = try await self.stop(session, from: .consentPanel) }
         }
+    }
+
+    /// Stop, from Shortcuts or Siri: the capture running now, read fresh
+    /// rather than from the panel. False when nothing is recording.
+    func stopFromShortcut() async throws -> Bool {
+        let state: MeetingConsentPanelSessionState? = try await core.request("meeting_consent_panel_active_state")
+        guard let session = state?.snapshot else { return false }
+        guard try await stop(session, from: .shortcut) else {
+            throw SonaIntentError.refused(error ?? "Sona could not stop the meeting.")
+        }
+        return true
+    }
+
+    /// False when the core refused the stop.
+    private func stop(_ session: MeetingSessionSnapshot, from surface: MeetingLiveStopSurface) async throws -> Bool {
+        let savedNotes = live?.session.sessionId == session.sessionId ? await flushLiveNotes() : true
+        let result: MeetingMutationResult = try await core.request(
+            "meeting_stop",
+            MeetingLiveRequest.stop(session.sessionId, revision: session.revision, surface: surface))
+        guard receive(result.receipt) else {
+            await loadActive()
+            return false
+        }
+        active = nil
+        if live?.session.sessionId == session.sessionId {
+            guard savedNotes else {
+                await adoptLive(session.sessionId)
+                error = "Recording stopped. Your notes have not saved; they are still here."
+                return true
+            }
+            closeLive()
+        }
+        opened = session.sessionId
+        return true
     }
 
     // MARK: - Starting

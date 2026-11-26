@@ -411,6 +411,7 @@ enum MeetingLiveStopSurface: String {
     case meetingLive = "meeting_live"
     case consentPanel = "consent_panel"
     case quit = "quit"
+    case shortcut = "shortcut"
 }
 
 enum MeetingProvisionalSpeaker: Decodable, Equatable {

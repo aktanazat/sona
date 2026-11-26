@@ -35,14 +35,47 @@ struct PersonPromises: Decodable {
     let promises: [PersonCommitment]
 }
 
+/// The tasks, projects and notes Spotlight may list. The core leaves out
+/// work drawn from a series kept on this Mac, and personal documents.
+struct SystemWork: Decodable {
+    let tasks: [SystemTask]
+    let projects: [SystemProject]
+    let notes: [SystemNote]
+}
+
+struct SystemTask: Decodable, Equatable {
+    let id: String
+    let number: Int64
+    let title: String
+    let details: String?
+    let status: WorkStatus
+    let project: String?
+}
+
+struct SystemProject: Decodable, Equatable {
+    let id: String
+    let title: String
+    let description: String?
+}
+
+struct SystemNote: Decodable, Equatable {
+    let id: String
+    let title: String
+    let body: String
+}
+
 enum SonaIntentError: Error, CustomLocalizedStringResourceConvertible {
     case unavailable
     case personGone
+    case blank
+    case refused(String)
 
     var localizedStringResource: LocalizedStringResource {
         switch self {
-        case .unavailable: "Sona couldn't read your meetings. Open Sona and try again."
+        case .unavailable: "Sona couldn't start. Open Sona and try again."
         case .personGone: "This person is no longer in Sona."
+        case .blank: "There's nothing to save."
+        case let .refused(reason): "\(reason)"
         }
     }
 }
@@ -59,6 +92,46 @@ extension AppModel {
     func openFromIntent(_ link: String) async throws {
         _ = try await startedCore()
         open(link: link)
+    }
+
+    func systemWork() async throws -> SystemWork {
+        try await startedCore().request("sona_query_system_work")
+    }
+
+    func openProjectFromIntent(_ id: String) async throws {
+        _ = try await startedCore()
+        reveal()
+        openProject(id)
+    }
+
+    /// Files it the way New task does, through the same store.
+    func addTask(_ title: String, details: String? = nil, projectId: String?) async throws -> WorkItem {
+        _ = try await startedCore()
+        guard let item = await work.create(title: title, details: details, projectId: projectId) else {
+            throw SonaIntentError.refused(work.mutationError ?? "Sona couldn't add the task.")
+        }
+        return item
+    }
+
+    func addNote(_ text: String) async throws -> ScratchNote {
+        try await startedCore().request("scratchpad_create", ["body": text])
+    }
+
+    /// Opens the meeting start, where one press below what is recorded starts
+    /// it: the press is the consent the core keeps.
+    func recordMeetingFromIntent() async throws {
+        _ = try await startedCore()
+        recordMeeting()
+    }
+
+    /// False when nothing was recording.
+    func stopMeetingFromIntent() async throws -> Bool {
+        _ = try await startedCore()
+        return try await live.stopFromShortcut()
+    }
+
+    func systemAnswer(_ question: String) async throws -> WorkAnswer {
+        try await startedCore().request("sona_query_system_ask", ["question": question])
     }
 
     /// Siri and Spotlight launch Sona to run an intent, so one can arrive
@@ -187,6 +260,289 @@ struct OpenMeetingIntent: OpenIntent {
     func perform() async throws -> some IntentResult {
         try await model.openFromIntent("sona://meeting/\(target.id)")
         return .result()
+    }
+}
+
+// MARK: - Tasks, projects and notes
+
+struct TaskEntity: IndexedEntity {
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Task"
+    static let defaultQuery = TaskQuery()
+
+    let id: String
+    let handle: String
+    let title: String
+    let details: String?
+    let project: String?
+    let status: String
+
+    init(_ task: SystemTask) {
+        id = task.id
+        handle = "S-\(task.number)"
+        title = task.title
+        details = task.details
+        project = task.project
+        status = task.status.label
+    }
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(
+            title: "\(title)", subtitle: "\([handle, project, status].compactMap { $0 }.joined(separator: " · "))")
+    }
+
+    var attributeSet: CSSearchableItemAttributeSet {
+        let attributes = defaultAttributeSet
+        attributes.alternateNames = [handle]
+        attributes.contentDescription = details
+        return attributes
+    }
+}
+
+struct TaskQuery: EntityStringQuery {
+    @Dependency private var model: AppModel
+
+    func entities(for identifiers: [TaskEntity.ID]) async throws -> [TaskEntity] {
+        try await model.systemWork().tasks.filter { identifiers.contains($0.id) }.map(TaskEntity.init)
+    }
+
+    func entities(matching string: String) async throws -> [TaskEntity] {
+        try await model.systemWork().tasks.filter {
+            $0.title.localizedStandardContains(string) || "S-\($0.number)".caseInsensitiveCompare(string) == .orderedSame
+        }.map(TaskEntity.init)
+    }
+
+    /// The open ones; the rest are found by title.
+    func suggestedEntities() async throws -> [TaskEntity] {
+        try await model.systemWork().tasks.filter(\.status.isOpen).prefix(50).map(TaskEntity.init)
+    }
+}
+
+struct ProjectEntity: IndexedEntity {
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Project"
+    static let defaultQuery = ProjectQuery()
+
+    let id: String
+    let title: String
+    let summary: String?
+
+    init(_ project: SystemProject) {
+        id = project.id
+        title = project.title
+        summary = project.description
+    }
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: "\(title)")
+    }
+
+    var attributeSet: CSSearchableItemAttributeSet {
+        let attributes = defaultAttributeSet
+        attributes.contentDescription = summary
+        return attributes
+    }
+}
+
+struct ProjectQuery: EntityStringQuery {
+    @Dependency private var model: AppModel
+
+    func entities(for identifiers: [ProjectEntity.ID]) async throws -> [ProjectEntity] {
+        try await model.systemWork().projects.filter { identifiers.contains($0.id) }.map(ProjectEntity.init)
+    }
+
+    func entities(matching string: String) async throws -> [ProjectEntity] {
+        try await model.systemWork().projects.filter { $0.title.localizedStandardContains(string) }
+            .map(ProjectEntity.init)
+    }
+
+    func suggestedEntities() async throws -> [ProjectEntity] {
+        try await model.systemWork().projects.map(ProjectEntity.init)
+    }
+}
+
+struct NoteEntity: IndexedEntity {
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Note"
+    static let defaultQuery = NoteQuery()
+
+    let id: String
+    let title: String
+    let body: String
+
+    init(_ note: SystemNote) {
+        id = note.id
+        title = note.title
+        body = note.body
+    }
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: "\(title)")
+    }
+
+    var attributeSet: CSSearchableItemAttributeSet {
+        let attributes = defaultAttributeSet
+        attributes.textContent = body
+        return attributes
+    }
+}
+
+struct NoteQuery: EntityStringQuery {
+    @Dependency private var model: AppModel
+
+    func entities(for identifiers: [NoteEntity.ID]) async throws -> [NoteEntity] {
+        try await model.systemWork().notes.filter { identifiers.contains($0.id) }.map(NoteEntity.init)
+    }
+
+    func entities(matching string: String) async throws -> [NoteEntity] {
+        try await model.systemWork().notes.filter {
+            $0.title.localizedStandardContains(string) || $0.body.localizedStandardContains(string)
+        }.map(NoteEntity.init)
+    }
+
+    /// The newest notes; older ones are found by their words.
+    func suggestedEntities() async throws -> [NoteEntity] {
+        try await model.systemWork().notes.prefix(50).map(NoteEntity.init)
+    }
+}
+
+struct OpenTaskIntent: OpenIntent {
+    static let title: LocalizedStringResource = "Open Task"
+
+    @Parameter(title: "Task") var target: TaskEntity
+    @Dependency private var model: AppModel
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await model.openFromIntent("sona://task/\(target.id)")
+        return .result()
+    }
+}
+
+struct OpenProjectIntent: OpenIntent {
+    static let title: LocalizedStringResource = "Open Project"
+
+    @Parameter(title: "Project") var target: ProjectEntity
+    @Dependency private var model: AppModel
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await model.openProjectFromIntent(target.id)
+        return .result()
+    }
+}
+
+struct OpenNoteIntent: OpenIntent {
+    static let title: LocalizedStringResource = "Open Note"
+
+    @Parameter(title: "Note") var target: NoteEntity
+    @Dependency private var model: AppModel
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await model.openFromIntent("sona://note/\(target.id)")
+        return .result()
+    }
+}
+
+// MARK: - Actions
+
+struct AddTaskIntent: AppIntent {
+    static let title: LocalizedStringResource = "Add Task"
+    static let description: IntentDescription? = IntentDescription("Adds a task to Sona, in a project if you pick one.")
+
+    @Parameter(title: "Title") var words: String
+    @Parameter(title: "Project") var project: ProjectEntity?
+    @Dependency private var model: AppModel
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Add \(\.$words) to \(\.$project)")
+    }
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ReturnsValue<TaskEntity> & ProvidesDialog {
+        let words = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { throw SonaIntentError.blank }
+        let item = try await model.addTask(words, projectId: project?.id)
+        let task = SystemTask(
+            id: item.id, number: item.number, title: item.title, details: item.details, status: item.status,
+            project: project?.title)
+        return .result(value: TaskEntity(task), dialog: "Added S-\(item.number): \(item.title)")
+    }
+}
+
+struct NewNoteIntent: AppIntent {
+    static let title: LocalizedStringResource = "New Note"
+    static let description: IntentDescription? = IntentDescription("Saves the text as a new note in Sona.")
+
+    @Parameter(title: "Text", inputOptions: String.IntentInputOptions(multiline: true)) var text: String
+    @Dependency private var model: AppModel
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("New note with \(\.$text)")
+    }
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ReturnsValue<NoteEntity> & ProvidesDialog {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw SonaIntentError.blank }
+        let note = try await model.addNote(text)
+        return .result(
+            value: NoteEntity(SystemNote(id: note.id, title: note.title, body: note.body)),
+            dialog: "Saved “\(note.title)”")
+    }
+}
+
+struct StartMeetingRecordingIntent: AppIntent {
+    static let title: LocalizedStringResource = "Start Meeting Recording"
+    static let description: IntentDescription? = IntentDescription(
+        "Opens the meeting start in Sona. Press Record there to begin.")
+    static let openAppWhenRun = true
+
+    @Dependency private var model: AppModel
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        try await model.recordMeetingFromIntent()
+        return .result(dialog: "Press Record in Sona to start.")
+    }
+}
+
+struct StopMeetingRecordingIntent: AppIntent {
+    static let title: LocalizedStringResource = "Stop Meeting Recording"
+    static let description: IntentDescription? = IntentDescription(
+        "Stops the meeting Sona is recording and keeps it.")
+
+    @Dependency private var model: AppModel
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let stopped = try await model.stopMeetingFromIntent()
+        return .result(dialog: stopped ? "Meeting stopped." : "No meeting is recording.")
+    }
+}
+
+struct AskSonaIntent: AppIntent {
+    static let title: LocalizedStringResource = "Ask Sona"
+    static let description: IntentDescription? = IntentDescription(
+        "Answers from what was said in your meetings and what you wrote, quoting each line.")
+
+    @Parameter(title: "Question") var question: String
+    @Dependency private var model: AppModel
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Ask Sona \(\.$question)")
+    }
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let answer = try await model.systemAnswer(question)
+        let text = Self.answer(answer.lines)
+        return .result(value: text, dialog: IntentDialog("\(text)"))
+    }
+
+    static func answer(_ lines: [WorkAnswerLine]) -> String {
+        guard !lines.isEmpty else { return "Sona found nothing on that." }
+        return lines.prefix(5).map { line in
+            let said = line.speaker.map { "\($0): " } ?? ""
+            return "\(said)“\(line.quote)” (\(line.title), \(PeopleFormat.date(line.whenUtcMs).short))"
+        }.joined(separator: "\n")
     }
 }
 
@@ -352,5 +708,45 @@ struct SonaShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Open Person",
             systemImageName: "person.crop.circle")
+        AppShortcut(
+            intent: AddTaskIntent(),
+            phrases: [
+                "Add a task in \(.applicationName)",
+                "New \(.applicationName) task",
+            ],
+            shortTitle: "Add Task",
+            systemImageName: "checklist")
+        AppShortcut(
+            intent: NewNoteIntent(),
+            phrases: [
+                "New note in \(.applicationName)",
+                "Make a \(.applicationName) note",
+            ],
+            shortTitle: "New Note",
+            systemImageName: "square.and.pencil")
+        AppShortcut(
+            intent: StartMeetingRecordingIntent(),
+            phrases: [
+                "Record a meeting in \(.applicationName)",
+                "Start recording a meeting in \(.applicationName)",
+            ],
+            shortTitle: "Record Meeting",
+            systemImageName: "record.circle")
+        AppShortcut(
+            intent: StopMeetingRecordingIntent(),
+            phrases: [
+                "Stop the meeting in \(.applicationName)",
+                "Stop recording the meeting in \(.applicationName)",
+            ],
+            shortTitle: "Stop Meeting",
+            systemImageName: "stop.circle")
+        AppShortcut(
+            intent: AskSonaIntent(),
+            phrases: [
+                "Ask \(.applicationName)",
+                "Ask \(.applicationName) a question",
+            ],
+            shortTitle: "Ask Sona",
+            systemImageName: "questionmark.bubble")
     }
 }
