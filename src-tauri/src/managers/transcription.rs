@@ -68,7 +68,7 @@ const STREAM_PREVIEW_FRAME_SAMPLES: usize = 480;
 const STREAM_PREVIEW_QUEUE_CAPACITY: usize =
     STREAM_PREVIEW_QUEUE_SAMPLES / STREAM_PREVIEW_FRAME_SAMPLES;
 const STREAM_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const PAUSE_AFTER_SPEECH: Duration = Duration::from_millis(700);
+const PAUSE_AFTER_SPEECH: Duration = Duration::from_millis(1_200);
 const PAUSE_BEFORE_SPEECH: Duration = Duration::from_secs(8);
 const PAUSE_LONGEST: Duration = Duration::from_secs(20);
 #[cfg(feature = "cloud-realtime")]

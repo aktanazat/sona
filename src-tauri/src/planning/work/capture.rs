@@ -18,7 +18,6 @@ use crate::modes::TranscriptionIntent;
 use crate::planning::sources;
 use crate::planning::store::{self, Refusal};
 use crate::planning::types::EvidenceSourceKind;
-use crate::transcription_coordinator::TranscriptionCoordinator;
 use anyhow::Result as StorageResult;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -503,31 +502,21 @@ pub(crate) fn file_spoken(
 }
 
 /// Starts listening for a decision on the triage task in front of the
-/// speaker, or stops waiting for one. The recording ends itself at the first
-/// pause after speech, or when nothing is said for a while, and its words
-/// come back as one [`WorkTriageHeard`].
+/// speaker, or stops waiting for one. Once the microphone opens, the
+/// recording ends itself at the first pause after speech, or when nothing is
+/// said for a while, and its words come back as one [`WorkTriageHeard`].
 #[tauri::command]
 #[specta::specta]
 pub fn work_triage_listen(app: AppHandle, listen: bool) -> Result<(), String> {
-    let router = app.state::<Arc<TranscriptionManager>>().stream_router();
     if !listen {
-        router.end_pause_watch();
+        app.state::<Arc<TranscriptionManager>>()
+            .stream_router()
+            .end_pause_watch();
         return Ok(());
     }
-    let audio = app.state::<Arc<AudioRecordingManager>>().inner().clone();
-    if audio.is_recording() {
+    if app.state::<Arc<AudioRecordingManager>>().is_recording() {
         return Err("Sona is already recording.".to_owned());
     }
-    let generation = audio.cancel_generation();
-    let finisher = app.clone();
-    router.finish_at_pause(move || {
-        if audio.was_cancelled_since(generation) {
-            return;
-        }
-        if let Some(coordinator) = finisher.try_state::<TranscriptionCoordinator>() {
-            coordinator.send_finish("voice-triage");
-        }
-    });
     crate::signal_handle::send_transcription_intent(
         &app,
         TranscriptionIntent::Triage,

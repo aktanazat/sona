@@ -2177,6 +2177,9 @@ impl TranscribeAction {
                 let generation = readiness.generation();
                 let app_clone = app.clone();
                 let rm_clone = Arc::clone(&rm);
+                let pause_watch = (self.run.spoken_work()
+                    == Some(crate::modes::SpokenWork::Triage))
+                .then(|| tm.stream_router());
                 std::thread::spawn(move || {
                     let Ok(input_name) = readiness.wait() else {
                         debug!("Microphone readiness wait ended without receiving samples");
@@ -2205,6 +2208,20 @@ impl TranscribeAction {
 
                     debug!("Microphone is receiving samples; recording is ready");
                     utils::emit_recording_ready(&app_clone);
+                    if let Some(router) = pause_watch {
+                        let finisher = app_clone.clone();
+                        let recording = Arc::clone(&rm_clone);
+                        router.finish_at_pause(move || {
+                            if !recording.is_recording_readiness_current(generation) {
+                                return;
+                            }
+                            if let Some(coordinator) =
+                                finisher.try_state::<TranscriptionCoordinator>()
+                            {
+                                coordinator.send_finish("voice-triage");
+                            }
+                        });
+                    }
                     if input_name.is_some() && rm_clone.is_recording_input_available(generation) {
                         let _ = app_clone
                             .emit(DICTATION_INPUT_EVENT, DictationInput { run_id, input_name });

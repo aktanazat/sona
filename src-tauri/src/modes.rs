@@ -2309,7 +2309,9 @@ impl RunPlan {
     }
 
     /// Freeze words said about tasks under the active mode. The tracker reads
-    /// them, so no rewrite runs and nothing is read from the screen.
+    /// them, so no rewrite runs and nothing is read from the screen. A triage
+    /// decision always listens through voice detection: its recording ends at
+    /// the speaker's pause, which only the detector can hear.
     fn for_spoken_work(settings: &AppSettings, work: SpokenWork) -> Result<Self, RunPlanError> {
         let mode = active_mode(settings)
             .cloned()
@@ -2323,6 +2325,9 @@ impl RunPlan {
             None,
         )?;
         run.context.without_live_capture();
+        if work == SpokenWork::Triage {
+            run.asr.vad_enabled = true;
+        }
         run.spoken_work = Some(work);
         Ok(run)
     }
@@ -2745,6 +2750,20 @@ mod tests {
         assert!(note.post_process_requested());
         assert_eq!(note.context_plan().effective_policy(), ContextPolicy::None);
         assert!(!tasks.note() && !tasks.post_process_requested());
+    }
+
+    /// With voice detection off every frame counts as speech, so a triage
+    /// recording would never hear a pause and would run to its limit.
+    #[test]
+    fn a_triage_decision_listens_through_voice_detection_even_when_it_is_off() {
+        let mut settings = configured_settings();
+        settings.modes[0].asr.vad_enabled = false;
+        let triage = RunPlan::for_intent(&settings, &TranscriptionIntent::Triage).unwrap();
+        let tasks = RunPlan::for_intent(&settings, &TranscriptionIntent::Tasks).unwrap();
+
+        assert_eq!(triage.spoken_work(), Some(SpokenWork::Triage));
+        assert!(triage.asr().vad_enabled);
+        assert!(!tasks.asr().vad_enabled);
     }
 
     #[test]
