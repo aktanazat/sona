@@ -20,7 +20,244 @@ struct TriageScreen: View {
             focus.peeking = false
             focus.renaming = nil
             focus.clearSelection()
+            model.voiceTriage.stop()
         }
+    }
+}
+
+/// Triage by voice: Sona listens for a decision on the highlighted task,
+/// applies it, moves on and listens again, until told to stop, Triage is
+/// clear, or nothing is said for a while. Each decision is one change, so
+/// "undo" or ⌘Z takes it back whole.
+@MainActor @Observable
+final class VoiceTriage {
+    static let heardEvent = "work-triage-heard"
+
+    enum Phase: Equatable { case off, listening, paused }
+
+    private(set) var phase = Phase.off
+    /// What the last words did, or why they did nothing.
+    private(set) var last: String?
+
+    /// The task the words being recorded are about: the one highlighted
+    /// when listening began, so a click or arrow while they are worked on
+    /// cannot move them to another.
+    private var hearing: String?
+    /// The task the last words accepted and moved on from, with where the
+    /// undo list stood before them. Fields said next, with no verdict, are
+    /// the rest of that sentence cut by a pause ("Accept… assign to Dana"),
+    /// so they go to it and undo with it.
+    @ObservationIgnored private var accepted: (id: String, mark: Int, summary: String)?
+
+    private unowned let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+    }
+
+    func start() {
+        last = nil
+        guard settle() != nil else {
+            model.workFocus.announce("Triage is clear.", undoes: false)
+            return
+        }
+        listen()
+    }
+
+    func resume() {
+        last = nil
+        guard settle() != nil else {
+            stop()
+            return
+        }
+        listen()
+    }
+
+    func stop() {
+        guard phase != .off else { return }
+        let listening = phase == .listening
+        phase = .off
+        last = nil
+        let model = model
+        Task {
+            try? await model.core.request("work_triage_listen", ListenParams(listen: false))
+            if listening, model.capture != .idle {
+                try? await model.core.request("cancel_operation")
+            }
+        }
+    }
+
+    /// A recording error while listening: the reason shows, and Resume
+    /// tries again.
+    func interrupted(_ reason: String) {
+        guard phase == .listening else { return }
+        pause(reason)
+    }
+
+    func heard(_ line: Data) {
+        guard phase == .listening, let event = try? Core.payload(line) as WorkTriageHeardEvent else { return }
+        let previous = accepted
+        accepted = nil
+        let said = event.said.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !said.isEmpty else {
+            pause("Nothing was said for a while.")
+            return
+        }
+        guard let decision = event.decision else {
+            last = "Didn't catch “\(said)”."
+            listen()
+            return
+        }
+        guard let id = hearing else {
+            stop()
+            return
+        }
+        apply(decision, to: id, after: previous)
+        guard phase == .listening else { return }
+        if settle() == nil {
+            stop()
+        } else {
+            listen()
+        }
+    }
+
+    private func listen() {
+        phase = .listening
+        hearing = model.workFocus.highlighted
+        let model = model
+        Task {
+            do {
+                try await model.core.request("work_triage_listen", ListenParams(listen: true))
+            } catch {
+                self.interrupted(error.localizedDescription)
+            }
+        }
+    }
+
+    private func pause(_ reason: String) {
+        phase = .paused
+        last = reason
+        let model = model
+        Task { try? await model.core.request("work_triage_listen", ListenParams(listen: false)) }
+    }
+
+    /// The triage tasks in the list, in its order.
+    private var waiting: [String] {
+        model.workRows(model.workFocus.visible).filter { $0.status == .triage }.map(\.id)
+    }
+
+    /// The task the next words are about: the highlighted one when it is
+    /// still waiting, else the first that is.
+    @discardableResult
+    private func settle() -> String? {
+        let focus = model.workFocus
+        let waiting = self.waiting
+        let current = focus.highlighted.flatMap { waiting.contains($0) ? $0 : nil } ?? waiting.first
+        focus.highlighted = current
+        return current
+    }
+
+    /// "#12", how the list names a task.
+    private func named(_ id: String) -> String {
+        model.workRows([id]).first.map { "#\($0.number)" } ?? "The task"
+    }
+
+    /// The task being listened for, as the list names it.
+    var listeningFor: String? { hearing.map(named) }
+
+    private func apply(_ decision: TriageSaid, to id: String, after previous: (id: String, mark: Int, summary: String)?) {
+        let focus = model.workFocus
+        let work = model.work
+        switch decision {
+        case .next:
+            focus.highlighted = focus.successor(of: [id]) ?? id
+            last = "Next"
+        case .back:
+            let waiting = self.waiting
+            if let index = waiting.firstIndex(of: id), index > 0 { focus.highlighted = waiting[index - 1] }
+            last = "Back"
+        case .undo:
+            let title = work.undoTitle
+            model.undoWork()
+            last = title.map { "Undid: \($0)" } ?? "Nothing to undo."
+        case .stop:
+            stop()
+        case let .decide(nil, patch, summary, _) where patch != WorkPatch() && previous != nil:
+            guard let previous else { return }
+            let joined = "\(previous.summary), \(summary)"
+            model.changeWork {
+                work.update([previous.id], patch)
+                work.joinUndo(since: previous.mark, as: joined)
+            }
+            accepted = (previous.id, previous.mark, joined)
+            last = "\(named(previous.id)): \(joined)"
+        case let .decide(verdict, patch, summary, next):
+            guard model.workRows([id]).first?.status == .triage else {
+                last = "\(named(id)) was already decided."
+                return
+            }
+            var original: String?
+            if case let .duplicate(number) = verdict {
+                original = work.items?.first { $0.number == number && $0.id != id }?.id
+                guard original != nil else {
+                    last = "There's no task #\(number)."
+                    return
+                }
+            }
+            let after = next ? focus.successor(of: [id]) : id
+            let mark = work.undoMark
+            model.changeWork {
+                switch verdict {
+                case .accept: work.accept([id], applySuggestions: true)
+                case let .decline(reason): work.decline([id], reason: reason)
+                case .duplicate: if let original { work.markDuplicate(id, of: original) }
+                case nil: break
+                }
+                if patch != WorkPatch() { work.update([id], patch) }
+                work.joinUndo(since: mark, as: summary)
+            }
+            if verdict == .accept, next { accepted = (id, mark, summary) }
+            focus.highlighted = after
+            last = "\(named(id)): \(summary)"
+        }
+    }
+
+    private struct ListenParams: Encodable {
+        let listen: Bool
+    }
+}
+
+/// The strip over Triage while Sona listens for decisions: what it is
+/// doing, what the last words did, and Stop.
+private struct VoiceTriageBar: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let voice = model.voiceTriage
+        let listening = voice.phase == .listening
+        HStack(spacing: 10) {
+            Image(systemName: listening ? "waveform" : "pause.circle")
+                .foregroundStyle(listening ? Theme.accent : Theme.inkSecondary)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(listening ? "Listening for \(voice.listeningFor ?? "a task"). Say accept, decline, or next." : "Paused")
+                    .bodyText(13)
+                    .lineLimit(1)
+                if let last = voice.last {
+                    Text(last).metaText().lineLimit(1)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 0)
+            if !listening {
+                Button("Resume") { voice.resume() }
+                    .buttonStyle(QuietButton(compact: true))
+            }
+            Button("Stop") { voice.stop() }
+                .buttonStyle(QuietButton(compact: true))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 }
 
@@ -41,6 +278,15 @@ private struct TriageList: View {
             WorkBar {
                 InboxTabs()
             } trailing: {
+                let voice = model.voiceTriage
+                Button {
+                    if voice.phase == .off { voice.start() } else { voice.stop() }
+                } label: {
+                    Image(systemName: "mic")
+                }
+                .buttonStyle(IconButton(on: voice.phase != .off))
+                .help(voice.phase == .off ? "Triage by voice" : "Stop triage by voice")
+                .accessibilityLabel(voice.phase == .off ? "Triage by voice" : "Stop triage by voice")
                 Button {
                     focus.inboxSearching.toggle()
                     if !focus.inboxSearching { focus.inboxSearch = "" }
@@ -58,6 +304,9 @@ private struct TriageList: View {
             }
             if focus.inboxSearching {
                 InboxSearchField(prompt: "Search triage")
+            }
+            if model.voiceTriage.phase != .off {
+                VoiceTriageBar()
             }
             TriageSplits(rows: waiting)
             if let error = store.listError, store.items != nil {

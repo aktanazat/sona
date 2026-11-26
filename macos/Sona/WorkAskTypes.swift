@@ -189,3 +189,60 @@ struct WorkCommandHeardEvent: Decodable {
     var said: String
     var historyId: Int64?
 }
+
+/// `work-triage-heard`: what one voice triage recording heard. Empty words:
+/// nothing was said before it ended. Words and no decision: they were not
+/// one.
+struct WorkTriageHeardEvent: Decodable {
+    var said: String
+    var historyId: Int64?
+    var decision: TriageSaid?
+}
+
+/// A decision on the triage task in front of the speaker.
+enum TriageSaid: Decodable, Equatable {
+    /// A verdict, fields to set, or both; without a verdict the task stays
+    /// in Triage.
+    case decide(verdict: TriageVerdict?, patch: WorkPatch, summary: String, next: Bool)
+    case next, back, undo, stop
+
+    private enum Key: String, CodingKey { case kind, verdict, patch, summary, next }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        switch try container.decode(String.self, forKey: .kind) {
+        case "decide":
+            self = .decide(
+                verdict: try container.decodeIfPresent(TriageVerdict.self, forKey: .verdict),
+                patch: try container.decode(WorkPatch.self, forKey: .patch),
+                summary: try container.decode(String.self, forKey: .summary),
+                next: try container.decode(Bool.self, forKey: .next))
+        case "next": self = .next
+        case "back": self = .back
+        case "undo": self = .undo
+        case "stop": self = .stop
+        case let other:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown decision \(other)")
+        }
+    }
+}
+
+enum TriageVerdict: Decodable, Equatable {
+    case accept
+    case decline(reason: String?)
+    /// It repeats the task with this number.
+    case duplicate(number: Int64)
+
+    private enum Key: String, CodingKey { case kind, reason, number }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        switch try container.decode(String.self, forKey: .kind) {
+        case "accept": self = .accept
+        case "decline": self = .decline(reason: try container.decodeIfPresent(String.self, forKey: .reason))
+        case "duplicate": self = .duplicate(number: try container.decode(Int64.self, forKey: .number))
+        case let other:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown verdict \(other)")
+        }
+    }
+}

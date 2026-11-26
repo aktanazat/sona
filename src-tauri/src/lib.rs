@@ -2301,6 +2301,7 @@ pub fn run(cli_args: CliArgs) {
             planning::work::words::work_where,
             planning::work::capture::work_capture,
             planning::work::capture::work_take_lines,
+            planning::work::capture::work_triage_listen,
             planning::work::ask::work_ask,
             planning::work::command::work_command,
             planning::work::watch::work_watches,
@@ -2360,6 +2361,7 @@ pub fn run(cli_args: CliArgs) {
             planning::work::capture::WorkQuickEntry,
             planning::work::capture::WorkRambleFiled,
             planning::work::capture::WorkCommandHeard,
+            planning::work::capture::WorkTriageHeard,
             planning::work::watch::WorkWatchOpened,
             planning::work::watch::WorkWatchesChanged,
         ]);

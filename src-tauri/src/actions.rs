@@ -1938,12 +1938,22 @@ pub(crate) async fn process_transcription_output(
         //
         // The instruction replaces this run's preset rewrite rather than adding
         // a second provider call: an explicit request outranks the mode's
-        // standing one, and two rewrites would fight over the same text.
-        let spoken = if run.prompt().spoken_instructions {
+        // standing one, and two rewrites would fight over the same text. A
+        // request that is a saved skill's name asks for that skill's words.
+        let mut spoken = if run.prompt().spoken_instructions {
             crate::audio_toolkit::split_spoken_instruction(&final_text)
         } else {
             None
         };
+        if let Some(spoken) = &mut spoken {
+            if let Some(skill) = app
+                .state::<Arc<crate::meeting::session::MeetingSessionManager>>()
+                .spoken_skill(&spoken.instruction)
+                .await
+            {
+                spoken.instruction = skill;
+            }
+        }
         if let Some(spoken) = &spoken {
             final_text = spoken.text.clone();
             post_processed_text = Some(final_text.clone());
@@ -2167,6 +2177,9 @@ impl TranscribeAction {
                 let generation = readiness.generation();
                 let app_clone = app.clone();
                 let rm_clone = Arc::clone(&rm);
+                let pause_watch = (self.run.spoken_work()
+                    == Some(crate::modes::SpokenWork::Triage))
+                .then(|| tm.stream_router());
                 std::thread::spawn(move || {
                     let Ok(input_name) = readiness.wait() else {
                         debug!("Microphone readiness wait ended without receiving samples");
@@ -2195,6 +2208,20 @@ impl TranscribeAction {
 
                     debug!("Microphone is receiving samples; recording is ready");
                     utils::emit_recording_ready(&app_clone);
+                    if let Some(router) = pause_watch {
+                        let finisher = app_clone.clone();
+                        let recording = Arc::clone(&rm_clone);
+                        router.finish_at_pause(move || {
+                            if !recording.is_recording_readiness_current(generation) {
+                                return;
+                            }
+                            if let Some(coordinator) =
+                                finisher.try_state::<TranscriptionCoordinator>()
+                            {
+                                coordinator.send_finish("voice-triage");
+                            }
+                        });
+                    }
                     if input_name.is_some() && rm_clone.is_recording_input_available(generation) {
                         let _ = app_clone
                             .emit(DICTATION_INPUT_EVENT, DictationInput { run_id, input_name });
@@ -2330,6 +2357,8 @@ impl TranscribeAction {
                 app: ah.clone(),
                 run_id: run.run_id,
             });
+            let triage_reply = (run.spoken_work() == Some(crate::modes::SpokenWork::Triage))
+                .then(|| crate::planning::work::capture::TriageReply::new(ah.clone()));
             debug!(
                 "Starting async transcription task for binding: {}",
                 binding_id
@@ -2616,7 +2645,7 @@ impl TranscribeAction {
                                     },
                                 );
 
-                                if run.tasks() {
+                                if let Some(work) = run.spoken_work() {
                                     let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     persist_delivery_attempt(
                                         &hm,
@@ -2624,12 +2653,21 @@ impl TranscribeAction {
                                         run.run_id,
                                         DeliveryReceipt::not_dispatched(),
                                     );
-                                    crate::planning::work::capture::file_spoken(
-                                        ah.clone(),
-                                        history_id,
-                                        processed.final_text,
-                                        Arc::clone(&completed_pcm),
-                                    );
+                                    match work {
+                                        crate::modes::SpokenWork::Tasks => {
+                                            crate::planning::work::capture::file_spoken(
+                                                ah.clone(),
+                                                history_id,
+                                                processed.final_text,
+                                                Arc::clone(&completed_pcm),
+                                            );
+                                        }
+                                        crate::modes::SpokenWork::Triage => {
+                                            if let Some(reply) = &triage_reply {
+                                                reply.heard(history_id, processed.final_text);
+                                            }
+                                        }
+                                    }
                                 } else if run.note() {
                                     let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     if let Some(event) = RewriteSkippedEvent::for_outcome(

@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 53] = [
+pub(super) const TYPED_EVENTS: [&str; 54] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -63,6 +63,7 @@ pub(super) const TYPED_EVENTS: [&str; 53] = [
     crate::planning::work::capture::WorkQuickEntry::NAME,
     crate::planning::work::capture::WorkRambleFiled::NAME,
     crate::planning::work::capture::WorkCommandHeard::NAME,
+    crate::planning::work::capture::WorkTriageHeard::NAME,
     crate::planning::work::watch::WorkWatchOpened::NAME,
     crate::planning::work::watch::WorkWatchesChanged::NAME,
 ];
@@ -7306,6 +7307,14 @@ pub(super) async fn call(
                 crate::planning::work::capture::work_take_lines(app.clone(), operation_id, lines)
                     .await,
             )
+        }
+        "work_triage_listen" => {
+            let mut args = Args::parse(params)?;
+            let listen = args.take("listen")?;
+            reply(crate::planning::work::capture::work_triage_listen(
+                app.clone(),
+                listen,
+            ))
         }
         "work_ask" => {
             let mut args = Args::parse(params)?;

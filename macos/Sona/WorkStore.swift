@@ -1051,8 +1051,16 @@ final class WorkStore {
 
     func undo() {
         guard let last = undoStack.popLast() else { return }
+        var taken = [last]
+        while let group = last.group, let next = undoStack.last, next.group == group {
+            taken.append(undoStack.removeLast())
+        }
         undoTitle = undoStack.last?.title
-        switch last.reversal {
+        for undo in taken { reverse(undo.reversal) }
+    }
+
+    private func reverse(_ reversal: Reversal) {
+        switch reversal {
         case let .patches(groups):
             for group in groups { send(group.patch, to: group.ids, undo: nil) }
         case let .archive(ids):
@@ -1570,8 +1578,11 @@ final class WorkStore {
 
     private struct Undo {
         let id: Int
-        let title: String
+        var title: String
         let reversal: Reversal
+        /// Entries with one group undo together; each still goes on its own
+        /// when its change fails.
+        var group: Int?
     }
 
     private enum Reversal {
@@ -1842,6 +1853,21 @@ final class WorkStore {
         guard let id else { return }
         undoStack.removeAll { $0.id == id }
         undoTitle = undoStack.last?.title
+    }
+
+    /// Where the undo list stands, for `joinUndo(since:as:)`.
+    var undoMark: Int { undoSerial }
+
+    /// Groups the changes remembered since `mark` under one title, so one
+    /// undo takes back a decision that made several, while a change that
+    /// fails still drops only its own entry.
+    func joinUndo(since mark: Int, as title: String) {
+        guard let first = undoStack.first(where: { $0.id > mark }) else { return }
+        for index in undoStack.indices where undoStack[index].id > mark {
+            undoStack[index].group = first.id
+            undoStack[index].title = title
+        }
+        undoTitle = title
     }
 
     private func place(_ label: WorkLabel) {

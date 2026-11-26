@@ -104,6 +104,46 @@ impl SavedPromptList {
         self.skills()
             .find(|prompt| prompt.name.trim().eq_ignore_ascii_case(name))
     }
+
+    /// The skill a spoken request names and nothing more: "standup", "run
+    /// my standup skill", "Stand-up." Speech spells a name loosely, so only
+    /// its letters and digits are compared; two skills that compare alike
+    /// are named by neither.
+    pub fn skill_called(&self, said: &str) -> Option<&SavedPrompt> {
+        let lowered = said.to_lowercase();
+        let words: Vec<&str> = lowered
+            .split(|character: char| !character.is_alphanumeric() && character != '\'')
+            .filter(|word| !word.is_empty())
+            .collect();
+        let openers = [
+            "hey", "sona", "please", "can", "could", "you", "run", "use", "do", "apply", "my",
+            "the",
+        ];
+        let opened = words
+            .iter()
+            .take_while(|word| openers.contains(word))
+            .count();
+        let mut asked = &words[opened..];
+        if let [rest @ .., "skill"] = asked {
+            asked = rest;
+        }
+        let named = [&words[..], asked].into_iter().find_map(|name| {
+            let wanted = letters(&name.concat());
+            let mut named = self
+                .skills()
+                .filter(|prompt| !wanted.is_empty() && letters(&prompt.name) == wanted);
+            let skill = named.next()?;
+            named.next().is_none().then_some(skill)
+        });
+        named
+    }
+}
+
+fn letters(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// The prompts on this machine, and the fence a write against them carries.

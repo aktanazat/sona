@@ -68,6 +68,9 @@ const STREAM_PREVIEW_FRAME_SAMPLES: usize = 480;
 const STREAM_PREVIEW_QUEUE_CAPACITY: usize =
     STREAM_PREVIEW_QUEUE_SAMPLES / STREAM_PREVIEW_FRAME_SAMPLES;
 const STREAM_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const PAUSE_AFTER_SPEECH: Duration = Duration::from_millis(1_200);
+const PAUSE_BEFORE_SPEECH: Duration = Duration::from_secs(8);
+const PAUSE_LONGEST: Duration = Duration::from_secs(20);
 #[cfg(feature = "cloud-realtime")]
 const CLOUD_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 #[cfg(feature = "cloud-realtime")]
@@ -357,6 +360,10 @@ pub struct StreamRouter {
     /// Silence must not load a model or open a cloud connection.
     first_speech_start: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
     first_speech_armed: AtomicBool,
+    /// Told of each speech frame while a recording should end at its first
+    /// pause. See [`Self::finish_at_pause`].
+    pause_watch: Mutex<Option<mpsc::SyncSender<()>>>,
+    pause_watched: AtomicBool,
 }
 
 impl StreamRouter {
@@ -368,6 +375,8 @@ impl StreamRouter {
             preview_degraded: AtomicBool::new(false),
             first_speech_start: Mutex::new(None),
             first_speech_armed: AtomicBool::new(false),
+            pause_watch: Mutex::new(None),
+            pause_watched: AtomicBool::new(false),
         }
     }
 
@@ -437,8 +446,53 @@ impl StreamRouter {
             .take();
     }
 
+    /// Ends the next recording when its speaker pauses: `finish` runs once no
+    /// speech frame has come for [`PAUSE_AFTER_SPEECH`] after the first, when
+    /// none has come for [`PAUSE_BEFORE_SPEECH`], or after [`PAUSE_LONGEST`].
+    /// Speech frames are the ones voice detection forwards, so its hangover
+    /// is part of the pause. A later watch, or [`Self::end_pause_watch`],
+    /// drops this one without running it.
+    pub fn finish_at_pause(&self, finish: impl FnOnce() + Send + 'static) {
+        let (heard_tx, heard_rx) = mpsc::sync_channel(1);
+        *self
+            .pause_watch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(heard_tx);
+        self.pause_watched.store(true, Ordering::Release);
+        thread::spawn(move || {
+            let started = Instant::now();
+            let mut wait = PAUSE_BEFORE_SPEECH;
+            loop {
+                match heard_rx.recv_timeout(wait) {
+                    Ok(()) if started.elapsed() < PAUSE_LONGEST => wait = PAUSE_AFTER_SPEECH,
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            finish();
+        });
+    }
+
+    pub fn end_pause_watch(&self) {
+        self.pause_watched.store(false, Ordering::Release);
+        self.pause_watch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+
     /// Live preview is best-effort. A full lane is terminal for preview, never for capture.
     pub fn feed(&self, frame: &[f32]) {
+        if self.pause_watched.load(Ordering::Acquire) {
+            if let Ok(mut watch) = self.pause_watch.try_lock() {
+                if let Some(Err(mpsc::TrySendError::Disconnected(()))) =
+                    watch.as_ref().map(|heard| heard.try_send(()))
+                {
+                    *watch = None;
+                    self.pause_watched.store(false, Ordering::Release);
+                }
+            }
+        }
         if self.first_speech_armed.load(Ordering::Acquire) {
             // Keep this lock across `start`: cancellation either clears this
             // one-shot before it can run, or takes the route it creates.
@@ -5194,6 +5248,49 @@ mod tests {
         assert!(router.take().is_none());
         router.feed(&[0.25; STREAM_PREVIEW_FRAME_SAMPLES]);
         assert_eq!(cancelled_starts.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_pause_after_speech_finishes_only_the_latest_watch() {
+        let router = StreamRouter::new();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let replaced_tx = finished_tx.clone();
+        router.finish_at_pause(move || {
+            let _ = replaced_tx.send("replaced");
+        });
+        router.finish_at_pause(move || {
+            let _ = finished_tx.send("latest");
+        });
+        let spoke = Instant::now();
+        for _ in 0..5 {
+            router.feed(&[0.25; STREAM_PREVIEW_FRAME_SAMPLES]);
+        }
+
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(5)),
+            Ok("latest")
+        );
+        let paused = spoke.elapsed();
+        assert!(paused >= PAUSE_AFTER_SPEECH && paused < PAUSE_BEFORE_SPEECH);
+        assert!(finished_rx
+            .recv_timeout(Duration::from_millis(200))
+            .is_err());
+    }
+
+    #[test]
+    fn an_ended_pause_watch_never_finishes() {
+        let router = StreamRouter::new();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        router.finish_at_pause(move || {
+            let _ = finished_tx.send(());
+        });
+        router.end_pause_watch();
+        router.feed(&[0.25; STREAM_PREVIEW_FRAME_SAMPLES]);
+
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
     }
 
     fn smoothed_onset_and_continuation() -> (Vec<Vec<f32>>, Vec<f32>) {

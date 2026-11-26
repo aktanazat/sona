@@ -37,6 +37,14 @@ impl MeetingSessionManager {
         self.store().await?.saved_prompts().map_err(map_store_error)
     }
 
+    /// The instructions of the skill a spoken request names, when it names
+    /// one. A list that cannot be read names none, and the request stays
+    /// what was said.
+    pub async fn spoken_skill(&self, said: &str) -> Option<String> {
+        let list = self.saved_prompts().await.ok()?;
+        list.skill_called(said).map(|skill| skill.body.clone())
+    }
+
     pub async fn save_saved_prompt(
         &self,
         request: SavedPromptSaveRequest,
@@ -489,6 +497,44 @@ mod tests {
             )
             .expect_err("duplicate skill name");
         assert_eq!(duplicate, crate::meeting::store::StoreError::Invalid);
+    }
+
+    #[test]
+    fn a_spoken_request_names_a_skill_only_when_it_is_the_skills_name() {
+        let (_directory, store) = store();
+        let mut revision = store.saved_prompts().unwrap().revision;
+        for (name, skill) in [
+            ("Stand-up", true),
+            ("Do not disturb", true),
+            ("Recap", false),
+        ] {
+            revision = store
+                .save_saved_prompt(
+                    &SavedPromptSaveRequest {
+                        operation_id: MeetingOperationId::new(),
+                        prompt_id: None,
+                        name: name.to_string(),
+                        body: format!("{name} body."),
+                        output: PromptOutput::Text,
+                        target: PromptTarget::Meeting,
+                        skill,
+                        expected_revision: revision,
+                    },
+                    NOW,
+                )
+                .expect("a prompt")
+                .prompts
+                .revision;
+        }
+        let list = store.saved_prompts().unwrap();
+        let named = |said: &str| list.skill_called(said).map(|skill| skill.name.as_str());
+
+        assert_eq!(named("Run my standup skill."), Some("Stand-up"));
+        assert_eq!(named("stand up"), Some("Stand-up"));
+        assert_eq!(named("Do not disturb."), Some("Do not disturb"));
+        assert_eq!(named("recap"), None);
+        assert_eq!(named("make the standup shorter"), None);
+        assert_eq!(named("run my skill"), None);
     }
 
     #[test]
