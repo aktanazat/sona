@@ -8,6 +8,7 @@ use crate::managers::{
     },
     transcription::{BatchDecode, SpeechEvidence, TranscriptionManager},
 };
+use base64::Engine;
 use log::{error, info};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -20,9 +21,11 @@ const HISTORY_AUDIO_CHUNK_BYTES_U64: u64 = 256 * 1024;
 
 /// One bounded fragment of a history recording. The command identifies media
 /// through a history row and never exposes a filesystem path to the webview.
+/// The bytes travel as base64: a JSON array of numbers takes about 3.6
+/// characters per byte, and every number is parsed on its own.
 #[derive(serde::Serialize, specta::Type)]
 pub struct HistoryAudioChunk {
-    pub bytes: Vec<u8>,
+    pub bytes: String,
     pub eof: bool,
 }
 
@@ -41,7 +44,7 @@ fn read_history_audio_chunk_from_path(
     let file_len = metadata.len();
     if offset >= file_len {
         return Ok(HistoryAudioChunk {
-            bytes: Vec::new(),
+            bytes: String::new(),
             eof: true,
         });
     }
@@ -62,7 +65,7 @@ fn read_history_audio_chunk_from_path(
 
     Ok(HistoryAudioChunk {
         eof: offset.saturating_add(u64::try_from(read).unwrap_or(u64::MAX)) >= file_len,
-        bytes,
+        bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
     })
 }
 
@@ -459,8 +462,13 @@ mod tests {
         let payload = vec![0xA5; HISTORY_AUDIO_CHUNK_BYTES + 17];
         fs::write(&path, &payload).expect("recording fixture");
 
+        let decode = |chunk: &HistoryAudioChunk| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&chunk.bytes)
+                .expect("base64 bytes")
+        };
         let first = read_history_audio_chunk_from_path(&path, 0).expect("first chunk");
-        assert_eq!(first.bytes.len(), HISTORY_AUDIO_CHUNK_BYTES);
+        assert_eq!(decode(&first).len(), HISTORY_AUDIO_CHUNK_BYTES);
         assert!(!first.eof);
 
         let last = read_history_audio_chunk_from_path(
@@ -468,7 +476,7 @@ mod tests {
             u64::try_from(HISTORY_AUDIO_CHUNK_BYTES).expect("chunk offset"),
         )
         .expect("last chunk");
-        assert_eq!(last.bytes, vec![0xA5; 17]);
+        assert_eq!(decode(&last), vec![0xA5; 17]);
         assert!(last.eof);
 
         let end = read_history_audio_chunk_from_path(
@@ -481,6 +489,11 @@ mod tests {
 
         let serialized = serde_json::to_string(&first).expect("chunk serialization");
         assert!(!serialized.contains(path.to_string_lossy().as_ref()));
+        assert!(
+            serialized.len() <= HISTORY_AUDIO_CHUNK_BYTES.div_ceil(3) * 4 + 32,
+            "a {HISTORY_AUDIO_CHUNK_BYTES} byte chunk took {} bytes of JSON",
+            serialized.len()
+        );
     }
 
     #[cfg(unix)]

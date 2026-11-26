@@ -66,7 +66,7 @@ pub(crate) fn search(words: &str, limit: usize) -> Vec<HelpSection> {
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn help_search(words: String, limit: Option<usize>) -> Vec<HelpSection> {
     search(&words, limit.unwrap_or(3))

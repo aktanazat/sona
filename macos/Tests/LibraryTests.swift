@@ -40,6 +40,24 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(lastYear.relativeDay.hasSuffix(" \(year)"), lastYear.relativeDay)
     }
 
+    /// One read of a history event gives the page both the change and the
+    /// row it carries; a change without an entry still arrives.
+    func testAHistoryEventIsReadOnceAsChangeAndRow() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let added = #"{"action":"added","entry":{"id":5,"timestamp":1,"saved":false,"title":"t","#
+            + #""transcription_text":" heard ","post_processed_text":null,"parent_id":2}}"#
+        let event = try decoder.decode(HistoryRowUpdate.self, from: Data(added.utf8))
+        guard case .added(let entry) = event.update else { return XCTFail("\(event.update)") }
+        XCTAssertEqual(entry.id, 5)
+        XCTAssertEqual(event.entry?.spokenText, "heard")
+        XCTAssertEqual(event.entry?.parentId, 2)
+
+        let deleted = try decoder.decode(HistoryRowUpdate.self, from: Data(#"{"action":"deleted","id":5}"#.utf8))
+        guard case .deleted(5) = deleted.update else { return XCTFail("\(deleted.update)") }
+        XCTAssertNil(deleted.entry)
+    }
+
     private func storage(encrypted: Bool, reason: String?) throws -> StorageStatus {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase

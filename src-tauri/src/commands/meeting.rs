@@ -940,7 +940,7 @@ pub async fn meeting_live_help(
 /// The words the running capture has recognized so far, for the live screen.
 /// Empty once the meeting has stopped: the stored transcript is then the one
 /// reading, and `meeting_get` carries it.
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn meeting_live_transcript(
     manager: State<'_, Arc<MeetingSessionManager>>,

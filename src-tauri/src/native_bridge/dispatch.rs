@@ -538,7 +538,7 @@ pub(super) async fn call(
         }
         "agent_chat_history_list" => {
             let handle = app.clone();
-            on_main_thread(app, move || {
+            off_main_thread(move || {
                 reply(crate::agent_panel::agent_chat_history_list(handle.state()))
             })
             .await?
@@ -3123,10 +3123,7 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let words = args.take("words")?;
             let limit = args.take("limit")?;
-            on_main_thread(app, move || {
-                encode_plain(crate::help::help_search(words, limit))
-            })
-            .await?
+            off_main_thread(move || encode_plain(crate::help::help_search(words, limit))).await?
         }
         "agent_mcp_servers_list" => {
             let handle = app.clone();
@@ -3443,7 +3440,7 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let session_id = args.take("sessionId")?;
             let handle = app.clone();
-            on_main_thread(app, move || {
+            off_main_thread(move || {
                 encode_plain(crate::commands::meeting::meeting_live_transcript(
                     handle.state(),
                     session_id,

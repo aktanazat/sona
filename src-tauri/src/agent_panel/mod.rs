@@ -3353,7 +3353,7 @@ pub async fn agent_panel_dismiss_action(
 }
 
 /// The titles the history button lists, newest first.
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn agent_chat_history_list(
     manager: State<'_, AgentPanelManager>,
@@ -3361,6 +3361,10 @@ pub fn agent_chat_history_list(
     Ok(manager.history_list())
 }
 
+/// Sync and so on the main thread, like `agent_chat_new`: the shell can send
+/// an open and a new before either answers, and one thread runs them in the
+/// order they came, so the conversation the core keeps is the one the last
+/// answer names.
 #[tauri::command]
 #[specta::specta]
 pub fn agent_chat_open(

@@ -278,15 +278,15 @@ final class LibraryStore {
     // MARK: - The core's own writes
 
     /// A history write the pipeline announced, mirrored into the page on
-    /// screen. The action comes from the shared `HistoryUpdate`; the entry is
-    /// read a second time through `HistoryRow`, which keeps the three fields
-    /// the shared mirror leaves out. A frame that will not decode as a row is
-    /// still a frame that says something changed, so the page reloads.
+    /// screen. The action comes from the shared `HistoryUpdate` and the entry
+    /// from `HistoryRow`, which keeps the three fields the shared mirror
+    /// leaves out, both from one read of the frame. A frame that will not
+    /// decode as a row is still a frame that says something changed, so the
+    /// page reloads.
     private func applyHistory(_ line: Data) {
-        guard let update: HistoryUpdate = try? Core.payload(line) else { return }
-        let carried: HistoryRowUpdate? = try? Core.payload(line)
-        let row = carried?.entry
-        switch update {
+        guard let carried: HistoryRowUpdate = try? Core.payload(line) else { return }
+        let row = carried.entry
+        switch carried.update {
         case .added:
             // A new entry has not been matched against an active search, so it
             // joins the unfiltered list only. The next search asks the core.

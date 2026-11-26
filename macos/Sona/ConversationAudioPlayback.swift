@@ -10,7 +10,14 @@ struct ConversationAudioClip: Decodable {
     let endOffsetNs: UInt64
     let contributionOffsetNs: UInt64
     let nextOffsetNs: UInt64?
-    let wavBase64: String
+    /// Sent as base64; read into bytes while the reply decodes, off the main
+    /// actor, so the text is never kept beside the sound.
+    let wav: Data
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionId, segmentId, startOffsetNs, endOffsetNs, contributionOffsetNs, nextOffsetNs
+        case wav = "wavBase64"
+    }
 }
 
 /// One stretch a reel plays: a line, and the window to hear it in. An open
@@ -267,11 +274,10 @@ final class ConversationAudioPlayback {
                     "endOffsetNs": end.map { .number(Double($0)) } ?? .null,
                 ])
                 guard expected == generation, !Task.isCancelled else { return }
-                guard result.sessionId == sessionId, result.segmentId == segmentId,
-                      let data = Data(base64Encoded: result.wavBase64) else {
+                guard result.sessionId == sessionId, result.segmentId == segmentId else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
-                let made = try AVAudioPlayer(data: data)
+                let made = try AVAudioPlayer(data: result.wav)
                 if reelKey != nil {
                     made.enableRate = true
                     made.rate = reelRate
