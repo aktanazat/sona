@@ -1247,7 +1247,7 @@ struct CommandPalette: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                        ForEach(Array(numberedSections.enumerated()), id: \.offset) { _, section in
                             Text(section.label)
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(Theme.inkTertiary)
@@ -1255,8 +1255,7 @@ struct CommandPalette: View {
                                 .padding(.horizontal, 20)
                                 .padding(.top, 12)
                                 .padding(.bottom, 4)
-                            ForEach(section.rows) { row in
-                                let index = section.live ? rows.firstIndex { $0.id == row.id } ?? 0 : -1
+                            ForEach(section.rows, id: \.row.id) { index, row in
                                 PaletteRowView(
                                     row: row, selected: index == selection, marks: marks, asked: hearing,
                                     picked: picked.contains { "answer:\($0.id)" == row.id },
@@ -1367,6 +1366,20 @@ struct CommandPalette: View {
             sections.append(("Ask", [.ask(trimmed)], true))
         }
         return sections
+    }
+
+    /// The sections, each row with its place among the rows a keystroke can
+    /// land on (-1 for a row that is not live), read once per draw.
+    private var numberedSections: [(label: String, rows: [(index: Int, row: PaletteRow)], live: Bool)] {
+        var next = 0
+        return sections.map { section in
+            let rows = section.rows.map { row -> (index: Int, row: PaletteRow) in
+                guard section.live else { return (-1, row) }
+                defer { next += 1 }
+                return (next, row)
+            }
+            return (section.label, rows, section.live)
+        }
     }
 
     /// The rows a keystroke can land on.
