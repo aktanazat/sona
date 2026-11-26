@@ -769,7 +769,6 @@ final class WorkKeys {
             hint(key, model)
             return true
         }
-        guard !model.showingSettings else { return false }
         if flags.isEmpty, key == "/" {
             model.toggleSearch()
             return true
@@ -1053,7 +1052,7 @@ extension AppModel {
 
     /// The tasks a verb acts on now, when a task screen is showing.
     var workTargets: [String] {
-        guard !showingSettings, showsTasks else { return [] }
+        guard showsTasks else { return [] }
         return workFocus.targets(in: place)
     }
 

@@ -71,6 +71,14 @@ struct SonaApp: App {
         .restorationBehavior(.disabled)
         .commandsRemoved()
 
+        Settings {
+            SettingsWindow().environment(model)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
+        .defaultSize(width: 1100, height: 760)
+        .windowResizability(.contentMinSize)
+
         MenuBarExtra {
             MenuBarMenu().environment(model)
         } label: {
@@ -296,6 +304,7 @@ extension CaptureState {
 struct MenuBarMark: View {
     let model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         HStack(spacing: 6) {
@@ -308,6 +317,7 @@ struct MenuBarMark: View {
         .onAppear {
             model.presentMainWindow = { openWindow(id: "main") }
             model.presentItemWindow = { openWindow(value: $0) }
+            model.presentSettings = { openSettings() }
             model.reopenMainWindow()
         }
         .task(id: model.ready) {

@@ -33,6 +33,13 @@ struct Shell: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     .background(Theme.page.ignoresSafeArea())
+                    .overlay(alignment: .bottom) {
+                        if let first = model.chordHint {
+                            ChordHint(first: first)
+                                .padding(.bottom, 28)
+                                .allowsHitTesting(false)
+                        }
+                    }
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
                     .environment(\.paneWidth, paneWidth)
                     .toolbar(removing: .title)
@@ -40,12 +47,6 @@ struct Shell: View {
                 if model.paletteShown {
                     CommandPalette()
                         .transition(.identity)
-                }
-                if let first = model.chordHint {
-                    ChordHint(first: first)
-                        .frame(maxHeight: .infinity, alignment: .bottom)
-                        .padding(.bottom, 28)
-                        .allowsHitTesting(false)
                 }
                 if dropTargeted {
                     RoundedRectangle(cornerRadius: Theme.radiusCard)
@@ -123,8 +124,6 @@ struct Shell: View {
                 SaveTemplateSheet(id: id).environment(model)
             case let .problemReport(historyID):
                 ProblemReportSheet(historyID: historyID).environment(model)
-            case let .quicklinkEditor(id):
-                QuicklinkEditor(store: model.quicklinks, id: id)
             case let .quicklinkArgument(id):
                 QuicklinkArgumentSheet(link: model.quicklinks.links.first { $0.id == id }) {
                     try model.openQuicklink(id, argument: $0)
@@ -153,84 +152,80 @@ struct Shell: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.showingSettings {
-            SettingsScreen()
-        } else {
-            switch model.place {
-            case .capture:
-                CaptureScreen()
-                    .overlay(alignment: .bottomLeading) { UndoToast() }
-            case .activity:
-                ActivityScreen()
-            case .library:
-                LibraryScreen(
-                    store: model.library,
-                    importAudio: { model.showSettings(.importing) },
-                    addCorrection: { left, right in
-                        model.vocabulary.add(kind: .vocabulary, left: left, right: right)
-                    })
-            case .meetings:
-                MeetingsPlace()
-            case .people:
-                PeopleScreen(
-                    store: model.people,
-                    openMeeting: model.openMeeting,
-                    openContribution: { sessionId, atMilliseconds in
-                        model.meetings.open(sessionId, atMilliseconds: atMilliseconds)
-                        model.go(.meetings)
-                    },
-                    ingestDocument: { model.showSettings(.importing) },
-                    deleteDocument: { id in Task { await model.documents.delete(id: id) } })
-            case .scratchpad:
-                ScratchpadView(store: model.scratchpad, share: { note in
-                    Task {
-                        await model.scratchpad.flush()
-                        guard let saved = model.scratchpad.saved,
-                              saved.id == note.id,
-                              saved.body == model.scratchpad.body else { return }
-                        sharedNote = saved
-                    }
-                }, openSource: { model.open(link: $0) })
-                    .sheet(item: $sharedNote) { note in
-                        CloudNoteShareView(note: note)
-                    }
-            case .projects:
-                ProjectsView(
-                    store: model.projects,
-                    people: model.plannerPeople,
-                    peopleUnavailable: model.people.entries == nil || model.people.listFailed,
-                    material: model.about.material,
-                    photoRevision: model.people.photoRevision,
-                    openEvidence: model.openPlanningEvidence,
-                    discussProject: model.discussProject,
-                    planWithSona: model.planWithSona,
-                    showCalendar: { model.go(.calendar) })
-            case .calendar:
-                PlannerCalendarView(
-                    store: model.projects,
-                    material: model.about.material,
-                    openProject: model.openProject,
-                    openMeeting: model.openMeeting,
-                    showProjects: { model.go(.projects) })
-            case .tasks:
-                TasksScreen()
-            case .triage:
-                TriageScreen()
-            case .today:
-                MorningPlanView()
-            case .shared:
-                SharedPagesView()
-            case .inbox:
-                InboxScreen()
-            case .archive:
-                TaskArchiveScreen()
-            case .loops:
-                LoopsScreen()
-            case .initiatives:
-                InitiativesScreen(store: model.projects, people: model.plannerPeople, labels: model.work.labels, openProject: model.openProject)
-            case .updates:
-                UpdatesScreen()
-            }
+        switch model.place {
+        case .capture:
+            CaptureScreen()
+                .overlay(alignment: .bottomLeading) { UndoToast() }
+        case .activity:
+            ActivityScreen()
+        case .library:
+            LibraryScreen(
+                store: model.library,
+                importAudio: { model.showSettings(.importing) },
+                addCorrection: { left, right in
+                    model.vocabulary.add(kind: .vocabulary, left: left, right: right)
+                })
+        case .meetings:
+            MeetingsPlace()
+        case .people:
+            PeopleScreen(
+                store: model.people,
+                openMeeting: model.openMeeting,
+                openContribution: { sessionId, atMilliseconds in
+                    model.meetings.open(sessionId, atMilliseconds: atMilliseconds)
+                    model.go(.meetings)
+                },
+                ingestDocument: { model.showSettings(.importing) },
+                deleteDocument: { id in Task { await model.documents.delete(id: id) } })
+        case .scratchpad:
+            ScratchpadView(store: model.scratchpad, share: { note in
+                Task {
+                    await model.scratchpad.flush()
+                    guard let saved = model.scratchpad.saved,
+                          saved.id == note.id,
+                          saved.body == model.scratchpad.body else { return }
+                    sharedNote = saved
+                }
+            }, openSource: { model.open(link: $0) })
+                .sheet(item: $sharedNote) { note in
+                    CloudNoteShareView(note: note)
+                }
+        case .projects:
+            ProjectsView(
+                store: model.projects,
+                people: model.plannerPeople,
+                peopleUnavailable: model.people.entries == nil || model.people.listFailed,
+                material: model.about.material,
+                photoRevision: model.people.photoRevision,
+                openEvidence: model.openPlanningEvidence,
+                discussProject: model.discussProject,
+                planWithSona: model.planWithSona,
+                showCalendar: { model.go(.calendar) })
+        case .calendar:
+            PlannerCalendarView(
+                store: model.projects,
+                material: model.about.material,
+                openProject: model.openProject,
+                openMeeting: model.openMeeting,
+                showProjects: { model.go(.projects) })
+        case .tasks:
+            TasksScreen()
+        case .triage:
+            TriageScreen()
+        case .today:
+            MorningPlanView()
+        case .shared:
+            SharedPagesView()
+        case .inbox:
+            InboxScreen()
+        case .archive:
+            TaskArchiveScreen()
+        case .loops:
+            LoopsScreen()
+        case .initiatives:
+            InitiativesScreen(store: model.projects, people: model.plannerPeople, labels: model.work.labels, openProject: model.openProject)
+        case .updates:
+            UpdatesScreen()
         }
     }
 }
@@ -476,71 +471,47 @@ struct Sidebar: View {
             .frame(height: Theme.headerHeight)
             .padding(.bottom, Space.xs)
 
-            ScrollViewReader { scroller in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: Space.xxs) {
-                        let favorites = model.work.favorites
-                        let favoriteShown = favorites.contains(where: favoriteOpen)
-                        ForEach(Place.sidebar) { place in
-                            SidebarItem(
-                                icon: place.icon,
-                                title: place.title,
-                                selected: model.place.parent == place && !model.showingSettings && !favoriteShown,
-                                count: count(place),
-                                live: place == .capture && model.capture != .idle
-                                    || place == .meetings && model.live.live != nil
-                            ) {
-                                model.go(place)
-                            }
-                        }
-                        favoritesSection
-                        gap
-                            .overlay(alignment: .top) {
-                                if endTargeted { Theme.accent.frame(height: 2).allowsHitTesting(false) }
-                            }
-                            .onDrop(of: [.utf8PlainText], isTargeted: $endTargeted) { _ in
-                                guard let dragged = draggedFavorite else { return false }
-                                model.work.moveFavorite(dragged, into: nil, at: nil)
-                                draggedFavorite = nil
-                                return true
-                            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: Space.xxs) {
+                    let favorites = model.work.favorites
+                    let favoriteShown = favorites.contains(where: favoriteOpen)
+                    ForEach(Place.sidebar) { place in
                         SidebarItem(
-                            icon: Place.loops.icon,
-                            title: Place.loops.title,
-                            selected: model.place == .loops && !model.showingSettings && !favoriteShown
+                            icon: place.icon,
+                            title: place.title,
+                            selected: model.place.parent == place && !favoriteShown,
+                            count: count(place),
+                            live: place == .capture && model.capture != .idle
+                                || place == .meetings && model.live.live != nil
                         ) {
-                            model.go(.loops)
-                        }
-                        SidebarItem(
-                            icon: "gearshape",
-                            title: "Settings",
-                            selected: false
-                        ) {
-                            model.showSettings(model.showingSettings ? model.settingsPlace : .essentials)
-                        }
-                        .accessibilityAddTraits(model.showingSettings ? .isSelected : [])
-                        .id("settings")
-                        if model.showingSettings {
-                            ForEach(SettingsPlace.allCases.filter { $0 != .profile }) { page in
-                                SidebarSubItem(title: page.title, selected: model.settingsPlace == page) {
-                                    model.showSettings(page)
-                                }
-                                .id(page)
-                            }
+                            model.go(place)
                         }
                     }
-                    .padding(.bottom, Space.m)
+                    favoritesSection
+                    gap
+                        .overlay(alignment: .top) {
+                            if endTargeted { Theme.accent.frame(height: 2).allowsHitTesting(false) }
+                        }
+                        .onDrop(of: [.utf8PlainText], isTargeted: $endTargeted) { _ in
+                            guard let dragged = draggedFavorite else { return false }
+                            model.work.moveFavorite(dragged, into: nil, at: nil)
+                            draggedFavorite = nil
+                            return true
+                        }
+                    SidebarItem(
+                        icon: Place.loops.icon,
+                        title: Place.loops.title,
+                        selected: model.place == .loops && !favoriteShown
+                    ) {
+                        model.go(.loops)
+                    }
+                    SidebarItem(icon: "gearshape", title: "Settings…", selected: false) {
+                        model.openSettings()
+                    }
                 }
-                .scrollIndicators(.never)
-                .onChange(of: model.showingSettings) { _, showing in
-                    guard showing else { return }
-                    withAnimation { scroller.scrollTo("settings", anchor: .top) }
-                }
-                .onChange(of: model.settingsPlace) { _, page in
-                    guard model.showingSettings else { return }
-                    withAnimation { scroller.scrollTo(page) }
-                }
+                .padding(.bottom, Space.m)
             }
+            .scrollIndicators(.never)
             SidebarProfileRow()
                 .padding(.bottom, Space.m)
         }
@@ -552,7 +523,6 @@ struct Sidebar: View {
     }
 
     private func favoriteOpen(_ favorite: WorkFavorite) -> Bool {
-        guard !model.showingSettings else { return false }
         switch favorite.kind {
         case .task:
             return model.place == .tasks && model.workFocus.opened(in: .tasks) == favorite.targetId
@@ -999,33 +969,6 @@ private struct SidebarItem: View {
         .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityValue(live ? "In progress" : count.flatMap { $0.value > 0 ? "\($0.value) \($0.meaning)" : nil } ?? "")
-        .onHover { hovering = $0 }
-    }
-}
-
-/// A page under Settings, lined up with the titles above it.
-private struct SidebarSubItem: View {
-    let title: String
-    let selected: Bool
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(TypeScale.list)
-                .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
-                .padding(.leading, Space.s + 16 + Space.s)
-                .frame(maxWidth: .infinity, minHeight: Theme.sidebarRow, alignment: .leading)
-                .background(
-                    selected ? Theme.washSelected : (hovering ? Theme.wash : .clear),
-                    in: RoundedRectangle(cornerRadius: Theme.radiusRow)
-                )
-                .hoverFade(hovering)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
         .onHover { hovering = $0 }
     }
 }

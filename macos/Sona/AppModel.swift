@@ -122,7 +122,6 @@ enum Sheet: Identifiable, Hashable {
     case share(String)
     case saveTemplate(String)
     case problemReport(Int64?)
-    case quicklinkEditor(UUID?)
     case quicklinkArgument(UUID)
 
     var id: Self { self }
@@ -330,7 +329,6 @@ final class AppModel {
     /// A Home section to bring into view once Home shows, set from another tab.
     var homeAnchor: String?
     var settingsPlace: SettingsPlace = .essentials
-    var showingSettings = false
     /// The user's name from their profile, when they gave one.
     var myName: String? {
         let name = prep.preferences?.aboutMe.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -485,6 +483,7 @@ final class AppModel {
     /// reveal the core asked for before then runs again once it can.
     var presentMainWindow: () -> Void = {}
     @ObservationIgnored var presentItemWindow: (ItemWindow) -> Void = { _ in }
+    @ObservationIgnored var presentSettings: () -> Void = {}
     @ObservationIgnored var mainWindowOpen = false
     @ObservationIgnored var openWindows = 0
     /// Notes open in windows of their own, saved before Sona quits.
@@ -637,12 +636,13 @@ final class AppModel {
 
     func go(_ place: Place) {
         self.place = place
-        showingSettings = false
     }
 
+    /// The Settings window, in front, on one page.
     func showSettings(_ tab: SettingsPlace) {
         settingsPlace = tab
-        showingSettings = true
+        presentSettings()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func openQuicklink(_ id: UUID) {
@@ -651,6 +651,7 @@ final class AppModel {
                 throw QuicklinkError.changed
             }
             if link.needsArgument {
+                reveal()
                 sheet = .quicklinkArgument(id)
             } else {
                 try openQuicklink(id, argument: nil)
@@ -690,9 +691,8 @@ final class AppModel {
         reveal()
     }
 
-    /// The settings, on the tab last shown, from the app menu or the menu bar.
+    /// The settings, on the page last shown, from the app menu or the menu bar.
     func openSettings() {
-        reveal()
         showSettings(settingsPlace)
     }
 

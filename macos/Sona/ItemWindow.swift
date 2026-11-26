@@ -144,7 +144,7 @@ extension AppModel {
     /// The meeting, note or task in front in the main window, or the one
     /// task picked in a list: what Open in New Window takes.
     var itemInFront: ItemWindow? {
-        guard ready, onboarding.step == .done, !showingSettings else { return nil }
+        guard ready, onboarding.step == .done else { return nil }
         switch place {
         case .meetings:
             guard live.live == nil, live.gate == nil else { return nil }
