@@ -2109,6 +2109,7 @@ pub fn run(cli_args: CliArgs) {
             commands::cloud_sync::cloud_sync_pairing_accept,
             commands::cloud_sync::cloud_sync_pause,
             commands::cloud_sync::cloud_sync_resume,
+            commands::cloud_sync::cloud_sync_sort_thoughts_here,
             commands::cloud_sync::cloud_sync_retry,
             commands::cloud_sync::cloud_sync_conflict_resolve,
             commands::cloud_sync::cloud_share_create,

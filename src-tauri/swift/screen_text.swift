@@ -67,3 +67,43 @@ public func sonaScreenTextRead(
 public func sonaScreenTextFree(_ pointer: UnsafeMutableRawPointer?) {
     free(pointer)
 }
+
+/// What a picture shows, as Vision's own scene labels for it, most confident
+/// first, as a JSON array of strings. A label is kept only when Vision gives
+/// it at least `minimumConfidence`, and at most `limit` are kept.
+@_cdecl("sona_image_labels")
+public func sonaImageLabels(
+    _ bytes: UnsafePointer<UInt8>?,
+    _ length: UInt,
+    _ outJSON: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> Int32 {
+    let minimumConfidence: Float = 0.3
+    let limit = 5
+    guard let outJSON else { return ScreenTextResult.invalidArgument.rawValue }
+    outJSON.pointee = nil
+    guard let bytes, length > 0,
+          let source = CGImageSourceCreateWithData(Data(bytes: bytes, count: Int(length)) as CFData, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+    else {
+        return ScreenTextResult.unreadable.rawValue
+    }
+    let request = VNClassifyImageRequest()
+    do {
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+    } catch {
+        return ScreenTextResult.recognitionFailed.rawValue
+    }
+    let labels = (request.results ?? [])
+        .filter { $0.confidence >= minimumConfidence }
+        .sorted { $0.confidence > $1.confidence }
+        .prefix(limit)
+        .map { $0.identifier.replacingOccurrences(of: "_", with: " ") }
+    guard let json = try? JSONEncoder().encode(Array(labels)),
+          let text = String(data: json, encoding: .utf8),
+          let copy = strdup(text)
+    else {
+        return ScreenTextResult.recognitionFailed.rawValue
+    }
+    outJSON.pointee = copy
+    return ScreenTextResult.ok.rawValue
+}

@@ -679,6 +679,9 @@ pub struct CloudSyncSettings {
     pub paused: bool,
     pub consent_version: Option<u32>,
     pub endpoint: Option<String>,
+    /// File the phone's thoughts into board clusters on this Mac, with the
+    /// models already on it, instead of leaving that to a server sorter.
+    pub sort_thoughts_here: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

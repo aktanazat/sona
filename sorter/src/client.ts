@@ -115,6 +115,11 @@ const UploadCommitted = z.object({
 });
 export type UploadCommitted = z.infer<typeof UploadCommitted>;
 
+const UploadCancelled = z.object({
+  state: z.literal("cancelled"),
+  upload_id: z.string(),
+});
+
 /** What a non-2xx reply may carry; a body that is not JSON reads as `{}`. */
 const Problem = z.object({
   code: z.string().catch("unknown"),
@@ -283,6 +288,14 @@ export class CompanionClient {
         idempotencyKey,
       },
     );
+  }
+
+  async cancelUpload(uploadId: string, idempotencyKey: string): Promise<void> {
+    await this.json(UploadCancelled, "DELETE", `/v1/uploads/${uploadId}`, [], {
+      body: utf8(JSON.stringify({ version: 1 })),
+      contentType: "application/json",
+      idempotencyKey,
+    });
   }
 
   private async json<Value>(

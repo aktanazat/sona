@@ -201,6 +201,18 @@ pub async fn cloud_sync_resume(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn cloud_sync_sort_thoughts_here(
+    runtime: State<'_, Arc<CloudSyncRuntime>>,
+    enabled: bool,
+) -> Result<CloudSyncOverview, CloudSyncErrorKind> {
+    runtime
+        .set_sort_thoughts_here(enabled)
+        .await
+        .map_err(|error| error.kind())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn cloud_sync_retry(
     runtime: State<'_, Arc<CloudSyncRuntime>>,
     session_id: MeetingSessionId,
@@ -423,6 +435,7 @@ mod tests {
             paused: false,
             consent_version: Some(CLOUD_SYNC_CONSENT_VERSION),
             endpoint: Some(endpoint.to_string()),
+            sort_thoughts_here: false,
         }
     }
 

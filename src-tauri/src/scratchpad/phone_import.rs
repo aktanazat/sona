@@ -114,6 +114,30 @@ pub(crate) fn sources_for_note(
     })
 }
 
+/// The newest revision of every thought from this vault whose source the
+/// phone has not deleted, oldest capture first.
+pub(crate) fn current_references(
+    history: &HistoryManager,
+    vault_id: &str,
+) -> anyhow::Result<Vec<PhoneThoughtReference>> {
+    history.with_connection(|conn| {
+        let mut statement = conn.prepare(&format!(
+            "SELECT {REFERENCE_COLUMNS} FROM scratch_phone_thoughts t
+             WHERE t.vault_id = ?1
+                AND NOT EXISTS(SELECT 1 FROM scratch_phone_thought_deletions d
+                    WHERE d.vault_id = t.vault_id AND d.object_id = t.object_id)
+                AND t.change_sequence = (SELECT MAX(u.change_sequence)
+                    FROM scratch_phone_thoughts u
+                    WHERE u.vault_id = t.vault_id AND u.object_id = t.object_id)
+             ORDER BY t.captured_at_utc_ms, t.object_id"
+        ))?;
+        let references = statement
+            .query_map(params![vault_id], read_reference)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(references)
+    })
+}
+
 pub(crate) fn is_deleted(
     history: &HistoryManager,
     vault_id: &str,
@@ -156,22 +180,7 @@ pub(crate) fn import(
         if let Some(note_id) = existing {
             return Ok((Some(note_id), false));
         }
-        let mut body = input.text.to_owned();
-        if let Some(link) = input.link {
-            if !body.is_empty() {
-                body.push_str("\n\n");
-            }
-            body.push_str(link);
-        }
-        if body.trim().is_empty() {
-            body = match (input.has_audio, input.image_count) {
-                (true, 0) => "Voice thought".to_owned(),
-                (true, count) => format!("Voice thought with {count} photos"),
-                (false, 1) => "Photo thought".to_owned(),
-                (false, count) if count > 1 => format!("Thought with {count} photos"),
-                _ => "Phone thought".to_owned(),
-            };
-        }
+        let body = capture_body(input.text, input.link, input.has_audio, input.image_count);
         let note_id = Uuid::new_v4().to_string();
         transaction.execute(
             "INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms)
@@ -262,4 +271,158 @@ pub(crate) fn finish_backfill(history: &HistoryManager, vault_id: &str) -> anyho
         )?;
         Ok(())
     })
+}
+
+pub(crate) fn capture_body(
+    text: &str,
+    link: Option<&str>,
+    has_audio: bool,
+    image_count: usize,
+) -> String {
+    let mut body = text.to_owned();
+    if let Some(link) = link {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(link);
+    }
+    if body.trim().is_empty() {
+        body = match (has_audio, image_count) {
+            (true, 0) => "Voice thought".to_owned(),
+            (true, count) => format!("Voice thought with {count} photos"),
+            (false, 1) => "Photo thought".to_owned(),
+            (false, count) if count > 1 => format!("Thought with {count} photos"),
+            _ => "Phone thought".to_owned(),
+        };
+    }
+    body
+}
+
+/// Keep attachment text in the imported note, but never replace words the
+/// person has edited or a source the phone removed while the model ran.
+pub(crate) fn enrich(
+    app: &AppHandle,
+    history: &HistoryManager,
+    reference: &PhoneThoughtReference,
+    expected_body: &str,
+    text: &str,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let changed =
+        history.with_connection(|conn| enrich_in(conn, reference, expected_body, text, now_ms))?;
+    if changed {
+        emit_changed(app, &reference.note_id, false);
+    }
+    Ok(())
+}
+
+fn enrich_in(
+    conn: &mut rusqlite::Connection,
+    reference: &PhoneThoughtReference,
+    expected_body: &str,
+    text: &str,
+    now_ms: i64,
+) -> anyhow::Result<bool> {
+    let transaction = conn.transaction()?;
+    let changed = transaction.execute(
+        "UPDATE scratch_notes SET body = ?3, title = ?4, updated_at_ms = ?5
+         WHERE id = ?1 AND body = ?2
+            AND NOT EXISTS(SELECT 1 FROM scratch_phone_thought_deletions
+                WHERE vault_id = ?6 AND object_id = ?7)",
+        params![
+            reference.note_id,
+            expected_body,
+            text,
+            derive_title(text),
+            now_ms,
+            reference.vault_id,
+            reference.object_id,
+        ],
+    )? > 0;
+    if changed {
+        record_version(
+            &transaction,
+            &reference.note_id,
+            text,
+            now_ms,
+            ScratchVersionKind::Edit,
+            super::Author::Me,
+        )?;
+    }
+    transaction.commit()?;
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use rusqlite_migration::Migrations;
+
+    fn fixture(body: &str) -> (Connection, PhoneThoughtReference) {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(crate::managers::history::MIGRATIONS.to_vec())
+            .to_latest(&mut conn)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms)
+             VALUES ('note', 'Voice thought', ?1, 0, 1, 1)",
+            [body],
+        )
+        .unwrap();
+        (
+            conn,
+            PhoneThoughtReference {
+                vault_id: "vault".to_owned(),
+                object_id: "thought".to_owned(),
+                revision_id: "revision".to_owned(),
+                note_id: "note".to_owned(),
+                captured_at_utc_ms: 1,
+                origin: "voice".to_owned(),
+                device_id: "phone".to_owned(),
+                link: None,
+                source_deleted: false,
+                change_sequence: 1,
+            },
+        )
+    }
+
+    fn body(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT body FROM scratch_notes WHERE id = 'note'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn attachment_text_replaces_the_untouched_import_and_is_saved_in_history() {
+        let (mut conn, reference) = fixture("Voice thought");
+        assert!(enrich_in(&mut conn, &reference, "Voice thought", "Plant tomatoes", 10).unwrap());
+        assert_eq!(body(&conn), "Plant tomatoes");
+        let saved: String = conn.query_row(
+            "SELECT body FROM scratch_note_versions WHERE note_id = 'note' ORDER BY id DESC LIMIT 1",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(saved, "Plant tomatoes");
+    }
+
+    #[test]
+    fn attachment_text_never_replaces_a_persons_edited_note() {
+        let (mut conn, reference) = fixture("My edited plan");
+        assert!(!enrich_in(&mut conn, &reference, "Voice thought", "Plant tomatoes", 10).unwrap());
+        assert_eq!(body(&conn), "My edited plan");
+    }
+
+    #[test]
+    fn attachment_text_never_restores_a_deleted_source() {
+        let (mut conn, reference) = fixture("Voice thought");
+        conn.execute(
+            "INSERT INTO scratch_phone_thought_deletions VALUES ('vault', 'thought', 'revision', 2)",
+            [],
+        ).unwrap();
+        assert!(!enrich_in(&mut conn, &reference, "Voice thought", "Plant tomatoes", 10).unwrap());
+        assert_eq!(body(&conn), "Voice thought");
+    }
 }

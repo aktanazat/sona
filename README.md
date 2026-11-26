@@ -89,6 +89,9 @@ Under Sessions, turn off Voice replies to pause one conversation without changin
 ### Phone and watch
 
 - `mobile/` holds one iPhone app with an embedded Apple Watch companion and keyboard extension. They pair with your Mac through the same end-to-end encrypted vault the desktop syncs through, record in-person conversations, and hand them to the Mac as meetings. The iPhone app requires iOS 26; its Watch companion targets watchOS 10 or later. On iPhone, Sona offers to record a note when a call ends; iOS gives no app access to ordinary call audio.
+- In Mac Settings > Cloud sync, turn on **Sort phone thoughts on this Mac** to file the phone's brainstorm notes without a server sorter. It uses the local model already chosen for notes: Apple Intelligence or your loopback endpoint. Textless voice thoughts use the downloaded transcription model; photos use on-device Vision text recognition and scene labels. Their text is saved in the imported Mac note unless you edited it. If a local model is unavailable, filing waits; it never falls back to cloud AI. Existing remote filings and user-placed cards are kept.
+
+The encrypted companion service still carries thoughts and board cards between devices. The Mac option does not revoke a paired server sorter or delete its saved vault key. Stop and revoke that device separately if you no longer want it to read the vault. Current Mac and server sorters use the same card object for a thought, so the service commits only the first filing. Older server sorters can create a second card; updated phones keep a classified or user-placed card ahead of an Unsorted placeholder.
 
 Local runs keep captured audio on the device. Cloud transcription sends audio only after you configure a provider key and accept that provider's transfer notice. Sona does not store provider keys in its settings file.
 

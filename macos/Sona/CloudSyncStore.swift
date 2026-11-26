@@ -21,6 +21,7 @@ final class CloudSyncStore {
         case approveCandidate
         case accept
         case pause
+        case sortThoughts
         case retry(String)
         case conflict(String)
         case exportBundle(String)
@@ -270,6 +271,15 @@ final class CloudSyncStore {
                 current.paused ? "cloud_sync_resume" : "cloud_sync_pause")
             overview = result
             await refresh()
+        }
+    }
+
+    func setSortThoughtsHere(_ enabled: Bool) async {
+        guard overview?.enabled == true else { return }
+        await call(.sortThoughts) {
+            let result: CloudSyncOverview = try await core.request(
+                "cloud_sync_sort_thoughts_here", ["enabled": enabled])
+            overview = result
         }
     }
 

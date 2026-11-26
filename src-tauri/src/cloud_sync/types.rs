@@ -54,6 +54,8 @@ pub struct CloudSyncOverview {
     pub queued_objects: u32,
     pub pending_deletions: u32,
     pub terminal_error: Option<CloudSyncErrorKind>,
+    /// The phone's thoughts are filed on this Mac.
+    pub sort_thoughts_here: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

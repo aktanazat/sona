@@ -4378,6 +4378,14 @@ pub(super) async fn call(
         "cloud_sync_resume" => {
             reply(crate::commands::cloud_sync::cloud_sync_resume(app.state()).await)
         }
+        "cloud_sync_sort_thoughts_here" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            reply(
+                crate::commands::cloud_sync::cloud_sync_sort_thoughts_here(app.state(), enabled)
+                    .await,
+            )
+        }
         "cloud_sync_retry" => {
             let mut args = Args::parse(params)?;
             let session_id = args.take("sessionId")?;
