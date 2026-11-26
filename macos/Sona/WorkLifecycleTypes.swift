@@ -280,9 +280,11 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
     /// The start of the comment the notice is about.
     var excerpt: String?
 
-    /// "Claude Code", "Sona", or "An agent" when it gave no name.
+    /// "Claude Code", "Sona", or "An agent" when it gave no name; the
+    /// meeting, for a meeting that changed earlier decisions.
     var who: String {
         if kind == .reminder || kind == .due || kind == .digest || kind == .housekeeping { return "Sona" }
+        if kind == .decision { return subject?.name.map { "“\($0)”" } ?? "A meeting" }
         if kind == .automation {
             guard itemId != nil, let automation else { return "Automation" }
             return "Automation “\(automation.name)”"
@@ -320,9 +322,7 @@ struct WorkNotification: Decodable, Identifiable, Equatable {
             return from.map { "\(verb) “\($0)”, which blocked it" } ?? "unblocked it"
         case .decision:
             let count = to.flatMap(Int.init) ?? 1
-            return count == 1
-                ? "changed a decision an earlier meeting made"
-                : "changed \(count) decisions earlier meetings made"
+            return count == 1 ? "changed an earlier decision" : "changed \(count) earlier decisions"
         case .unknown: return "changed it"
         }
     }

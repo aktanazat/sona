@@ -526,8 +526,8 @@ fn sharing_a_project(conn: &Connection, meeting_id: &str) -> StorageResult<Vec<S
     Ok(ids)
 }
 
-/// Tells the inbox, once, that a meeting's notes changed `changed`
-/// decisions earlier meetings made.
+/// Brings the inbox's notice that a meeting's notes changed `changed`
+/// decisions earlier meetings made up to date; none takes it back.
 pub(crate) fn decisions_changed(
     app: Option<&AppHandle>,
     store: &MeetingStore,
@@ -538,19 +538,21 @@ pub(crate) fn decisions_changed(
     let Some(history) = app.try_state::<Arc<HistoryManager>>() else {
         return;
     };
-    let title = match store.session_snapshot(session_id) {
-        Ok(snapshot) => snapshot.title,
-        Err(error) => {
-            log::warn!("A meeting with changed decisions could not be read: {error:?}");
-            return;
-        }
+    let title = match changed {
+        0 => String::new(),
+        _ => match store.session_snapshot(session_id) {
+            Ok(snapshot) => snapshot.title,
+            Err(error) => {
+                log::warn!("A meeting with changed decisions could not be read: {error:?}");
+                return;
+            }
+        },
     };
     let meeting_id = session_id.uuid().to_string();
     match history.with_connection(|conn| {
         inbox::decisions_changed(conn, &meeting_id, &title, changed, now_ms())
     }) {
-        Ok(true) => tell(app, &Effects::default()),
-        Ok(false) => {}
+        Ok(()) => tell(app, &Effects::default()),
         Err(error) => log::warn!("A meeting's changed decisions missed the inbox: {error:#}"),
     }
 }

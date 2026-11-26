@@ -290,6 +290,16 @@ fn who(notice: &inbox::Notification) -> String {
             (Some(_), Some(automation)) => format!("Automation “{}”", automation.name),
             _ => "Automation".to_owned(),
         },
+        NotificationKind::Decision => {
+            match notice
+                .subject
+                .as_ref()
+                .and_then(|subject| subject.name.as_ref())
+            {
+                Some(title) => format!("“{title}”"),
+                None => "A meeting".to_owned(),
+            }
+        }
         _ => match notice.agent.as_deref().filter(|agent| !agent.is_empty()) {
             Some(agent) => agent.to_owned(),
             None if notice.actor == WorkActor::Sona => "Sona".to_owned(),
@@ -990,7 +1000,7 @@ mod tests {
         let open = shown(Some(&kept()));
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].title, "Launch sync");
-        let line = "Sona changed a decision an earlier meeting made";
+        let line = "“Launch sync” changed an earlier decision";
         assert_eq!(open[0].line, line);
 
         meetings

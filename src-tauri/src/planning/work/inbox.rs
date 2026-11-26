@@ -1263,16 +1263,25 @@ pub(crate) fn batch_posted(
     Ok(())
 }
 
-/// Posts, once per meeting, that its notes changed `changed` decisions
-/// earlier meetings made. True when it was posted.
+/// Keeps the one notice that a meeting's notes changed `changed` decisions
+/// earlier meetings made: posted the first time, brought up to date and
+/// unread again when notes written again change a different number, and
+/// taken back when they change none.
 pub(crate) fn decisions_changed(
     conn: &Connection,
     meeting_id: &str,
     title: &str,
     changed: usize,
     now_ms: i64,
-) -> Result<bool> {
+) -> Result<()> {
     let key = format!("decision:{meeting_id}");
+    if changed == 0 {
+        conn.execute(
+            "DELETE FROM planning_notifications WHERE event_key = ?1",
+            [&key],
+        )?;
+        return Ok(());
+    }
     let changed = changed.to_string();
     let notice = Notice {
         key: Some(&key),
@@ -1285,14 +1294,24 @@ pub(crate) fn decisions_changed(
             WorkActor::Sona,
         )
     };
-    notify(conn, &notice, now_ms)
+    if !notify(conn, &notice, now_ms)? {
+        conn.execute(
+            "UPDATE planning_notifications
+             SET from_value = ?2, to_value = ?3, created_at_ms = ?4, read_at_ms = NULL,
+                 snoozed_until_ms = NULL, archived_at_ms = NULL
+             WHERE event_key = ?1 AND to_value IS NOT ?3",
+            params![key, title, changed, now_ms],
+        )?;
+    }
+    Ok(())
 }
 
-/// What a decision notice says happened, from the count it holds.
+/// What a decision notice says its meeting did, from the count it holds;
+/// the meeting itself is who did it.
 pub(crate) fn changed_decisions(count: Option<&str>) -> String {
     match count {
-        None | Some("1") => "changed a decision an earlier meeting made".to_owned(),
-        Some(count) => format!("changed {count} decisions earlier meetings made"),
+        None | Some("1") => "changed an earlier decision".to_owned(),
+        Some(count) => format!("changed {count} earlier decisions"),
     }
 }
 
@@ -1969,25 +1988,43 @@ mod tests {
     }
 
     #[test]
-    fn a_meeting_that_changed_decisions_gets_one_notice_naming_it() {
+    fn a_meeting_keeps_one_notice_that_follows_its_notes_written_again() {
         let conn = rusqlite::Connection::open_in_memory().expect("an in-memory history database");
         crate::planning::schema::apply_all(&conn).expect("the planner schema");
         let meeting = uuid::Uuid::new_v4().to_string();
+        let notices = || notifications(&conn, Shown::default(), 100).expect("the inbox");
+        let read_all = || {
+            conn.execute("UPDATE planning_notifications SET read_at_ms = 15", [])
+                .expect("read")
+        };
 
-        assert!(decisions_changed(&conn, &meeting, "Launch sync", 2, 10).expect("posted"));
-        assert!(!decisions_changed(&conn, &meeting, "Launch sync", 3, 20).expect("posted once"));
-
-        let notices = notifications(&conn, Shown::default(), 30).expect("the inbox");
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].kind, NotificationKind::Decision);
-        let subject = notices[0].subject.as_ref().expect("the meeting");
+        decisions_changed(&conn, &meeting, "Launch sync", 2, 10).expect("posted");
+        let first = notices();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].kind, NotificationKind::Decision);
+        let subject = first[0].subject.as_ref().expect("the meeting");
         assert_eq!(
             (subject.kind, subject.id.as_str(), subject.name.as_deref()),
             (SubjectKind::Meeting, meeting.as_str(), Some("Launch sync"))
         );
         assert_eq!(
-            changed_decisions(notices[0].to.as_deref()),
-            "changed 2 decisions earlier meetings made"
+            changed_decisions(first[0].to.as_deref()),
+            "changed 2 earlier decisions"
         );
+
+        read_all();
+        decisions_changed(&conn, &meeting, "Launch sync", 3, 20).expect("rewritten");
+        let rewritten = notices();
+        assert_eq!(rewritten.len(), 1);
+        assert_eq!(rewritten[0].to.as_deref(), Some("3"));
+        assert_eq!(rewritten[0].read_at_ms, None, "a new count is news again");
+
+        read_all();
+        decisions_changed(&conn, &meeting, "Launch sync", 3, 30).expect("the same again");
+        let same = notices();
+        assert_eq!(same[0].read_at_ms, Some(15), "kept read");
+
+        decisions_changed(&conn, &meeting, "Launch sync", 0, 40).expect("none now");
+        assert!(notices().is_empty());
     }
 }
