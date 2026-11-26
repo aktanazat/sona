@@ -303,7 +303,7 @@ final class MeetingsStore {
         didSet { playable = snapshot.map { Self.playable($0.transcript, tracks: $0.tracks) } ?? [] }
     }
     /// The open meeting's lines with audio to play, so each row asks once.
-    @ObservationIgnored private var playable: Set<TranscriptSegmentId> = []
+    private var playable: Set<TranscriptSegmentId> = []
     private(set) var reviewLoading = false
     /// Why the first read of the open meeting produced no page: the core's
     /// own words, kept apart from `error` so the page can offer another read
@@ -455,11 +455,15 @@ final class MeetingsStore {
         }
     }
 
+    /// Progress reported by a core that has stopped never finishes.
+    func coreClosed() {
+        processing = [:]
+    }
+
     /// The first load: a page of meetings, the trend over them, and the
-    /// folders. Progress heard from a core that has since gone is dropped.
+    /// folders.
     func start() async {
         listed = true
-        processing = [:]
         await loadPage()
         await loadTrend()
         await loadFolders()

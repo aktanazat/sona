@@ -1337,6 +1337,7 @@ final class AppModel {
     private func coreClosed() {
         coreStopped = true
         windowStoresDue = false
+        meetings.coreClosed()
         dictationRunID = nil
         liveText = ""
         cancelConfirmation = nil
