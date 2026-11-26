@@ -22,6 +22,7 @@
     "typecheck:mcp": "cd tools/sona-mcp && bun install && bun run typecheck",
     "generate:native-dispatch": "python3 scripts/gen_native_dispatch.py",
     "check:onboarding": "bash scripts/check-onboarding.sh",
+    "check:core": "bash scripts/check-core.sh",
     "check:library": "bash scripts/check-library.sh",
     "check:meeting-notes": "bash scripts/check-meeting-notes.sh",
     "check:recorder": "bash scripts/check-recorder.sh",

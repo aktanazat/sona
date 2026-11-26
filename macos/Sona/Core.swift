@@ -116,12 +116,18 @@ final class Core: @unchecked Sendable {
     /// The first look at a frame. `error` is present, possibly as `null`,
     /// exactly when the request failed: a command whose error type is `()`
     /// fails with `null`.
-    private struct Head: Decodable {
+    struct Head: Decodable {
         let id: UInt64?
         let event: String?
         let error: JSONValue?
 
         private enum Key: String, CodingKey { case id, event, error }
+
+        init(id: UInt64?, event: String?, error: JSONValue?) {
+            self.id = id
+            self.event = event
+            self.error = error
+        }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: Key.self)
@@ -135,6 +141,41 @@ final class Core: @unchecked Sendable {
                 error = nil
             }
         }
+    }
+
+    /// How far into a frame `head` looks for its kind.
+    private static let headWindow = 128
+    private static let replyStart = "{\"id\":"
+    private static let eventStart = "{\"event\":\""
+
+    /// The head of a frame. A reply's result and an event's payload, which
+    /// may run to megabytes, are left for the one reader that decodes them:
+    /// the core writes `id` or `event` as the first key (native_bridge/mod.rs),
+    /// so the kind is read from the first bytes. A failure, and a frame in
+    /// any other shape, is parsed whole.
+    static func head(of line: Data) -> Head? {
+        prefixHead(line) ?? (try? JSONDecoder().decode(Head.self, from: line))
+    }
+
+    private static func prefixHead(_ line: Data) -> Head? {
+        let start = String(decoding: line.prefix(headWindow), as: UTF8.self)
+        if start.hasPrefix(replyStart) {
+            let rest = start.dropFirst(replyStart.count)
+            let digits = rest.prefix { ("0"..."9").contains($0) }
+            guard let id = UInt64(digits), rest.dropFirst(digits.count).hasPrefix(",\"result\":") else {
+                return nil
+            }
+            return Head(id: id, event: nil, error: nil)
+        }
+        if start.hasPrefix(eventStart) {
+            let rest = start.dropFirst(eventStart.count)
+            let name = rest.prefix { $0 != "\"" && $0 != "\\" }
+            guard !name.isEmpty, rest.dropFirst(name.count).hasPrefix("\",\"payload\":") else {
+                return nil
+            }
+            return Head(id: nil, event: String(name), error: nil)
+        }
+        return nil
     }
 
     private struct Envelope<T: Decodable>: Decodable {
@@ -441,7 +482,7 @@ final class Core: @unchecked Sendable {
     }
 
     private func dispatch(_ line: Data) {
-        guard let head = try? JSONDecoder().decode(Head.self, from: line) else {
+        guard let head = Self.head(of: line) else {
             return
         }
         if let event = head.event {

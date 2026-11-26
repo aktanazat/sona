@@ -76,10 +76,20 @@ struct HistoryPage: Decodable {
     let hasMore: Bool
 }
 
-/// The same frame `HistoryUpdate` reads, decoded a second time for the fields
-/// the shared mirror leaves out. Only `added` and `updated` carry an entry.
+/// A history event read once, as both the shared `HistoryUpdate` and the
+/// `HistoryRow` that keeps the fields the shared mirror leaves out. Only
+/// `added` and `updated` carry an entry; one that will not read as a row is
+/// `nil` while the update itself still counts.
 struct HistoryRowUpdate: Decodable {
+    let update: HistoryUpdate
     let entry: HistoryRow?
+
+    private enum Key: String, CodingKey { case entry }
+
+    init(from decoder: Decoder) throws {
+        update = try HistoryUpdate(from: decoder)
+        entry = try? decoder.container(keyedBy: Key.self).decodeIfPresent(HistoryRow.self, forKey: .entry)
+    }
 }
 
 /// What the feed is doing. `paging` and `pagingError` belong to the next page
