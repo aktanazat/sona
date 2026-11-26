@@ -234,7 +234,7 @@ final class KeyboardTools {
         case .domain: composeText += TypingModel.domains[0]
         case .delete: if !composeText.isEmpty { composeText.removeLast() }
         case .newLine: submit()
-        case .shift, .layer, .nextKeyboard, .language: return false
+        case .shift, .layer, .nextKeyboard, .language, .dismissKeyboard: return false
         }
         return true
     }

@@ -76,7 +76,7 @@ final class KeyTouchView: UIView {
     }
 
     private func relayout() {
-        grid = KeyGrid(rows: rows, size: bounds.size)
+        grid = KeyGrid(rows: rows, size: bounds.size, maxWidth: model.maxWidth)
         keyElements = nil
     }
 
@@ -250,21 +250,22 @@ final class KeyTouchView: UIView {
         guard let key = finger.key else { model.preview = nil; return }
         switch key.cap.key {
         case let .character(text):
-            model.preview = KeyPreview(text: model.face(of: text), frame: key.frame)
+            model.preview = KeyPreview(text: model.face(of: text), frame: grid.face(of: key))
         default:
             model.preview = nil
         }
     }
 
-    /// A held letter offers its accents, and a held .com the other endings.
+    /// A held letter offers its accents, a held iPad comma or period its mark, and a held
+    /// .com the other endings.
     private func holdForChoices(_ finger: Finger) {
         finger.hold?.cancel()
         guard let key = finger.key else { return }
         let options: [String]
         switch key.cap.key {
-        case let .character(text) where model.layer == .letters:
-            guard let letter = text.first, let accents = model.language.accents[letter] else { return }
-            options = ([text] + accents.map(String.init)).map(model.face(of:))
+        case let .character(text):
+            guard let choices = model.choices(for: text) else { return }
+            options = choices
         case .domain:
             options = TypingModel.domains
         default:
@@ -273,12 +274,13 @@ final class KeyTouchView: UIView {
         finger.hold = Task { [weak self] in
             try? await Task.sleep(for: .seconds(0.4))
             guard !Task.isCancelled, let self, finger.mode == .key else { return }
-            let width = CGFloat(options.count) * key.frame.width
-            let originX = min(max(key.frame.minX, 4), bounds.width - width - 4)
+            let face = grid.face(of: key)
+            let width = CGFloat(options.count) * face.width
+            let originX = min(max(face.minX, 4), bounds.width - width - 4)
             model.pressed.remove(key.cap.key)
             model.preview = nil
             ticks.selectionChanged()
-            model.accentChoice = AccentChoice(anchor: key.frame, options: options, originX: originX)
+            model.accentChoice = AccentChoice(anchor: face, options: options, originX: originX)
         }
     }
 
@@ -380,6 +382,7 @@ private final class KeyElement: UIAccessibilityElement {
                 case .newLine: model.returnKey.title.map { String(localized: String.LocalizationValue($0)) }
                     ?? String(localized: "keyboard.return")
                 case .domain: TypingModel.domains[0]
+                case .dismissKeyboard: String(localized: "keyboard.dismiss")
                 }
             }
         }

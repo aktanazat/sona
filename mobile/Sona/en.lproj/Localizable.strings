@@ -6,7 +6,6 @@
 "status.waiting" = "Waiting for network";
 "status.saved" = "Saved to your Mac";
 "status.notSaved" = "Recording not saved";
-"status.keptForRetry" = "Couldn’t save the recording. It’s kept on this iPhone and Sona will try again.";
 "status.bookmarkNotSaved" = "Bookmark not saved";
 "title.recoveredRecording" = "Recovered recording";
 "library.recordingStillSaving" = "Try again when the recording finishes saving.";
@@ -21,7 +20,6 @@
 "pairing.line.hint" = "Tap to pair";
 
 "consent.title" = "Before you record";
-"consent.body1" = "Meetings are transcribed on your Mac. Dictation is transcribed on this iPhone. If you enable keyboard dictation, the microphone stays on for the session you choose.";
 "consent.body2" = "Meeting recordings and dictated text are encrypted here before they sync to your Mac through your vault. Only your devices can read them. Tell everyone in the room they are being recorded.";
 "consent.action" = "Start";
 
@@ -38,7 +36,6 @@
 "pair.needFields" = "Enter the vault address and id first.";
 "pair.badEndpoint" = "Not a vault address.";
 "pair.unreachable" = "Could not reach this vault. Check the address and your connection.";
-"pair.notApproved" = "Not approved yet. Approve this phone on your Mac.";
 "pair.expired" = "This code expired. Create a new pairing code.";
 "pair.done" = "Paired.";
 "pair.failed" = "Pairing failed.";
@@ -62,7 +59,6 @@
 
 "agent.open" = "Ask Sona";
 "agent.title" = "Ask Sona";
-"agent.needsPairing" = "Pair this iPhone with your Mac to ask Sona";
 "agent.placeholder" = "Ask Sona";
 "agent.send" = "Send";
 "agent.new" = "New chat";
@@ -77,7 +73,6 @@
 "agent.failure.unpaired" = "Set up Talk to Sona on your Mac, then try again.";
 "agent.failure.unreachable" = "Your Mac couldn't reach Sona's agent. Check its internet connection.";
 "agent.failure.timedOut" = "Sona's agent took too long to answer.";
-"agent.failure.notSent" = "This question didn't leave this iPhone.";
 "agent.failure.failed" = "Sona's agent couldn't answer this.";
 "agent.refusal.empty" = "Type a question first.";
 "agent.refusal.tooLong" = "That question is too long. Try a shorter one.";
@@ -137,7 +132,6 @@
 
 "a11y.thought" = "Open thought";
 "dictation.title" = "Dictate into other apps";
-"dictation.privacy" = "Speech and writing styles run on this iPhone. Dictations stay in Notes, with audio you can replay or delete.";
 "dictation.transcript" = "Dictation text";
 "dictation.start" = "Dictate";
 "dictation.stop" = "Finish";
@@ -166,6 +160,7 @@
 "keyboard.insert" = "Insert";
 "keyboard.discard" = "Discard";
 "keyboard.next" = "Next keyboard";
+"keyboard.dismiss" = "Hide keyboard";
 "keyboard.space" = "space";
 "keyboard.delete" = "Delete";
 "keyboard.return" = "Return";
@@ -225,10 +220,8 @@
 "stats.reset" = "Reset stats";
 "stats.resetTitle" = "Reset dictation stats?";
 "stats.resetMessage" = "Your dictations and notes stay.";
-"search.notes" = "Show notes in iPhone search";
 "dictation.style" = "Writing style";
 "dictation.noStyle" = "Keep my words";
-"dictation.styleUnavailable" = "Writing styles need Apple Intelligence enabled on a supported iPhone. Your vocabulary and snippets still work.";
 "dictation.styleFailed" = "The writing style could not finish. Your dictated words were kept.";
 "dictation.reviewJoined" = "Added below the dictation already waiting";
 "dictation.profileEmpty" = "Pair with your Mac and sync to bring over vocabulary, replacements, snippets and writing styles.";
@@ -244,14 +237,13 @@
 "library.meetings" = "Meetings";
 "library.empty" = "No notes yet";
 "library.emptyHint" = "Dictate, record a meeting or write a note.";
+"library.choose" = "Choose a note";
 "library.untitled" = "Untitled";
-"library.delete" = "Delete from this iPhone";
 "library.new" = "New note";
 "library.noteTitle" = "Title";
 "library.noteText" = "Your note";
 "library.note" = "Note";
 "library.saveChanges" = "Save changes";
-"library.saved" = "Saved on this iPhone.";
 "library.audio" = "Recording";
 "library.play" = "Play";
 "library.pause" = "Pause";
@@ -259,7 +251,6 @@
 "library.speed" = "Playback speed";
 "library.share" = "Share";
 "library.copy" = "Copy";
-"library.noteGone" = "This note is no longer on this iPhone";
 "library.done" = "Done";
 "library.fromMac" = "From your Mac";
 "library.pairToRead" = "Pair with your Mac to read meeting notes here.";
@@ -284,7 +275,6 @@
 "meeting.risks" = "Risks";
 "meeting.followUp" = "Follow-up";
 "calendar.enable" = "Show my upcoming meetings";
-"calendar.privacy" = "Sona reads the next seven days from this iPhone's calendars only when enabled. Nothing is recorded automatically.";
 "calendar.upcoming" = "Upcoming meetings";
 "calendar.empty" = "No timed meetings in the next seven days.";
 "calendar.denied" = "Calendar access is off. Allow full calendar access in Settings to see upcoming meetings.";
