@@ -1465,7 +1465,9 @@ impl MeetingProcessingService {
     /// The decisions in a meeting's new notes that change one an earlier
     /// meeting of its series, or of a project it is filed to, made, asked of
     /// the engine that wrote the notes. An earlier meeting goes only where
-    /// [`may_compare`] lets it.
+    /// [`may_compare`] lets it. Apple Intelligence is not asked: on 22
+    /// made-up pairs it flagged 4 of 9 unrelated ones that shared a word,
+    /// and 6 of 9 when asked to name what both decide (`drift_probe`).
     fn decision_drift(
         &self,
         store: &MeetingStore,
@@ -1475,7 +1477,7 @@ impl MeetingProcessingService {
         decisions: &[CitedArtifactText],
         check: &dyn Fn() -> Result<(), RunFailure>,
     ) -> Result<Vec<DecisionDrift>, RunFailure> {
-        if decisions.is_empty() {
+        if decisions.is_empty() || generator.model_id() == AppleIntelligenceGenerator.model_id() {
             return Ok(Vec::new());
         }
         let linked =
@@ -11851,6 +11853,7 @@ pub(crate) mod tests {
     /// what it was shown.
     #[derive(Default)]
     struct DriftWitness {
+        id: &'static str,
         shown: Mutex<Vec<String>>,
     }
 
@@ -11860,7 +11863,7 @@ pub(crate) mod tests {
         }
 
         fn model_id(&self) -> &'static str {
-            "drift-witness"
+            self.id
         }
 
         fn model_version(&self) -> Cow<'static, str> {
@@ -11959,6 +11962,23 @@ pub(crate) mod tests {
 
         assert_eq!(drift(ProcessingRoute::Local).len(), 1);
         assert_eq!(shown(), 2, "kept: compared on this Mac");
+
+        let apple = DriftWitness {
+            id: AppleIntelligenceGenerator.model_id(),
+            ..DriftWitness::default()
+        };
+        let asked = service
+            .decision_drift(
+                &store,
+                &apple,
+                now,
+                ProcessingRoute::Local,
+                &decisions,
+                &|| Ok(()),
+            )
+            .expect("drift");
+        assert!(asked.is_empty(), "Apple Intelligence is not asked");
+        assert!(apple.shown.lock().expect("the record").is_empty());
     }
 
     #[test]

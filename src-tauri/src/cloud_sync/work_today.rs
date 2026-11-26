@@ -207,7 +207,7 @@ pub(super) fn today_rows(
                 && !about_note(row).is_some_and(|id| personal.contains(&id))
                 && !row.lead.subject.as_ref().is_some_and(|subject| {
                     subject.kind == inbox::SubjectKind::Meeting
-                        && kept.map_or(true, |kept| kept.hides_meeting(&subject.id))
+                        && kept.is_none_or(|kept| kept.hides_meeting(&subject.id))
                 })
         })
         .take(MAX_ROWS)

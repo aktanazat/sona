@@ -1061,73 +1061,90 @@ fn print_notes(notes: &GeneratedMeetingArtifacts) {
     }
 }
 
-/// Pairs of an earlier and a new decision, each with whether the new one
-/// changes the earlier one. Made up, so the report may quote them.
-const DRIFT_PAIRS: [(&str, &str, bool); 12] = [
-    (
-        "The launch moves to March 3",
-        "The launch moves to April 9",
-        true,
-    ),
+/// Made-up pairs of an earlier and a new decision, so the report may quote
+/// them: the new one changes the earlier one...
+const DRIFT_CHANGED: [(&str, &str); 7] = [
+    ("The launch moves to March 3", "The launch moves to April 9"),
     (
         "We will use Postgres for the billing service",
         "The billing service will use MySQL instead of Postgres",
-        true,
     ),
     (
         "Dana owns the onboarding redesign",
         "Sam takes over the onboarding redesign from Dana",
-        true,
     ),
     (
         "The Q3 marketing budget is 50,000 dollars",
         "The Q3 marketing budget is cut to 30,000 dollars",
-        true,
     ),
     (
         "The mobile app ships every week",
         "The mobile app ships every two weeks from now on",
-        true,
     ),
+    ("The standup is at 9am", "The standup moves to 10am"),
     (
-        "The launch moves to March 3",
-        "The launch stays on March 3",
-        false,
+        "We will hire two engineers this quarter",
+        "Hiring is frozen this quarter",
     ),
+];
+/// ...keeps it...
+const DRIFT_AGREEING: [(&str, &str); 6] = [
+    ("The launch moves to March 3", "The launch stays on March 3"),
     (
         "We will use Postgres for billing",
         "Billing keeps using Postgres, with a read replica added",
-        false,
     ),
     (
         "Dana owns the onboarding redesign",
         "Dana presents the onboarding redesign on Friday",
-        false,
     ),
+    (
+        "The Q3 marketing budget is 50,000 dollars",
+        "The Q3 marketing budget stays at 50,000 dollars",
+    ),
+    (
+        "The mobile app ships every week",
+        "We keep shipping the mobile app weekly",
+    ),
+    (
+        "The standup is at 9am",
+        "The standup stays at 9am, and notes go in the channel",
+    ),
+];
+/// ...or decides something else that shares a word with it.
+const DRIFT_UNRELATED: [(&str, &str); 9] = [
     (
         "The launch party is at the office",
         "The launch date moves to April 9",
-        false,
     ),
     (
         "Billing invoices go out on the first of the month",
         "The billing service moves to MySQL",
-        false,
     ),
     (
         "Hire a designer for the website",
         "The website copy is frozen until launch",
-        false,
     ),
+    ("The team offsite is in Denver", "The team standup moves to 10am"),
     (
-        "The team offsite is in Denver",
-        "The team standup moves to 10am",
-        false,
+        "The design review is on Tuesdays",
+        "The design system uses the new color palette",
+    ),
+    ("Dana owns the onboarding redesign", "Dana takes Friday off"),
+    (
+        "The Q3 marketing budget is 50,000 dollars",
+        "The Q3 sales target is 2 million dollars",
+    ),
+    ("The mobile app ships every week", "The mobile app gets a dark mode"),
+    (
+        "Customer support moves to Zendesk",
+        "Customer interviews start next week",
     ),
 ];
 
 /// Each made-up pair through the app's own drift comparison on the engine
-/// this Mac's settings choose, reported by whether it was flagged.
+/// this Mac's settings choose, or SONA_PROBE_ENGINE, counted by whether it
+/// was flagged.
 ///
 /// <test binary> --ignored --exact \
 ///     meeting::processing::complete_reading::probe::drift_probe --nocapture
@@ -1138,32 +1155,40 @@ fn drift_probe() {
         .expect("SONA_PROBE_ENGINE is a meeting engine in the form Sona's settings keep it");
     let witness = Witness::new(&engine);
     println!("\nengine: {}", witness.engine().model_id());
-    let mut right = 0;
-    for (earlier, new, changes) in DRIFT_PAIRS {
-        let meeting = crate::meeting::store::series::EarlierDecisions {
-            session_id: MeetingSessionId::new(),
-            title: "Earlier".to_owned(),
-            started_at_utc_ms: None,
-            decisions: vec![CitedArtifactText {
-                text: earlier.to_owned(),
+    for (kind, pairs) in [
+        ("changed", &DRIFT_CHANGED[..]),
+        ("agreeing", &DRIFT_AGREEING[..]),
+        ("unrelated", &DRIFT_UNRELATED[..]),
+    ] {
+        let mut flagged = 0;
+        for (earlier, new) in pairs {
+            let meeting = crate::meeting::store::series::EarlierDecisions {
+                session_id: MeetingSessionId::new(),
+                title: "Earlier".to_owned(),
+                started_at_utc_ms: None,
+                decisions: vec![CitedArtifactText {
+                    text: (*earlier).to_owned(),
+                    citations: Vec::new(),
+                }],
+            };
+            let decision = CitedArtifactText {
+                text: (*new).to_owned(),
                 citations: Vec::new(),
-            }],
-        };
-        let decision = CitedArtifactText {
-            text: new.to_owned(),
-            citations: Vec::new(),
-        };
-        let started = Instant::now();
-        let flagged = !decision_drift(witness.engine(), &[decision], &[meeting], &|| Ok(()))
-            .expect("not stopped")
-            .is_empty();
-        right += usize::from(flagged == changes);
+            };
+            let started = Instant::now();
+            let drift = decision_drift(witness.engine(), &[decision], &[meeting], &|| Ok(()))
+                .expect("not stopped");
+            flagged += usize::from(!drift.is_empty());
+            println!(
+                "{kind} {} {:.1} s | {earlier} -> {new}",
+                if drift.is_empty() { "kept" } else { "flagged" },
+                started.elapsed().as_secs_f64(),
+            );
+        }
         println!(
-            "{} {:.1} s | expected {} | {earlier} -> {new}",
-            if flagged { "flagged" } else { "kept   " },
-            started.elapsed().as_secs_f64(),
-            if changes { "flagged" } else { "kept" },
+            "table {kind}: {flagged} flagged, {} kept, of {}",
+            pairs.len() - flagged,
+            pairs.len()
         );
     }
-    println!("{right} of {} as expected", DRIFT_PAIRS.len());
 }
