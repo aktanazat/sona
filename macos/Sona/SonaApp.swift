@@ -89,10 +89,40 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
             forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEQuitApplication))
         let model = model
         AppDependencyManager.shared.add(dependency: model)
+        NSApp.servicesProvider = self
     }
 
     @objc private func quitEvent(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         model.quit()
+    }
+
+    /// Services > Create Sona Task from Selection: the first line is the
+    /// title and the rest its details. The new task opens so it can be edited.
+    @objc func createTask(
+        _ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) {
+        guard let task = Self.task(from: pasteboard.string(forType: .string) ?? "") else {
+            error.pointee = "Select some text to make a task from."
+            return
+        }
+        let model = model
+        Task {
+            do {
+                let item = try await model.addTask(task.title, details: task.details, projectId: nil)
+                model.openTask(item.id)
+            } catch {
+                model.reveal()
+                model.go(.tasks)
+            }
+        }
+    }
+
+    private static func task(from selection: String) -> (title: String, details: String?)? {
+        let text = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let firstLine = text.split(whereSeparator: \.isNewline).first else { return nil }
+        let title = firstLine.trimmingCharacters(in: .whitespaces)
+        let rest = text.dropFirst(firstLine.count).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (title, rest.isEmpty ? nil : rest)
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
