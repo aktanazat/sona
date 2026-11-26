@@ -173,6 +173,7 @@ extension AppModel {
     func windowOpened() {
         openWindows += 1
         NSApp.setActivationPolicy(.regular)
+        loadWindowStoresIfShown()
     }
 
     func windowClosed() {
