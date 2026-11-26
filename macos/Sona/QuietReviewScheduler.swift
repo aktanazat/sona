@@ -26,11 +26,11 @@ final class QuietReviewScheduler {
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification,
                      NSWorkspace.willPowerOffNotification] {
-            workspaceObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+            workspaceObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if note.name == NSWorkspace.willSleepNotification { self.sleeping = true }
-                    if note.name == NSWorkspace.willPowerOffNotification { self.paused = true }
+                    if name == NSWorkspace.willSleepNotification { self.sleeping = true }
+                    if name == NSWorkspace.willPowerOffNotification { self.paused = true }
                     self.sessionActive = false
                     self.stop()
                 }

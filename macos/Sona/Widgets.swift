@@ -10,11 +10,11 @@ struct NumberTile: View {
     var framed: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(_ value: String, label: String, unit: String? = nil, tone: Color = Theme.ink, framed: Bool = true) {
+    init(_ value: String, label: String, unit: String? = nil, tone: Color? = nil, framed: Bool = true) {
         self.value = value
         self.label = label
         self.unit = unit
-        self.tone = tone
+        self.tone = tone ?? Theme.ink
         self.framed = framed
     }
 
@@ -65,13 +65,13 @@ struct WidgetTile<Visual: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(_ title: String, icon: String, value: String, unit: String? = nil, caption: String? = nil,
-         tone: Color = Theme.ink, action: (() -> Void)?, @ViewBuilder visual: () -> Visual) {
+         tone: Color? = nil, action: (() -> Void)?, @ViewBuilder visual: () -> Visual) {
         self.title = title
         self.icon = icon
         self.value = value
         self.unit = unit
         self.caption = caption
-        self.tone = tone
+        self.tone = tone ?? Theme.ink
         self.action = action
         self.visual = visual()
     }

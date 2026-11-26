@@ -288,7 +288,7 @@ final class WorkStore {
         return done
     }
 
-    private func write<P: Encodable>(on itemId: String, _ method: String, _ params: P) async -> Bool {
+    private func write<P: Encodable & Sendable>(on itemId: String, _ method: String, _ params: P) async -> Bool {
         do {
             try await core.request(method, params)
             mutationError = nil
@@ -327,7 +327,7 @@ final class WorkStore {
             operationId: Self.newId(), id: id, body: body, value: value))
     }
 
-    private func sessionWrite<P: Encodable>(_ method: String, _ params: P) async -> Bool {
+    private func sessionWrite<P: Encodable & Sendable>(_ method: String, _ params: P) async -> Bool {
         do {
             let session: WorkSession = try await core.request(method, params)
             sessionsTicket += 1
@@ -943,7 +943,7 @@ final class WorkStore {
         changeLabel(before, to: shown, "work_label_scope", LabelScopeParams(operationId: Self.newId(), id: id, scope: scope))
     }
 
-    private func changeLabel<P: Encodable>(_ before: WorkLabel, to shown: WorkLabel, _ method: String, _ params: P) {
+    private func changeLabel<P: Encodable & Sendable>(_ before: WorkLabel, to shown: WorkLabel, _ method: String, _ params: P) {
         place(shown)
         enqueue {
             do {

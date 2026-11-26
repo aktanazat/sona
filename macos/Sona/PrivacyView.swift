@@ -563,17 +563,18 @@ private extension CloudBackup {
     }
 }
 
+@MainActor
 private struct HoldingFigure {
     let value: String
     var unit: String?
     var detail: String?
-    var tone: Color = Theme.ink
+    var tone: Color
 
-    init(_ value: String, unit: String? = nil, detail: String? = nil, tone: Color = Theme.ink) {
+    init(_ value: String, unit: String? = nil, detail: String? = nil, tone: Color? = nil) {
         self.value = value
         self.unit = unit
         self.detail = detail
-        self.tone = tone
+        self.tone = tone ?? Theme.ink
     }
 }
 
@@ -586,7 +587,7 @@ private struct HoldingTile: Identifiable {
 
     /// A dash and the reason when the part could not be read; a printed zero
     /// only when there is nothing.
-    init<Value>(
+    @MainActor init<Value>(
         label: String, _ holding: Holding<Value>, open: @escaping () -> Void,
         figure: (Value) -> HoldingFigure
     ) {
@@ -756,7 +757,7 @@ private struct PrivacyCheckRow: View {
                 if let fact {
                     Text(fact).metaText()
                 }
-                Toggle(title, isOn: Binding(get: { isOn }, set: change))
+                Toggle(title, isOn: Binding(get: { isOn }, set: { change($0) }))
                     .labelsHidden()
                     .toggleStyle(.checkbox)
                     .disabled(!enabled)

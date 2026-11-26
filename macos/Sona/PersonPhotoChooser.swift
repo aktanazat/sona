@@ -139,36 +139,36 @@ final class PortraitChooserState: NSObject, @preconcurrency CNContactPickerDeleg
         picker.close()
         self.picker = nil
         beginLoad {
-            if !contact.isKeyAvailable(CNContactImageDataKey) {
-                let status = CNContactStore.authorizationStatus(for: .contacts)
-                if status == .notDetermined {
-                    guard try await CNContactStore().requestAccess(for: .contacts) else {
-                        throw PersonFailure(message: "Contacts access wasn't allowed. Choose a photo file instead.")
-                    }
-                } else if status != .authorized {
-                    throw PersonFailure(message: "Contacts access isn't available. Choose a photo file instead.")
-                }
+            if contact.isKeyAvailable(CNContactImageDataKey) {
+                return try Self.photo(of: contact)
             }
+            let status = CNContactStore.authorizationStatus(for: .contacts)
+            if status == .notDetermined {
+                guard try await CNContactStore().requestAccess(for: .contacts) else {
+                    throw PersonFailure(message: "Contacts access wasn't allowed. Choose a photo file instead.")
+                }
+            } else if status != .authorized {
+                throw PersonFailure(message: "Contacts access isn't available. Choose a photo file instead.")
+            }
+            let identifier = contact.identifier
             return try await Task.detached(priority: .userInitiated) {
-                let selected: CNContact
-                if contact.isKeyAvailable(CNContactImageDataKey) {
-                    selected = contact
-                } else {
-                    selected = try CNContactStore().unifiedContact(withIdentifier: contact.identifier, keysToFetch: [
-                        CNContactImageDataKey as CNKeyDescriptor,
-                        CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
-                    ])
-                }
-                guard let data = selected.imageData else {
-                    throw PersonFailure(message: "This contact has no photo. Choose another contact or a photo file.")
-                }
-                let descriptor = CNContactFormatter.descriptorForRequiredKeys(for: .fullName)
-                let contactName = selected.areKeysAvailable([descriptor])
-                    ? CNContactFormatter.string(from: selected, style: .fullName) ?? "Selected contact"
-                    : "Selected contact"
-                return (data, PersonPhotoProvenance.localContact(contactName: contactName, confirmedAtUtcMs: 0))
+                try Self.photo(of: CNContactStore().unifiedContact(withIdentifier: identifier, keysToFetch: [
+                    CNContactImageDataKey as CNKeyDescriptor,
+                    CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
+                ]))
             }.value
         }
+    }
+
+    nonisolated private static func photo(of contact: CNContact) throws -> (Data, PersonPhotoProvenance) {
+        guard let data = contact.imageData else {
+            throw PersonFailure(message: "This contact has no photo. Choose another contact or a photo file.")
+        }
+        let descriptor = CNContactFormatter.descriptorForRequiredKeys(for: .fullName)
+        let contactName = contact.areKeysAvailable([descriptor])
+            ? CNContactFormatter.string(from: contact, style: .fullName) ?? "Selected contact"
+            : "Selected contact"
+        return (data, PersonPhotoProvenance.localContact(contactName: contactName, confirmedAtUtcMs: 0))
     }
 
     func loadPublicImage() {

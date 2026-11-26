@@ -600,7 +600,7 @@ private struct VocabularyRuleRow: View {
                 kind: Text(rule.kind.title).metaText(Theme.inkSecondary),
                 trailing: HStack(spacing: 8) {
                     if let enabled = rule.enabled {
-                        Toggle(rule.left.isEmpty ? "New \(rule.kind.title) rule" : rule.left, isOn: Binding(get: { enabled }, set: onToggle))
+                        Toggle(rule.left.isEmpty ? "New \(rule.kind.title) rule" : rule.left, isOn: Binding(get: { enabled }, set: { onToggle($0) }))
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .controlSize(.mini)
@@ -649,7 +649,7 @@ private struct VocabularySampleRow: View {
                 .metaText(overLimit ? Theme.accent : Theme.inkTertiary)
             }
             HStack(alignment: .top, spacing: 12) {
-                TextEditor(text: Binding(get: { sample.text }, set: onEdit))
+                TextEditor(text: Binding(get: { sample.text }, set: { onEdit($0) }))
                     .focused($focus, equals: .sample(sample.id))
                     .font(TypeScale.body(14))
                     .foregroundStyle(Theme.ink)

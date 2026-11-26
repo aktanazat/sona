@@ -3,7 +3,7 @@ import Observation
 
 /// Every fenced write carries the revision it was decided against. The inner
 /// body is snake_case; only the parameter around it is camelCase.
-private struct MeetingTemplatesEnvelope<Body: Encodable>: Encodable {
+private struct MeetingTemplatesEnvelope<Body: Encodable & Sendable>: Encodable, Sendable {
     let request: Body
 }
 

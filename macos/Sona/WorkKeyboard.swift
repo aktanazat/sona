@@ -242,7 +242,7 @@ enum WorkAction: String, CaseIterable, Identifiable {
 enum TaskCopy: String, CaseIterable, Identifiable {
     case handle, link, markdown, createLink
 
-    var id: String { rawValue }
+    nonisolated var id: String { rawValue }
 
     var title: String {
         switch self {

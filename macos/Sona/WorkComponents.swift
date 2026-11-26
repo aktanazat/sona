@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 /// The color each status draws in.
+@MainActor
 enum WorkTint {
     static func status(_ status: WorkStatus) -> Color {
         switch status {

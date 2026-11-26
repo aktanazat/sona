@@ -764,7 +764,7 @@ private struct PlanningCreateTaskParams: Encodable {
     let input: PlanningTaskParams
     let operationId: String
 }
-private struct PlanningStatusParams<Status: Encodable>: Encodable {
+private struct PlanningStatusParams<Status: Encodable & Sendable>: Encodable, Sendable {
     let id: String
     let expectedRevision: Int64
     let status: Status
@@ -783,7 +783,7 @@ private struct PlanningLinkParams: Encodable {
     let operationId: String
 }
 
-enum PlanningFieldChange<Value: Encodable & Equatable>: Equatable {
+enum PlanningFieldChange<Value: Encodable & Equatable & Sendable>: Equatable, Sendable {
     case set(Value)
     case clear
 }

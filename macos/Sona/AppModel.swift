@@ -465,9 +465,9 @@ final class AppModel {
 
     @ObservationIgnored let core = Core()
     @ObservationIgnored let workKeys = WorkKeys()
-    @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
+    @ObservationIgnored private lazy var pill = FloatingPanel(AnyView(HUDPill().environment(self)))
     @ObservationIgnored private var cancelPromptPanel: FloatingPanel?
-    @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel(), arrival: .slide)
+    @ObservationIgnored private lazy var consent = FloatingPanel(AnyView(consentPanel()), arrival: .slide)
     @ObservationIgnored private let windowAttached: WindowAttachedCard
     @ObservationIgnored private lazy var quickEntry = QuickEntry(model: self)
     @ObservationIgnored lazy var voiceTriage = VoiceTriage(model: self)
@@ -1387,7 +1387,7 @@ final class AppModel {
     }
 
     /// Re-runs `apply` every time something it read changes.
-    private func track(_ apply: @escaping @MainActor () -> Void) {
+    private func track(_ apply: @escaping @MainActor @Sendable () -> Void) {
         withObservationTracking(apply) { [weak self] in
             Task { @MainActor [weak self] in self?.track(apply) }
         }

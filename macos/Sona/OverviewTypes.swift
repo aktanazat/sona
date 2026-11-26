@@ -380,7 +380,7 @@ struct CaptureModeParams: Encodable {
 
 /// What a list is: still reading, read, or refused. An empty list and an
 /// unread list are not the same claim.
-enum FeedState<Item> {
+enum FeedState<Item: Sendable>: Sendable {
     case loading
     case loaded([Item])
     case failed
@@ -533,7 +533,7 @@ struct FeedLimitParams: Encodable {
 
 /// One Today count, or the fact that its source could not be read. An
 /// unreadable source is never shown as zero.
-enum TodayCount<Value: Decodable & Equatable>: Decodable, Equatable {
+enum TodayCount<Value: Decodable & Equatable & Sendable>: Decodable, Equatable, Sendable {
     case available(Value)
     case unavailable
 
@@ -600,7 +600,7 @@ struct HomeToday: Decodable, Equatable {
 /// Wall-clock milliseconds, as the meeting store keeps them, and how long ago
 /// that was in words.
 enum FeedClock {
-    private static let relative: RelativeDateTimeFormatter = {
+    @MainActor private static let relative: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
         formatter.dateTimeStyle = .named
@@ -613,7 +613,7 @@ enum FeedClock {
 
     /// "2 minutes ago", "yesterday", or the day and time once it is older
     /// than a week.
-    static func ago(_ milliseconds: Int64) -> String {
+    @MainActor static func ago(_ milliseconds: Int64) -> String {
         let moment = date(milliseconds)
         let elapsed = Date.now.timeIntervalSince(moment)
         if elapsed >= 7 * 24 * 3600 {

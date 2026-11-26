@@ -191,9 +191,10 @@ final class CameraWatermarkController: NSObject, OSSystemExtensionRequestDelegat
     }
 
     nonisolated func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        let id = ObjectIdentifier(request)
         Task { @MainActor in
-            self.requests.removeAll { $0 === request }
-            guard self.changingRequests.remove(ObjectIdentifier(request)) != nil else { return }
+            self.requests.removeAll { ObjectIdentifier($0) == id }
+            guard self.changingRequests.remove(id) != nil else { return }
             self.busy = false
             self.status = result == .willCompleteAfterReboot ? "Restart this Mac to finish the camera change." : "The camera request finished. Checking availability…"
             if result != .willCompleteAfterReboot { self.refresh() }
@@ -202,11 +203,12 @@ final class CameraWatermarkController: NSObject, OSSystemExtensionRequestDelegat
 
     nonisolated func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
         let message = error.localizedDescription
+        let id = ObjectIdentifier(request)
         Task { @MainActor in
-            self.requests.removeAll { $0 === request }
+            self.requests.removeAll { ObjectIdentifier($0) == id }
             self.busy = false
             self.error = message
-            self.changingRequests.remove(ObjectIdentifier(request))
+            self.changingRequests.remove(id)
             self.status = "The camera change did not finish."
         }
     }
@@ -214,8 +216,9 @@ final class CameraWatermarkController: NSObject, OSSystemExtensionRequestDelegat
     nonisolated func request(_ request: OSSystemExtensionRequest, foundProperties properties: [OSSystemExtensionProperties]) {
         let enabled = properties.contains { $0.isEnabled && !$0.isUninstalling }
         let waiting = properties.contains { $0.isAwaitingUserApproval }
+        let id = ObjectIdentifier(request)
         Task { @MainActor in
-            self.requests.removeAll { $0 === request }
+            self.requests.removeAll { ObjectIdentifier($0) == id }
             self.installed = enabled
             self.status = enabled ? "Sona Camera is available. Choose it in your call app's camera menu."
                 : waiting ? "Waiting for your approval in Camera Extensions in System Settings."

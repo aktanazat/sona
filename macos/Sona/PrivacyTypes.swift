@@ -550,7 +550,7 @@ struct IdentityAdoptionEntry: Decodable, Identifiable {
     let sha256: String?
 
     var id: String { path }
-    var size: String { Model.bytes(UInt64(max(bytes, 0))) }
+    @MainActor var size: String { Model.bytes(UInt64(max(bytes, 0))) }
 }
 
 enum IdentityCredentialStatus: String, Decodable {

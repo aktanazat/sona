@@ -587,7 +587,7 @@ final class CloudSyncStore {
 }
 
 /// Every cloud command that carries a serde struct takes it under `request`.
-struct CloudSyncRequest<Body: Encodable>: Encodable {
+struct CloudSyncRequest<Body: Encodable & Sendable>: Encodable, Sendable {
     let request: Body
 }
 

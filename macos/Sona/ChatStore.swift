@@ -906,7 +906,7 @@ final class ChatStore {
 
     /// Every panel command takes its arguments under one `request` key, and
     /// the fields inside it keep the wire's own names.
-    private struct Envelope<Request: Encodable>: Encodable {
+    private struct Envelope<Request: Encodable & Sendable>: Encodable, Sendable {
         let request: Request
     }
 

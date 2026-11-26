@@ -419,7 +419,7 @@ struct PlannerAgentView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
             TextField(store.draft == nil ? "Describe the project" : "Ask for a change",
-                      text: Binding(get: { store.goal }, set: store.editGoal), axis: .vertical)
+                      text: Binding(get: { store.goal }, set: { store.editGoal($0) }), axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(TypeScale.body(14))
                 .lineLimit(1...4)
