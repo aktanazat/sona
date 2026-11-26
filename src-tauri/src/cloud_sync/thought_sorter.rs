@@ -11,7 +11,7 @@ use super::{
     acknowledge_remote_revision, adjusted_now_ms, base64_url_decode, credentials, map_store_error,
     memory_index::phone_sync_directory,
     open_object_revision_payload,
-    phone_thought_manifest::ThoughtManifest,
+    phone_thought_manifest::{thought_audio_samples, ThoughtManifest},
     phone_thoughts::PhoneThoughtAttachment,
     revision_upload::{self, StagedRevision, UploadRefused},
     sha256_base64url, write_staged_file, CloudAccess, CloudRuntimeError, CloudSyncRuntime,
@@ -23,7 +23,7 @@ use crate::meeting::processing::{
 };
 use crate::meeting::screen_text::{self, ScreenTextError};
 use crate::modes::{AsrPlan, RunPlan};
-use crate::scratchpad::phone_import;
+use crate::scratchpad::phone_import::{self, PhoneThoughtReference};
 use crate::settings;
 use schemars::{schema::RootSchema, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,8 @@ const UNSORTED_KEY: &str = "unsorted";
 /// Thoughts read per sync pass, so a backlog of voice notes never holds the
 /// rest of sync behind the transcription model for long.
 const MAX_THOUGHTS_PER_PASS: usize = 4;
+/// Failed tries at one thought revision before the Mac leaves it in Unsorted.
+const MAX_ATTEMPTS: u32 = 5;
 const RETRY_BASE_MS: i64 = 60 * 1000;
 const RETRY_CAP_MS: i64 = 6 * 60 * 60 * 1000;
 const MAX_TITLE_CHARS: usize = 80;
@@ -201,21 +203,30 @@ pub(super) enum Unfiled {
     /// it or in a format this Mac cannot decode, photos with nothing Vision
     /// knows. Not tried again for this revision.
     NothingToRead,
-    /// An engine failed or was busy; tried again later.
+    /// An engine failed or answered nothing usable; tried again later, up to
+    /// [`MAX_ATTEMPTS`] times.
     Retry,
 }
 
 /// Whether an engine on this Mac failed for now; a picture or a recording
-/// with nothing in it is `Ok` with empty text.
+/// with nothing in it is `Ok` and empty.
 #[derive(Debug)]
 pub(super) struct SenseFailed;
+
+/// What Vision found in one photo.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) struct PhotoReading {
+    /// The words written in it.
+    pub text: String,
+    /// What it shows, as Vision's scene labels.
+    pub labels: Vec<String>,
+}
 
 /// The engines on this Mac that turn a thought's attachments into words.
 pub(super) trait ThoughtSenses: Send + Sync {
     /// Words spoken in 16 kHz mono audio.
     fn transcribe(&self, samples: &[f32]) -> Result<String, SenseFailed>;
-    /// Words in a picture, and what it shows.
-    fn read_image(&self, image: &[u8]) -> Result<String, SenseFailed>;
+    fn read_image(&self, image: &[u8]) -> Result<PhotoReading, SenseFailed>;
 }
 
 /// One thought and its attachments, as they were imported here.
@@ -227,70 +238,112 @@ pub(super) struct ThoughtContent {
     pub images: Vec<Vec<u8>>,
 }
 
-/// 16 kHz mono samples of a thought's recording, or `None` for a format this
-/// Mac does not decode.
-pub(crate) fn thought_audio_samples(
-    codec: &str,
-    sample_rate_hz: u32,
-    channels: u16,
-    bytes: &[u8],
-) -> Option<Vec<f32>> {
-    if codec != "pcm_s16le" || sample_rate_hz != 16_000 || channels != 1 {
-        return None;
-    }
-    let (pairs, remainder) = bytes.as_chunks::<2>();
-    if !remainder.is_empty() {
-        return None;
-    }
-    Some(
-        pairs
-            .iter()
-            .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32_768.0)
-            .collect(),
-    )
+/// What this Mac heard and saw in a textless thought's attachments. Kept
+/// per revision, so a retry never transcribes or reads the photos again.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) struct Reading {
+    spoken: String,
+    photos: Vec<PhotoReading>,
 }
 
-/// The words a thought carries: its own text, or else what this Mac heard
-/// in its recording and saw in its photos. The flag says whether the words
-/// came from the attachments.
-fn note_text(
+impl Reading {
+    fn is_empty(&self) -> bool {
+        self.spoken.is_empty()
+            && self
+                .photos
+                .iter()
+                .all(|photo| photo.text.is_empty() && photo.labels.is_empty())
+    }
+
+    /// The words for the model, each marked with where it came from.
+    fn labelled(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.spoken.is_empty() {
+            parts.push(format!("Said in the recording: {}", self.spoken));
+        }
+        for photo in &self.photos {
+            match (photo.text.is_empty(), photo.labels.is_empty()) {
+                (true, true) => {}
+                (true, false) => parts.push(format!(
+                    "In the photo: a picture of {}",
+                    photo.labels.join(", ")
+                )),
+                (false, true) => parts.push(format!("In the photo: {}", photo.text)),
+                (false, false) => parts.push(format!(
+                    "In the photo: {} (a picture of {})",
+                    photo.text,
+                    photo.labels.join(", ")
+                )),
+            }
+        }
+        parts.join("\n")
+    }
+
+    /// The words themselves, as the person's note keeps them: what was said
+    /// and what the photos read, with no labels.
+    fn plain(&self) -> String {
+        std::iter::once(self.spoken.as_str())
+            .chain(self.photos.iter().map(|photo| photo.text.as_str()))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+/// Transcribe a textless thought's recording and read its photos.
+fn read_attachments(
     content: &ThoughtContent,
     senses: &dyn ThoughtSenses,
-) -> Result<(String, bool), Unfiled> {
-    let typed = content.manifest.text.trim();
-    if !typed.is_empty() {
-        return Ok((typed.to_owned(), false));
-    }
-    let mut parts = Vec::new();
+) -> Result<Reading, Unfiled> {
+    let mut reading = Reading::default();
     if let (Some(audio), Some(bytes)) = (&content.manifest.audio, &content.audio) {
         if let Some(samples) =
             thought_audio_samples(&audio.codec, audio.sample_rate_hz, audio.channels, bytes)
         {
-            let heard = senses.transcribe(&samples).map_err(|_| Unfiled::Retry)?;
-            if !heard.trim().is_empty() {
-                parts.push(format!("Said in the recording: {}", heard.trim()));
-            }
+            reading.spoken = senses
+                .transcribe(&samples)
+                .map_err(|_| Unfiled::Retry)?
+                .trim()
+                .to_owned();
         }
     }
     for image in &content.images {
-        let seen = senses.read_image(image).map_err(|_| Unfiled::Retry)?;
-        if !seen.trim().is_empty() {
-            parts.push(format!("In the photo: {}", seen.trim()));
-        }
+        let photo = senses.read_image(image).map_err(|_| Unfiled::Retry)?;
+        reading.photos.push(PhotoReading {
+            text: photo.text.trim().to_owned(),
+            labels: photo.labels,
+        });
     }
-    if parts.is_empty() {
+    if reading.is_empty() {
         return Err(Unfiled::NothingToRead);
     }
-    Ok((parts.join("\n"), true))
+    Ok(reading)
 }
 
+/// The imported note's body before and after its attachments were read:
+/// what was said and the words the photos show, without labels, and the
+/// link line kept. `None` when the photos showed things but no words.
+fn note_body(manifest: &ThoughtManifest, reading: &Reading) -> Option<(String, String)> {
+    let plain = reading.plain();
+    if plain.is_empty() {
+        return None;
+    }
+    let link = manifest.link.as_ref().map(|link| link.url.as_str());
+    let body = |text: &str| {
+        phone_import::capture_body(text, link, manifest.audio.is_some(), manifest.images.len())
+    };
+    Some((body(&manifest.text), body(&plain)))
+}
+
+/// The request for one note. A note longer than the local model's budget is
+/// cut to fit: a model that sees the start of a long note still files it.
 fn evidence(
     manifest: &ThoughtManifest,
     text: &str,
     from_attachments: bool,
     clusters: &[CardCluster],
     budget: usize,
-) -> Result<String, Unfiled> {
+) -> String {
     let names = clusters
         .iter()
         .map(|cluster| cluster.name.as_str())
@@ -322,11 +375,12 @@ fn evidence(
     lines.push("Note:".to_owned());
     let mut evidence = lines.join("\n");
     evidence.push('\n');
-    evidence.push_str(text);
-    if evidence.len() > budget {
-        return Err(Unfiled::Retry);
+    let mut end = budget.saturating_sub(evidence.len()).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
     }
-    Ok(evidence)
+    evidence.push_str(&text[..end]);
+    evidence
 }
 
 fn clipped(text: &str, max_chars: usize) -> String {
@@ -375,23 +429,28 @@ fn classify(
     })
 }
 
-/// The card for one thought, read and classified only by engines on this
-/// Mac.
+/// The card for one thought, classified only by the local notes engine:
+/// from its typed text, or else from what this Mac read in its attachments.
 pub(super) fn card_for(
     content: &ThoughtContent,
+    reading: Option<&Reading>,
     clusters: &[CardCluster],
-    senses: &dyn ThoughtSenses,
     generator: &dyn MeetingTextGenerator,
     device_id: &str,
     now_utc_ms: i64,
-) -> Result<(CardManifest, Option<String>), Unfiled> {
-    let (text, from_attachments) = note_text(content, senses)?;
+) -> Result<CardManifest, Unfiled> {
+    let typed = content.manifest.text.trim();
+    let (text, from_attachments) = match reading {
+        Some(reading) if typed.is_empty() => (reading.labelled(), true),
+        _ if typed.is_empty() => return Err(Unfiled::NothingToRead),
+        _ => (typed.to_owned(), false),
+    };
     let budget = evidence_budget(generator, SYSTEM_PROMPT, OUTPUT_TOKENS);
     let classification = classify(
         generator,
-        &evidence(&content.manifest, &text, from_attachments, clusters, budget)?,
+        &evidence(&content.manifest, &text, from_attachments, clusters, budget),
     )?;
-    let card = CardManifest {
+    Ok(CardManifest {
         archived: false,
         cluster: resolve_cluster(&classification.cluster, clusters),
         format_version: 1,
@@ -411,8 +470,7 @@ pub(super) fn card_for(
             role: "sorter".to_owned(),
         },
         written_at_utc_ms: now_utc_ms,
-    };
-    Ok((card, from_attachments.then_some(text)))
+    })
 }
 
 /// What this Mac remembers of one card object in the vault.
@@ -445,19 +503,57 @@ struct SorterState {
     cards_backfilled: bool,
     /// Card object id to what it says.
     cards: BTreeMap<String, KnownCard>,
+    /// Thought revision to its failed tries so far.
     attempts: BTreeMap<String, Attempt>,
-    /// Thought revisions with nothing in them to read.
-    unreadable: BTreeSet<String>,
+    /// Thought revision to what this Mac read in its attachments, until the
+    /// revision is filed or given up.
+    readings: BTreeMap<String, Reading>,
+    /// Thought revisions this Mac stopped trying: nothing in them to read,
+    /// or [`MAX_ATTEMPTS`] failed tries. They stay in Unsorted.
+    stopped: BTreeSet<String>,
     pending: Option<PendingCard>,
 }
 
+/// What one pass reads: the thoughts due, and the board's clusters.
+struct PassPlan<'a> {
+    due: Vec<&'a PhoneThoughtReference>,
+    clusters: Vec<CardCluster>,
+}
+
 impl SorterState {
-    /// Whether a live card already files this thought. `live` says whether a
-    /// card object is still in the vault.
-    fn files(&self, thought_id: &str, live: impl Fn(&str) -> bool) -> bool {
-        self.cards.iter().any(|(object_id, card)| {
-            card.thought_id == thought_id && card.settles && live(object_id)
-        })
+    /// The thoughts due this pass, oldest first, at most
+    /// [`MAX_THOUGHTS_PER_PASS`]. The clusters, which ask the store whether
+    /// each card is still in the vault, are read only when one is due.
+    fn plan<'a>(
+        &self,
+        references: &'a [PhoneThoughtReference],
+        now_utc_ms: i64,
+        live: impl Fn(&str) -> bool,
+    ) -> PassPlan<'a> {
+        let filed: BTreeSet<&str> = self
+            .cards
+            .values()
+            .filter(|card| card.settles)
+            .map(|card| card.thought_id.as_str())
+            .collect();
+        let due: Vec<_> = references
+            .iter()
+            .filter(|reference| {
+                !filed.contains(reference.object_id.as_str())
+                    && !self.stopped.contains(&reference.revision_id)
+                    && self
+                        .attempts
+                        .get(&reference.revision_id)
+                        .is_none_or(|attempt| now_utc_ms >= attempt.next_at_utc_ms)
+            })
+            .take(MAX_THOUGHTS_PER_PASS)
+            .collect();
+        let clusters = if due.is_empty() {
+            Vec::new()
+        } else {
+            self.clusters(live)
+        };
+        PassPlan { due, clusters }
     }
 
     fn clusters(&self, live: impl Fn(&str) -> bool) -> Vec<CardCluster> {
@@ -470,6 +566,37 @@ impl SorterState {
             }
         }
         by_key.into_values().collect()
+    }
+
+    /// One failed try at a thought revision. After [`MAX_ATTEMPTS`] the Mac
+    /// stops trying it.
+    fn failed(&mut self, revision_id: &str, now_utc_ms: i64) {
+        let count = self
+            .attempts
+            .get(revision_id)
+            .map_or(0, |attempt| attempt.count)
+            .saturating_add(1);
+        if count >= MAX_ATTEMPTS {
+            self.stop(revision_id);
+        } else {
+            self.attempts.insert(
+                revision_id.to_owned(),
+                Attempt {
+                    count,
+                    next_at_utc_ms: now_utc_ms.saturating_add(retry_delay(count)),
+                },
+            );
+        }
+    }
+
+    fn stop(&mut self, revision_id: &str) {
+        self.forget(revision_id);
+        self.stopped.insert(revision_id.to_owned());
+    }
+
+    fn forget(&mut self, revision_id: &str) {
+        self.attempts.remove(revision_id);
+        self.readings.remove(revision_id);
     }
 }
 
@@ -520,19 +647,14 @@ impl ThoughtSenses for MacSenses {
             .map_err(|_| SenseFailed)
     }
 
-    fn read_image(&self, image: &[u8]) -> Result<String, SenseFailed> {
+    fn read_image(&self, image: &[u8]) -> Result<PhotoReading, SenseFailed> {
         let text = match screen_text::read(image) {
             Ok(read) => read.text,
-            Err(ScreenTextError::Unreadable) => return Ok(String::new()),
+            Err(ScreenTextError::Unreadable) => return Ok(PhotoReading::default()),
             Err(ScreenTextError::Failed) => return Err(SenseFailed),
         };
         let labels = screen_text::labels(image).map_err(|_| SenseFailed)?;
-        Ok(match (text.trim().is_empty(), labels.is_empty()) {
-            (true, true) => String::new(),
-            (true, false) => format!("a picture of {}", labels.join(", ")),
-            (false, true) => text,
-            (false, false) => format!("{text}\n(a picture of {})", labels.join(", ")),
-        })
+        Ok(PhotoReading { text, labels })
     }
 }
 
@@ -770,6 +892,26 @@ impl CloudSyncRuntime {
         let history = Arc::clone(self.app.state::<Arc<HistoryManager>>().inner());
         let references = phone_import::current_references(&history, &access.state.vault_id)
             .map_err(|_| CloudRuntimeError::Storage)?;
+        let now = adjusted_now_ms(access.state.clock_offset_ms);
+        let mut readings = BTreeMap::new();
+        let mut plan = PassPlan {
+            due: Vec::new(),
+            clusters: Vec::new(),
+        };
+        self.edit_sorter(access, |state| {
+            plan = state.plan(&references, now, |object_id| {
+                self.card_is_live(access, object_id)
+            });
+            for reference in &plan.due {
+                if let Some(reading) = state.readings.get(&reference.revision_id) {
+                    readings.insert(reference.revision_id.clone(), reading.clone());
+                }
+            }
+            Ok(false)
+        })?;
+        if plan.due.is_empty() {
+            return Ok(());
+        }
         let senses: Arc<dyn ThoughtSenses> = Arc::new(MacSenses {
             transcription: self
                 .app
@@ -782,127 +924,156 @@ impl CloudSyncRuntime {
                     Some((Arc::clone(manager.inner()), plan))
                 }),
         });
-        let mut read = 0;
-        for reference in references {
-            if read == MAX_THOUGHTS_PER_PASS {
-                break;
-            }
-            let now = adjusted_now_ms(access.state.clock_offset_ms);
-            let mut due = false;
-            let mut clusters = Vec::new();
-            self.edit_sorter(access, |state| {
-                let live = |object_id: &str| self.card_is_live(access, object_id);
-                due = !state.files(&reference.object_id, live)
-                    && !state.unreadable.contains(&reference.revision_id)
-                    && state
-                        .attempts
-                        .get(&reference.object_id)
-                        .is_none_or(|attempt| now >= attempt.next_at_utc_ms);
-                clusters = state.clusters(live);
-                Ok(false)
-            })?;
-            if !due {
-                continue;
-            }
-            read += 1;
-            let content = self
-                .thought_content(&reference.object_id, &reference.revision_id)
-                .await?;
-            let Some(content) = content else { continue };
-            let expected_body = phone_import::capture_body(
-                &content.manifest.text,
-                content.manifest.link.as_ref().map(|link| link.url.as_str()),
-                content.manifest.audio.is_some(),
-                content.manifest.images.len(),
-            );
-            let generator = Arc::clone(&generator);
-            let senses = Arc::clone(&senses);
-            let device_id = access.state.device_id.clone();
-            let filed = tauri::async_runtime::spawn_blocking(move || {
-                card_for(
-                    &content,
-                    &clusters,
-                    senses.as_ref(),
-                    generator.as_ref(),
-                    &device_id,
+        for reference in plan.due {
+            let sorted = self
+                .sort_thought(
+                    access,
+                    &history,
+                    reference,
+                    readings.remove(&reference.revision_id),
+                    &plan.clusters,
+                    &generator,
+                    &senses,
                     now,
                 )
-            })
-            .await
-            .map_err(|_| CloudRuntimeError::Storage)?;
-            match filed {
-                Ok((card, derived_text)) => {
-                    if let Some(text) = derived_text {
-                        phone_import::enrich(
-                            &self.app,
-                            &history,
-                            &reference,
-                            &expected_body,
-                            &text,
-                            now,
-                        )
-                        .map_err(|_| CloudRuntimeError::Storage)?;
-                    }
-                    let plaintext = Zeroizing::new(
-                        serde_json::to_vec(&card)
-                            .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
-                    );
-                    let revision = revision_upload::stage(
-                        access,
-                        CARD_SOURCE_FORMAT,
-                        card_object_id(&reference.object_id),
-                        &plaintext,
-                        &[&[]],
-                    )?;
-                    self.edit_sorter(access, |state| {
-                        state.attempts.remove(&reference.object_id);
-                        state.pending = Some(PendingCard {
-                            thought_id: reference.object_id.clone(),
-                            cluster: card.cluster.clone(),
-                            revision,
-                        });
-                        Ok(true)
-                    })?;
-                    self.upload_pending_card(access).await?;
-                }
-                Err(Unfiled::NothingToRead) => self.edit_sorter(access, |state| {
-                    state.attempts.remove(&reference.object_id);
-                    state.unreadable.insert(reference.revision_id.clone());
+                .await;
+            if let Err(error) = sorted {
+                log::warn!("A phone thought was not sorted this time: {error:?}");
+                self.edit_sorter(access, |state| {
+                    state.failed(&reference.revision_id, now);
                     Ok(true)
-                })?,
-                Err(Unfiled::Retry) => self.edit_sorter(access, |state| {
-                    let count = state
-                        .attempts
-                        .get(&reference.object_id)
-                        .map_or(0, |attempt| attempt.count)
-                        .saturating_add(1);
-                    state.attempts.insert(
-                        reference.object_id.clone(),
-                        Attempt {
-                            count,
-                            next_at_utc_ms: now.saturating_add(retry_delay(count)),
-                        },
-                    );
-                    Ok(true)
-                })?,
+                })?;
             }
+            self.upload_pending_card(access).await?;
         }
         Ok(())
     }
 
-    /// A thought and its attachments, as imported here; `None` when its
-    /// source is gone or moved on since it was listed.
+    /// Read, classify and stage the card for one thought, recording how it
+    /// went. An error is a failure of this thought alone, which the caller
+    /// counts as one try.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one pass's shared inputs, passed once per thought"
+    )]
+    async fn sort_thought(
+        &self,
+        access: &CloudAccess,
+        history: &HistoryManager,
+        reference: &PhoneThoughtReference,
+        known: Option<Reading>,
+        clusters: &[CardCluster],
+        generator: &Arc<dyn MeetingTextGenerator>,
+        senses: &Arc<dyn ThoughtSenses>,
+        now: i64,
+    ) -> Result<(), CloudRuntimeError> {
+        let revision_id = reference.revision_id.as_str();
+        let Some(content) = self
+            .thought_content(&reference.object_id, revision_id, known.is_none())
+            .await?
+        else {
+            return Ok(());
+        };
+        let typed = !content.manifest.text.trim().is_empty();
+        let (content, reading) = match known {
+            Some(reading) => (content, Some(reading)),
+            None if typed => (content, None),
+            None => {
+                let senses = Arc::clone(senses);
+                let (content, read) = tauri::async_runtime::spawn_blocking(move || {
+                    let read = read_attachments(&content, senses.as_ref());
+                    (content, read)
+                })
+                .await
+                .map_err(|_| CloudRuntimeError::Storage)?;
+                let reading = match read {
+                    Ok(reading) => reading,
+                    Err(unfiled) => {
+                        return self.edit_sorter(access, |state| {
+                            match unfiled {
+                                Unfiled::NothingToRead => state.stop(revision_id),
+                                Unfiled::Retry => state.failed(revision_id, now),
+                            }
+                            Ok(true)
+                        });
+                    }
+                };
+                if let Some((expected, body)) = note_body(&content.manifest, &reading) {
+                    phone_import::enrich(&self.app, history, reference, &expected, &body, now)
+                        .map_err(|_| CloudRuntimeError::Storage)?;
+                }
+                self.edit_sorter(access, |state| {
+                    state
+                        .readings
+                        .insert(revision_id.to_owned(), reading.clone());
+                    Ok(true)
+                })?;
+                (content, Some(reading))
+            }
+        };
+        let generator = Arc::clone(generator);
+        let clusters = clusters.to_vec();
+        let device_id = access.state.device_id.clone();
+        let filed = tauri::async_runtime::spawn_blocking(move || {
+            card_for(
+                &content,
+                reading.as_ref(),
+                &clusters,
+                generator.as_ref(),
+                &device_id,
+                now,
+            )
+        })
+        .await
+        .map_err(|_| CloudRuntimeError::Storage)?;
+        let card = match filed {
+            Ok(card) => card,
+            Err(unfiled) => {
+                return self.edit_sorter(access, |state| {
+                    match unfiled {
+                        Unfiled::NothingToRead => state.stop(revision_id),
+                        Unfiled::Retry => state.failed(revision_id, now),
+                    }
+                    Ok(true)
+                });
+            }
+        };
+        let plaintext = Zeroizing::new(
+            serde_json::to_vec(&card).map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+        );
+        let revision = revision_upload::stage(
+            access,
+            CARD_SOURCE_FORMAT,
+            card_object_id(&reference.object_id),
+            &plaintext,
+            &[&[]],
+        )?;
+        self.edit_sorter(access, |state| {
+            state.forget(revision_id);
+            state.pending = Some(PendingCard {
+                thought_id: reference.object_id.clone(),
+                cluster: card.cluster.clone(),
+                revision,
+            });
+            Ok(true)
+        })
+    }
+
+    /// A thought, and its attachments when `attachments` asks for them, as
+    /// imported here; `None` when its source is gone or moved on since it
+    /// was listed.
     async fn thought_content(
         &self,
         object_id: &str,
         revision_id: &str,
+        attachments: bool,
     ) -> Result<Option<ThoughtContent>, CloudRuntimeError> {
         let Some(source) = self.phone_thought_source(object_id, revision_id).await? else {
             return Ok(None);
         };
         let manifest = source.manifest;
-        let typed = !manifest.text.trim().is_empty();
-        let audio = if typed || manifest.audio.is_none() {
+        let skip = !attachments || !manifest.text.trim().is_empty();
+        let audio = if skip || manifest.audio.is_none() {
             None
         } else {
             Some(
@@ -915,7 +1086,7 @@ impl CloudSyncRuntime {
             )
         };
         let mut images = Vec::new();
-        if !typed {
+        if !skip {
             for index in 0..manifest.images.len() {
                 let index =
                     u32::try_from(index).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
@@ -943,7 +1114,7 @@ impl CloudSyncRuntime {
 mod tests {
     use super::*;
     use crate::cloud_sync::runtime::phone_thought_manifest::{
-        ThoughtAudio, ThoughtImage, ThoughtOrigin,
+        ThoughtAudio, ThoughtImage, ThoughtLink, ThoughtOrigin,
     };
     use crate::meeting::processing::{
         MeetingProcessingService, MeetingTextGenerationError, ReplyShape,
@@ -1011,12 +1182,67 @@ mod tests {
 
     impl ThoughtSenses for Senses {
         fn transcribe(&self, samples: &[f32]) -> Result<String, SenseFailed> {
-            assert_eq!(samples, &[0.0, 0.5, -0.5]);
+            assert!(!samples.is_empty());
             Ok("Grow tomatoes this spring".to_owned())
         }
-        fn read_image(&self, image: &[u8]) -> Result<String, SenseFailed> {
+        fn read_image(&self, image: &[u8]) -> Result<PhotoReading, SenseFailed> {
             assert_eq!(image, b"fixture-photo");
-            Ok("Garden plans: tomatoes this spring".to_owned())
+            Ok(PhotoReading {
+                text: "Garden plans: tomatoes this spring".to_owned(),
+                labels: vec!["outdoor".to_owned(), "sky".to_owned()],
+            })
+        }
+    }
+
+    fn audio(codec: &str, byte_length: u64) -> ThoughtAudio {
+        ThoughtAudio {
+            codec: codec.to_owned(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+            byte_length,
+            sha256: String::new(),
+            duration_ms: 1,
+            chunk_start: 0,
+            chunk_count: 1,
+        }
+    }
+
+    fn photo() -> ThoughtContent {
+        let mut photo = content();
+        photo.manifest.origin = ThoughtOrigin::Shared;
+        photo.manifest.images.push(ThoughtImage {
+            mime: "image/jpeg".to_owned(),
+            byte_length: 13,
+            sha256: String::new(),
+            width: 100,
+            height: 100,
+            chunk_start: 0,
+            chunk_count: 1,
+        });
+        photo.images.push(b"fixture-photo".to_vec());
+        photo
+    }
+
+    fn reference(index: usize) -> PhoneThoughtReference {
+        PhoneThoughtReference {
+            vault_id: "vault".to_owned(),
+            object_id: format!("thought_{index}"),
+            revision_id: format!("revision_{index}"),
+            note_id: format!("note_{index}"),
+            captured_at_utc_ms: 1,
+            origin: "voice".to_owned(),
+            device_id: "phone".to_owned(),
+            link: None,
+            source_deleted: false,
+            change_sequence: 1,
+        }
+    }
+
+    fn card_on(thought: usize, cluster: &str, settles: bool) -> KnownCard {
+        KnownCard {
+            thought_id: format!("thought_{thought}"),
+            cluster: resolve_cluster(cluster, &[]),
+            settles,
         }
     }
 
@@ -1043,62 +1269,147 @@ mod tests {
     #[test]
     fn a_textless_voice_thought_is_transcribed_and_filed_in_a_cluster() {
         let mut voice = content();
-        voice.manifest.audio = Some(ThoughtAudio {
-            codec: "pcm_s16le".to_owned(),
-            sample_rate_hz: 16_000,
-            channels: 1,
-            byte_length: 6,
-            sha256: String::new(),
-            duration_ms: 1,
-            chunk_start: 0,
-            chunk_count: 1,
-        });
+        voice.manifest.audio = Some(audio("pcm_s16le", 6));
         voice.audio = Some(vec![0, 0, 0, 64, 0, 192]);
+        let reading = read_attachments(&voice, &Senses).unwrap();
         let model = LocalModel::default();
-        let (card, text) = card_for(&voice, &[], &Senses, &model, "mac", 123).unwrap();
-        assert!(text.unwrap().contains("Grow tomatoes"));
+        let card = card_for(&voice, Some(&reading), &[], &model, "mac", 123).unwrap();
         assert_eq!(card.cluster.key, "garden");
         assert_eq!(card.thought_id, voice.thought_id);
-        assert!(model.evidence.lock().unwrap()[0].contains("Grow tomatoes this spring"));
+        assert!(model.evidence.lock().unwrap()[0]
+            .contains("Said in the recording: Grow tomatoes this spring"));
+    }
+
+    #[test]
+    fn a_compact_phones_voice_thought_is_transcribed_and_filed() {
+        let bytes = include_bytes!("../../tests/fixtures/phone-audio/jfk.aac");
+        let mut voice = content();
+        voice.manifest.audio = Some(audio("aac_adts", bytes.len() as u64));
+        voice.audio = Some(bytes.to_vec());
+        let reading = read_attachments(&voice, &Senses).unwrap();
+        let card = card_for(
+            &voice,
+            Some(&reading),
+            &[],
+            &LocalModel::default(),
+            "mac",
+            123,
+        )
+        .unwrap();
+        assert_eq!(card.cluster.key, "garden");
     }
 
     #[test]
     fn a_textless_photo_thought_is_read_and_filed_in_a_cluster() {
-        let mut photo = content();
-        photo.manifest.origin = ThoughtOrigin::Shared;
-        photo.manifest.images.push(ThoughtImage {
-            mime: "image/jpeg".to_owned(),
-            byte_length: 13,
-            sha256: String::new(),
-            width: 100,
-            height: 100,
-            chunk_start: 0,
-            chunk_count: 1,
-        });
-        photo.images.push(b"fixture-photo".to_vec());
+        let photo = photo();
+        let reading = read_attachments(&photo, &Senses).unwrap();
         let model = LocalModel::default();
-        let (card, text) = card_for(&photo, &[], &Senses, &model, "mac", 123).unwrap();
-        assert!(text.unwrap().contains("Garden plans"));
+        let card = card_for(&photo, Some(&reading), &[], &model, "mac", 123).unwrap();
         assert_eq!(card.cluster.key, "garden");
-        assert!(model.evidence.lock().unwrap()[0].contains("Garden plans: tomatoes this spring"));
+        assert!(model.evidence.lock().unwrap()[0].contains(
+            "In the photo: Garden plans: tomatoes this spring (a picture of outdoor, sky)"
+        ));
+    }
+
+    #[test]
+    fn the_note_keeps_only_the_heard_words_and_its_link() {
+        let mut voice = content();
+        voice.manifest.audio = Some(audio("pcm_s16le", 6));
+        voice.manifest.link = Some(ThoughtLink {
+            url: "https://example.com/seeds".to_owned(),
+        });
+        voice.audio = Some(vec![0, 0, 0, 64, 0, 192]);
+        let reading = read_attachments(&voice, &Senses).unwrap();
+        assert_eq!(
+            note_body(&voice.manifest, &reading),
+            Some((
+                "https://example.com/seeds".to_owned(),
+                "Grow tomatoes this spring\n\nhttps://example.com/seeds".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn the_note_keeps_the_photos_words_without_vision_labels() {
+        let photo = photo();
+        let reading = read_attachments(&photo, &Senses).unwrap();
+        assert_eq!(
+            note_body(&photo.manifest, &reading).map(|(_, body)| body),
+            Some("Garden plans: tomatoes this spring".to_owned())
+        );
+        let pictured = Reading {
+            spoken: String::new(),
+            photos: vec![PhotoReading {
+                text: String::new(),
+                labels: vec!["sky".to_owned()],
+            }],
+        };
+        assert_eq!(note_body(&photo.manifest, &pictured), None);
     }
 
     #[test]
     fn a_remote_filing_is_not_replaced_but_an_unsorted_placeholder_can_be() {
         let mut state = SorterState::default();
-        state.cards.insert(
-            "legacy-random-object".to_owned(),
-            KnownCard {
-                thought_id: "thought_01".to_owned(),
-                cluster: resolve_cluster("Garden", &[]),
-                settles: true,
-            },
+        state
+            .cards
+            .insert("remote".to_owned(), card_on(0, "Garden", true));
+        state
+            .cards
+            .insert("placeholder".to_owned(), card_on(1, "Unsorted", false));
+        let references = [reference(0), reference(1)];
+        let plan = state.plan(&references, 0, |_| true);
+        assert_eq!(
+            plan.due
+                .iter()
+                .map(|due| due.object_id.as_str())
+                .collect::<Vec<_>>(),
+            ["thought_1"]
         );
-        assert!(state.files("thought_01", |_| true));
-        state.cards.get_mut("legacy-random-object").unwrap().settles = false;
-        assert!(!state.files("thought_01", |_| true));
-        state.cards.get_mut("legacy-random-object").unwrap().settles = true;
-        assert!(!state.files("thought_01", |_| false));
+    }
+
+    /// The pass used to read the state file once and ask the store about
+    /// every card once for each thought: 300 thoughts and 300 cards cost
+    /// about 90,000 lookups every 5 seconds. Now a pass with nothing due
+    /// asks nothing, and one with work asks once per card.
+    #[test]
+    fn a_pass_asks_the_store_once_per_card_and_only_when_a_thought_is_due() {
+        let mut state = SorterState::default();
+        let references: Vec<_> = (0..300).map(reference).collect();
+        for index in 0..300 {
+            state
+                .cards
+                .insert(format!("card_{index}"), card_on(index, "Garden", true));
+        }
+        let lookups = std::cell::Cell::new(0);
+        let live = |_: &str| {
+            lookups.set(lookups.get() + 1);
+            true
+        };
+        assert!(state.plan(&references, 0, live).due.is_empty());
+        assert_eq!(lookups.get(), 0);
+        state.cards.remove("card_299");
+        let plan = state.plan(&references, 0, live);
+        assert_eq!(plan.due.len(), 1);
+        assert_eq!(plan.clusters.len(), 1);
+        assert_eq!(lookups.get(), 299);
+    }
+
+    #[test]
+    fn a_thought_that_keeps_failing_is_left_in_unsorted_after_the_cap() {
+        let mut state = SorterState::default();
+        let references = [reference(0)];
+        state
+            .readings
+            .insert("revision_0".to_owned(), Reading::default());
+        for _ in 1..MAX_ATTEMPTS {
+            state.failed("revision_0", 0);
+        }
+        assert!(state.readings.contains_key("revision_0"));
+        assert_eq!(state.plan(&references, i64::MAX, |_| true).due.len(), 1);
+        state.failed("revision_0", 0);
+        assert!(state.stopped.contains("revision_0"));
+        assert!(!state.readings.contains_key("revision_0"));
+        assert!(state.plan(&references, i64::MAX, |_| true).due.is_empty());
     }
 
     #[test]
@@ -1109,9 +1420,7 @@ mod tests {
         let generator = processing.local_text_generator().unwrap();
         let mut private = content();
         private.manifest.text = "Personal garden plans kept on this Mac".to_owned();
-        let (card, text) =
-            card_for(&private, &[], &Senses, generator.as_ref(), "mac", 123).unwrap();
-        assert!(text.is_none());
+        let card = card_for(&private, None, &[], generator.as_ref(), "mac", 123).unwrap();
         assert_eq!(card.sorter.unwrap().model, "fixture-local-notes");
         assert!(local.evidence.lock().unwrap()[0].contains("Personal garden plans"));
     }
@@ -1158,12 +1467,12 @@ mod tests {
     }
 
     #[test]
-    fn a_note_too_long_for_the_local_model_is_not_silently_cut() {
+    fn a_note_too_long_for_the_local_model_is_cut_to_fit() {
         let thought = content();
-        assert_eq!(
-            evidence(&thought.manifest, "one two three", false, &[], 2),
-            Err(Unfiled::Retry)
-        );
+        let header = evidence(&thought.manifest, "", false, &[], usize::MAX);
+        let budget = header.len() + 9;
+        let cut = evidence(&thought.manifest, "one two three", false, &[], budget);
+        assert_eq!(cut, format!("{header}one two t"));
     }
 
     #[test]
