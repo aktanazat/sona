@@ -18,31 +18,18 @@ struct Shell: View {
             } else if model.onboarding.step != .done {
                 OnboardingView(store: model.onboarding).keepsWindowToolbar()
             } else {
-                NavigationSplitView(columnVisibility: Binding(
-                    get: { model.sidebarHidden ? .detailOnly : .all },
-                    set: { model.sidebarHidden = $0 == .detailOnly })) {
-                    Sidebar()
-                        .navigationSplitViewColumnWidth(Theme.sidebarWidth)
-                        .toolbar(removing: .sidebarToggle)
-                } detail: {
-                    VStack(spacing: 0) {
-                        if model.coreStopped {
-                            CoreStoppedBanner()
-                        }
-                        content
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if model.sidebarHidden {
+                    pane
+                } else {
+                    NavigationSplitView(columnVisibility: Binding(
+                        get: { .all },
+                        set: { model.sidebarHidden = $0 == .detailOnly })) {
+                        Sidebar()
+                            .navigationSplitViewColumnWidth(Theme.sidebarWidth)
+                            .toolbar(removing: .sidebarToggle)
+                    } detail: {
+                        pane
                     }
-                    .background(Theme.page.ignoresSafeArea())
-                    .overlay(alignment: .bottom) {
-                        if let first = model.chordHint {
-                            ChordHint(first: first)
-                                .padding(.bottom, 28)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
-                    .environment(\.paneWidth, model.sidebarHidden ? max(0, paneWidth - Theme.windowControlsWidth) : paneWidth)
-                    .toolbar(removing: .title)
                 }
                 if model.paletteShown {
                     CommandPalette()
@@ -130,6 +117,31 @@ struct Shell: View {
                 }
             }
         }
+    }
+
+    /// The page beside the sidebar. With the sidebar hidden it is the whole
+    /// window, outside the split view: a collapsed split view's toolbar
+    /// dropped the page's bar.
+    private var pane: some View {
+        VStack(spacing: 0) {
+            if model.coreStopped {
+                CoreStoppedBanner()
+            }
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Theme.page.ignoresSafeArea())
+        .overlay(alignment: .bottom) {
+            if let first = model.chordHint {
+                ChordHint(first: first)
+                    .padding(.bottom, 28)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
+        .environment(\.paneWidth, model.sidebarHidden ? max(0, paneWidth - Theme.windowControlsWidth) : paneWidth)
+        .toolbar(removing: .title)
+        .keepsWindowToolbar()
     }
 
     /// The core is starting, or could not. A failed start is not the end:
