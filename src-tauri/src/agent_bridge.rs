@@ -2490,10 +2490,10 @@ pub fn get_agent_bridge_hook_snippet(app: tauri::AppHandle) -> Result<String, St
         .to_str()
         .ok_or_else(|| "OpenCode extension path is not UTF-8".to_string())?;
     serde_json::to_string_pretty(&serde_json::json!({
-        "claude": {
-            "command": hook,
-            "args": ["claude"]
-        },
+        "claude": command_hook_config(
+            &shell_invocation(hook, "claude"),
+            &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"],
+        ),
         "codex": command_hook_config(
             &shell_invocation(hook, "codex"),
             &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"],

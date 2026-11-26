@@ -747,10 +747,24 @@ final class WorkStore {
     }
 
     /// Hands one task to a coding agent and starts the agent on it in a terminal, in a
-    /// folder picked for the task's project. The session then shows on the task.
+    /// folder picked for the task's project. Sona's connection to that agent and folder
+    /// is turned on first, as Settings > Agents would, so the run shows on the task.
     func start(_ id: String, with agent: AgentLaunch) {
         guard let row = rows([id]).first, let folder = AgentLaunch.folder(for: row.projectId) else { return }
         let undo = remember("Started \(agent.name) on 1 task", .delegate([(id: row.id, agent: row.doer?.agent)]))
+        enqueue {
+            do {
+                let _: AgentBridgeSettings = try await self.core.request(
+                    "set_agent_bridge_master", ["enabled": JSONValue.bool(true)])
+                let _: AgentBridgeSettings = try await self.core.request(
+                    "set_agent_bridge_agent_enabled",
+                    ["agent": JSONValue.string(agent.bridgeAgent.rawValue), "enabled": .bool(true)])
+                let _: AgentBridgeSettings = try await self.core.request(
+                    "authorize_agent_bridge_project", ["selectedPath": JSONValue.string(folder.path)])
+            } catch {
+                self.mutationError = "Sona can't follow this run: \(error.localizedDescription)"
+            }
+        }
         hand([id], to: agent.name, undo: undo) { prompts in
             do {
                 try agent.open(prompt: prompts[0], in: folder)
