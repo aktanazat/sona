@@ -47,4 +47,35 @@ final class UploadQueueTests: XCTestCase {
         let items = await queue.items()
         XCTAssertEqual(items, [expected])
     }
+
+    /// A phone recording's capture directory moves into the outbox whole. With its
+    /// encoded copy beside the capture, the capture stays until the move, so a crash
+    /// before it still recovers the recording, and is gone after it.
+    func testCaptureDirectoryKeepsOnlyTheEncodedCopyOnceQueued() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "outbox-\(UUID().uuidString)")
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "capture-\(UUID().uuidString)")
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let generated = try writeSpeechLikeCapture(seconds: 1)
+        var capture = generated
+        capture.url = directory.appending(path: "audio.pcm")
+        try FileManager.default.moveItem(at: generated.url, to: capture.url)
+        let upload = try encodeForUpload(capture, destination: directory.appending(path: "audio.aac"))
+
+        let queue = UploadQueue(root: root, identity: .mint(), credentials: nil)
+        let item = try await queue.enqueue(
+            audio: upload, recordedAtUtcMs: 1, title: "Phone recording", captureDirectory: directory
+        )
+
+        let queued = try FileManager.default.contentsOfDirectory(atPath: root.appending(path: item.objectId).path)
+        XCTAssertEqual(queued.sorted(), ["audio.aac", "item.json"])
+        guard case let .recording(recording) = item.payload else { return XCTFail("not a recording") }
+        XCTAssertEqual(recording.audioCodec, "aac_adts")
+        XCTAssertEqual(recording.audioByteLength, upload.byteLength)
+    }
 }

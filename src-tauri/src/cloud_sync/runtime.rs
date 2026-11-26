@@ -134,22 +134,64 @@ const MAX_SHARE_EXPIRY_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const DEVICE_RECORDING_KIND: &str = "device_recording";
 const DEVICE_RECORDING_SOURCE_FORMAT: &str = "sona-device-recording-v1";
 const DEVICE_RECORDING_FORMAT_VERSION: u32 = 1;
-/// The one audio shape a device uploads: 16 kHz mono signed 16-bit PCM, which
-/// is the format the importer resamples every source to anyway.
+/// The capture shape every device records in: 16 kHz mono signed 16-bit PCM,
+/// which is the format the importer resamples every source to anyway. Devices
+/// from before compact uploads send it as is.
 const DEVICE_RECORDING_CODEC: &str = "pcm_s16le";
+/// The same capture encoded as AAC-LC in ADTS frames, about a tenth of the
+/// size. The importer's own decoder reads it, so nothing new decodes it.
+const DEVICE_RECORDING_COMPACT_CODEC: &str = "aac_adts";
 const DEVICE_RECORDING_SAMPLE_RATE_HZ: u32 = 16_000;
 const DEVICE_RECORDING_CHANNELS: u16 = 1;
 const DEVICE_RECORDING_BITS_PER_SAMPLE: u16 = 16;
-/// One frame of that stream: one channel, two bytes.
+/// One frame of the PCM stream: one channel, two bytes.
 const DEVICE_RECORDING_FRAME_BYTES: u64 = 2;
-/// Twelve hours of it. This is `MAX_IMPORT_RECORDING_SAMPLES` in
-/// `meeting::session` counted in bytes rather than samples: past it the
-/// importer stops decoding, so a longer object would stage over a gigabyte of
-/// audio only to be refused one layer down.
+/// Twelve hours of PCM, matching the importer's decoded-sample ceiling.
+/// Compact objects share this byte ceiling; the importer still bounds their
+/// duration by the samples it actually decodes, never by container metadata.
 const MAX_DEVICE_RECORDING_AUDIO_BYTES: u64 = 16_000 * 60 * 60 * 12 * DEVICE_RECORDING_FRAME_BYTES;
 /// A RIFF/WAVE header for one PCM stream: 12-byte container, 24-byte `fmt `
 /// chunk, 8-byte `data` header.
 const WAVE_HEADER_BYTES: usize = 44;
+
+/// The audio encodings a paired device uploads, both at the capture's rate and
+/// channel count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DeviceAudioCodec {
+    Pcm,
+    AacAdts,
+}
+
+impl DeviceAudioCodec {
+    pub(super) fn parse(codec: &str, sample_rate_hz: u32, channels: u16) -> Option<Self> {
+        if sample_rate_hz != DEVICE_RECORDING_SAMPLE_RATE_HZ
+            || channels != DEVICE_RECORDING_CHANNELS
+        {
+            return None;
+        }
+        match codec {
+            DEVICE_RECORDING_CODEC => Some(Self::Pcm),
+            DEVICE_RECORDING_COMPACT_CODEC => Some(Self::AacAdts),
+            _ => None,
+        }
+    }
+
+    /// Whether `bytes` of this encoding can be whole audio: PCM is whole frames.
+    pub(super) fn admits_length(self, bytes: u64) -> bool {
+        match self {
+            Self::Pcm => bytes.is_multiple_of(DEVICE_RECORDING_FRAME_BYTES),
+            Self::AacAdts => true,
+        }
+    }
+
+    /// The extension the importer's decoder is told to expect.
+    pub(super) fn extension(self) -> &'static str {
+        match self {
+            Self::Pcm => "wav",
+            Self::AacAdts => "aac",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BackgroundScanWake {
@@ -610,7 +652,7 @@ enum RemoteObject {
     OwnDeviceRecording,
 }
 
-/// A pulled recording, staged as a WAV file for the importer to decode.
+/// A pulled recording, staged in a container the importer decodes.
 struct DeviceRecordingImport {
     audio: ScratchAudioFile,
     title: String,
@@ -723,7 +765,7 @@ struct DeviceRecordingPayload<'a> {
     chunk_count: u64,
 }
 
-/// The WAV file a pulled recording is decrypted into, one chunk at a time.
+/// The file a pulled recording is decrypted into, one chunk at a time.
 ///
 /// Twelve hours of audio does not belong in memory, so each chunk is opened,
 /// digested and written as it arrives. Each chunk's AAD binds it to this vault,
@@ -742,13 +784,16 @@ impl<'a> DeviceRecordingStaging<'a> {
     fn create(
         path: PathBuf,
         audio_bytes: u32,
+        codec: DeviceAudioCodec,
         payload: DeviceRecordingPayload<'a>,
     ) -> Result<Self, CloudRuntimeError> {
         // The guard owns the path from here, so every later failure removes it.
-        let scratch = ScratchAudioFile(path);
+        let scratch = ScratchAudioFile(path.with_extension(codec.extension()));
         let mut file = File::create(scratch.path()).map_err(|_| CloudRuntimeError::File)?;
-        file.write_all(&wave_header(audio_bytes))
-            .map_err(|_| CloudRuntimeError::File)?;
+        if codec == DeviceAudioCodec::Pcm {
+            file.write_all(&wave_header(audio_bytes))
+                .map_err(|_| CloudRuntimeError::File)?;
+        }
         Ok(Self {
             scratch,
             file,
@@ -3473,7 +3518,7 @@ impl CloudSyncRuntime {
         bundle
     }
 
-    /// Decrypt a paired device's recording into a WAV file this process owns.
+    /// Decrypt a paired device's recording into an audio file this process owns.
     ///
     /// The chunks are decrypted as they arrive, because twelve hours of audio
     /// does not belong in memory. Each one's AAD binds it to this vault, object,
@@ -3493,9 +3538,10 @@ impl CloudSyncRuntime {
         envelope: &ObjectRevisionEnvelope,
         manifest: DeviceRecordingManifest,
     ) -> Result<DeviceRecordingImport, CloudRuntimeError> {
-        let audio_bytes = declared_device_audio_bytes(&manifest, envelope).inspect_err(|_| {
-            log::warn!("Cloud recording {object_id} declares audio this Mac will not install");
-        })?;
+        let (audio_bytes, codec) =
+            declared_device_audio_bytes(&manifest, envelope).inspect_err(|_| {
+                log::warn!("Cloud recording {object_id} declares audio this Mac will not install");
+            })?;
         let signing_public_key = self.writer_signing_key(access, envelope).await?;
         // ponytail: a network, disk or deferral error at chunk n drops the
         // staging file and the next scan restarts from chunk 0. Resume by
@@ -3508,6 +3554,7 @@ impl CloudSyncRuntime {
                 .cloud_recording_staging_path(object_id)
                 .map_err(map_store_error)?,
             audio_bytes,
+            codec,
             DeviceRecordingPayload {
                 vault_root: &*access.keys.vault_root,
                 vault_id: &access.state.vault_id,
@@ -4036,14 +4083,14 @@ fn open_remote_manifest(
     Ok(RemoteManifest::DeviceRecording(manifest))
 }
 
-/// The plaintext audio length a device recording declares, refused unless the
-/// declaration is one this Mac can install.
+/// The plaintext audio length and encoding a device recording declares,
+/// refused unless the declaration is one this Mac can install.
 ///
 /// The device slices its audio at `MAX_PLAINTEXT_CHUNK_BYTES` and every payload
 /// costs a 12-byte nonce and a 16-byte tag, so the envelope's chunk count and
 /// total are a function of that length. Checking them here refuses a truncated
-/// or padded revision before a byte of it is fetched, and the ceiling keeps a
-/// recording no importer would decode from being staged first.
+/// or padded revision before a byte of it is fetched and bounds staged bytes.
+/// The importer separately bounds the number of decoded samples.
 ///
 /// The manifest is sealed under the vault root every member holds, so the
 /// device it names is only a claim; the writer the service names is the one
@@ -4052,7 +4099,7 @@ fn open_remote_manifest(
 fn declared_device_audio_bytes(
     manifest: &DeviceRecordingManifest,
     envelope: &ObjectRevisionEnvelope,
-) -> Result<u32, CloudRuntimeError> {
+) -> Result<(u32, DeviceAudioCodec), CloudRuntimeError> {
     let audio_bytes = manifest.audio.byte_length;
     let chunk_bytes = u64::try_from(MAX_PLAINTEXT_CHUNK_BYTES)
         .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
@@ -4060,19 +4107,24 @@ fn declared_device_audio_bytes(
     let expected_total = audio_bytes
         .checked_add(28 * chunk_count)
         .ok_or(CloudRuntimeError::IntegrityFailure)?;
-    if manifest.audio.codec != DEVICE_RECORDING_CODEC
-        || manifest.audio.sample_rate_hz != DEVICE_RECORDING_SAMPLE_RATE_HZ
-        || manifest.audio.channels != DEVICE_RECORDING_CHANNELS
-        || manifest.device_id != envelope.writer_device_id
+    let codec = DeviceAudioCodec::parse(
+        &manifest.audio.codec,
+        manifest.audio.sample_rate_hz,
+        manifest.audio.channels,
+    )
+    .ok_or(CloudRuntimeError::IntegrityFailure)?;
+    if manifest.device_id != envelope.writer_device_id
         || audio_bytes == 0
-        || !audio_bytes.is_multiple_of(DEVICE_RECORDING_FRAME_BYTES)
+        || !codec.admits_length(audio_bytes)
         || audio_bytes > MAX_DEVICE_RECORDING_AUDIO_BYTES
         || chunk_count != u64::from(envelope.chunk_count)
         || expected_total != envelope.total_bytes
     {
         return Err(CloudRuntimeError::IntegrityFailure);
     }
-    u32::try_from(audio_bytes).map_err(|_| CloudRuntimeError::IntegrityFailure)
+    u32::try_from(audio_bytes)
+        .map(|bytes| (bytes, codec))
+        .map_err(|_| CloudRuntimeError::IntegrityFailure)
 }
 
 /// The RIFF/WAVE header for `audio_bytes` of the device capture format.
@@ -5259,10 +5311,11 @@ mod tests {
             RemoteManifest::DeviceRecording(manifest) => manifest,
             RemoteManifest::Meeting(_) => panic!("a device recording read as a meeting bundle"),
         };
-        let audio_bytes = declared_device_audio_bytes(&manifest, &object.envelope)?;
+        let (audio_bytes, codec) = declared_device_audio_bytes(&manifest, &object.envelope)?;
         let mut staging = DeviceRecordingStaging::create(
             path,
             audio_bytes,
+            codec,
             DeviceRecordingPayload {
                 vault_root: &TEST_VAULT_ROOT,
                 vault_id: TEST_VAULT_ID,
@@ -5275,6 +5328,65 @@ mod tests {
             staging.write_chunk(u64::try_from(index).expect("index"), chunk)?;
         }
         staging.finish(&manifest.audio)
+    }
+
+    #[test]
+    fn a_compact_phone_recording_becomes_a_meeting() {
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let audio = include_bytes!("../../tests/fixtures/phone-audio/jfk.aac").to_vec();
+        let mut object = phone_object(audio.clone(), &sha256_base64url(&audio), TEST_DEVICE_ID);
+        let plaintext = open_object_revision_payload(
+            &TEST_VAULT_ROOT,
+            &ObjectRevisionCryptoContext {
+                vault_id: TEST_VAULT_ID,
+                object_id: TEST_OBJECT_ID,
+                revision_id: TEST_REVISION_ID,
+                index: 0,
+                total: 1,
+                content_kind: ObjectContentKind::Manifest,
+                source_format: DEVICE_RECORDING_SOURCE_FORMAT,
+            },
+            &object.sealed_manifest,
+        )
+        .unwrap();
+        let compact_manifest = String::from_utf8(plaintext)
+            .unwrap()
+            .replace(DEVICE_RECORDING_CODEC, DEVICE_RECORDING_COMPACT_CODEC);
+        object.sealed_manifest = seal(
+            0,
+            1,
+            ObjectContentKind::Manifest,
+            compact_manifest.as_bytes(),
+        );
+        object.envelope.manifest_sha256 = sha256_base64url(&object.sealed_manifest);
+        let staged = stage(
+            &object,
+            store.cloud_recording_staging_path(TEST_OBJECT_ID).unwrap(),
+        )
+        .expect("the compact object stages");
+        assert_eq!(staged.path().extension().unwrap(), "aac");
+        assert_eq!(fs::read(staged.path()).unwrap(), audio);
+
+        let snapshot = tauri::async_runtime::block_on(manager.import_recording_with(
+            ImportRecordingRequest {
+                path: staged.path().to_owned(),
+                title: Some("Compact recording".to_owned()),
+                recorded_at_utc_ms: Some(1_788_305_031_276),
+                origin: RecordingOrigin::PairedDevice {
+                    device_id: TEST_DEVICE_ID.to_owned(),
+                },
+            },
+            None,
+            None,
+            &[],
+            None,
+        ))
+        .expect("the compact recording imports");
+        let review = tauri::async_runtime::block_on(manager.get(snapshot.session_id)).unwrap();
+        assert_eq!(review.session.phase, MeetingPhase::ReviewReady);
+        assert!(!review.transcript.is_empty());
+        assert!(review.tracks[0].durable_record_count > 0);
     }
 
     /// The whole point of the glue: what the phone uploaded arrives as an

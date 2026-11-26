@@ -71,4 +71,26 @@ final class ThoughtObjectTests: XCTestCase {
         XCTAssertEqual(third?.range, 0..<10)
         XCTAssertNil(ThoughtObject.slice(attachments, index: 4))
     }
+
+    /// A voice thought queued by the previous app version has no codec on its audio and
+    /// still uploads as the PCM it is; one queued now names the encoded copy's codec.
+    func testAudioCodecComesFromTheQueuedAttachment() throws {
+        let queuedBefore = try JSONDecoder().decode(ThoughtAttachment.self, from: Data("""
+            {"kind":{"audio":{"durationMs":1500}},"file":"audio.pcm","byteLength":48000,\
+            "sha256":"audio-sha"}
+            """.utf8))
+        let queuedNow = ThoughtAttachment(
+            kind: .audio(durationMs: 1500), file: "audio.aac", byteLength: 4500,
+            sha256: "encoded-sha", audioCodec: UploadAudioFormat.codec
+        )
+        func codec(_ attachment: ThoughtAttachment) -> String? {
+            ThoughtObject.manifest(
+                deviceId: "phone_device_0001", capturedAtUtcMs: 1, origin: .voice, text: "",
+                link: nil, attachments: [attachment]
+            ).audio?.codec
+        }
+        XCTAssertNil(queuedBefore.audioCodec)
+        XCTAssertEqual(codec(queuedBefore), "pcm_s16le")
+        XCTAssertEqual(codec(queuedNow), "aac_adts")
+    }
 }

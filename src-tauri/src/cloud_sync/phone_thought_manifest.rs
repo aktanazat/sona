@@ -1,8 +1,7 @@
 use super::{
-    base64_url_decode, open_object_revision_payload, CloudRuntimeError, ObjectContentKind,
-    ObjectRevisionCryptoContext, ObjectRevisionEnvelope, StreamingSha256,
-    DEVICE_RECORDING_CHANNELS, DEVICE_RECORDING_CODEC, DEVICE_RECORDING_FRAME_BYTES,
-    DEVICE_RECORDING_SAMPLE_RATE_HZ, MAX_ENCRYPTED_CHUNK_BYTES, MAX_PLAINTEXT_CHUNK_BYTES,
+    base64_url_decode, open_object_revision_payload, CloudRuntimeError, DeviceAudioCodec,
+    ObjectContentKind, ObjectRevisionCryptoContext, ObjectRevisionEnvelope, StreamingSha256,
+    MAX_ENCRYPTED_CHUNK_BYTES, MAX_PLAINTEXT_CHUNK_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -117,14 +116,9 @@ impl ThoughtManifest {
             return Err(CloudRuntimeError::IntegrityFailure);
         }
         if let Some(audio) = &self.audio {
-            if audio.codec != DEVICE_RECORDING_CODEC
-                || audio.channels != DEVICE_RECORDING_CHANNELS
-                || audio.sample_rate_hz != DEVICE_RECORDING_SAMPLE_RATE_HZ
-                || !audio
-                    .byte_length
-                    .is_multiple_of(DEVICE_RECORDING_FRAME_BYTES)
-                || audio.duration_ms < 0
-            {
+            let codec = DeviceAudioCodec::parse(&audio.codec, audio.sample_rate_hz, audio.channels)
+                .ok_or(CloudRuntimeError::IntegrityFailure)?;
+            if !codec.admits_length(audio.byte_length) || audio.duration_ms < 0 {
                 return Err(CloudRuntimeError::IntegrityFailure);
             }
         }
@@ -255,5 +249,115 @@ impl<'a> AttachmentDigests<'a> {
             self.current += 1;
         }
         Ok(())
+    }
+}
+
+/// Decode a phone's voice source to the mono 16 kHz samples the selected ASR
+/// receives. Both an older phone's raw PCM and the compact stream stay local.
+pub(crate) fn thought_audio_samples(
+    codec: &str,
+    sample_rate_hz: u32,
+    channels: u16,
+    bytes: &[u8],
+) -> Option<Vec<f32>> {
+    use crate::managers::media_import::{decode_media_stream_into, MAX_MEDIA_IMPORT_SAMPLES};
+    use std::{io::Cursor, sync::atomic::AtomicBool};
+    use symphonia::core::io::MediaSourceStream;
+
+    let codec = DeviceAudioCodec::parse(codec, sample_rate_hz, channels)?;
+    if bytes.is_empty() || !codec.admits_length(u64::try_from(bytes.len()).ok()?) {
+        return None;
+    }
+    match codec {
+        DeviceAudioCodec::Pcm => {
+            if bytes.len() / 2 > MAX_MEDIA_IMPORT_SAMPLES {
+                return None;
+            }
+            Some(
+                bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32768.0)
+                    .collect(),
+            )
+        }
+        DeviceAudioCodec::AacAdts => {
+            let mut samples = Vec::new();
+            decode_media_stream_into(
+                MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), Default::default()),
+                codec.extension(),
+                &AtomicBool::new(false),
+                MAX_MEDIA_IMPORT_SAMPLES,
+                |frame| {
+                    samples.extend_from_slice(frame);
+                    Ok(())
+                },
+            )
+            .ok()?;
+            Some(samples)
+        }
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::thought_audio_samples;
+
+    #[test]
+    fn an_older_phones_pcm_decodes_to_the_same_samples() {
+        let pcm: Vec<u8> = [i16::MIN, -16_384, 0, 16_384, i16::MAX]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            thought_audio_samples("pcm_s16le", 16_000, 1, &pcm).unwrap(),
+            vec![-1.0, -0.5, 0.0, 0.5, 32767.0 / 32768.0]
+        );
+    }
+
+    #[test]
+    fn a_compact_phones_voice_decodes_to_speech_samples() {
+        let bytes = include_bytes!("../../tests/fixtures/phone-audio/jfk.aac");
+        let samples = thought_audio_samples("aac_adts", 16_000, 1, bytes).unwrap();
+        assert!(
+            (176_000..180_000).contains(&samples.len()),
+            "{} samples",
+            samples.len()
+        );
+        assert!(samples.iter().all(|sample| sample.is_finite()));
+        let reference = hound::WavReader::new(std::io::Cursor::new(include_bytes!(
+            "../../tests/fixtures/phone-audio/jfk.wav"
+        )))
+        .unwrap()
+        .samples::<i16>()
+        .map(|sample| f64::from(sample.unwrap()) / 32768.0)
+        .collect::<Vec<_>>();
+        // Apple's AAC-LC encoder primes with 2,112 samples (132 ms at 16 kHz).
+        let decoded = &samples[2112..2112 + reference.len()];
+        let dot = reference
+            .iter()
+            .zip(decoded)
+            .map(|(left, right)| left * f64::from(*right))
+            .sum::<f64>();
+        let left_energy = reference.iter().map(|sample| sample * sample).sum::<f64>();
+        let right_energy = decoded
+            .iter()
+            .map(|sample| f64::from(*sample).powi(2))
+            .sum::<f64>();
+        let correlation = dot / (left_energy * right_energy).sqrt();
+        assert!(
+            correlation > 0.95,
+            "speech waveform correlation: {correlation}"
+        );
+    }
+
+    #[test]
+    fn unsupported_or_broken_voice_is_refused() {
+        assert!(thought_audio_samples("aac_adts", 16_000, 1, b"not audio").is_none());
+        assert!(thought_audio_samples("aac_adts", 48_000, 1, &[0; 20]).is_none());
+        assert!(thought_audio_samples("pcm_s16le", 16_000, 1, &[0; 3]).is_none());
+        assert!(thought_audio_samples("pcm_s16le", 16_000, 2, &[0; 4]).is_none());
+        assert!(thought_audio_samples("opus", 16_000, 1, &[0; 20]).is_none());
     }
 }

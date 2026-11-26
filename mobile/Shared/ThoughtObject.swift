@@ -76,6 +76,9 @@ struct ThoughtAttachment: Codable, Equatable {
     var file: String
     var byteLength: Int
     var sha256: String
+    /// The audio's codec; nil for an image, and for audio queued before uploads were
+    /// encoded, which is capture-format PCM.
+    var audioCodec: String? = nil
 }
 
 /// Where one attachment's bytes sit in a revision's chunk sequence.
@@ -145,7 +148,7 @@ enum ThoughtObject {
             switch attachment.kind {
             case let .audio(durationMs):
                 audio = ThoughtManifest.Audio(
-                    codec: RecordingAudioFormat.codec,
+                    codec: attachment.audioCodec ?? RecordingAudioFormat.codec,
                     sample_rate_hz: RecordingAudioFormat.sampleRateHz,
                     channels: RecordingAudioFormat.channels,
                     byte_length: attachment.byteLength,

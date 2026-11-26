@@ -651,12 +651,24 @@ final class AppModel: NSObject, ObservableObject {
         }
         let date = Date(timeIntervalSince1970: Double(journal.recordedAtUtcMs) / 1000)
         let note = try await library.keepRecording(id: journal.id, title: title, notes: notes, date: date, audio: captured)
+        let upload = try await Self.encodedForUpload(captured)
         _ = try await queue.enqueue(
-            audio: captured, recordedAtUtcMs: journal.recordedAtUtcMs, title: note.title, notes: note.text,
+            audio: upload, recordedAtUtcMs: journal.recordedAtUtcMs, title: note.title, notes: note.text,
             calendarEvent: calendarEvent, bookmarkOffsetsMs: journal.bookmarkOffsetsMs.filter { $0 <= captured.durationMs },
             placeReading: placeReading, captureDirectory: directory
         )
         return true
+    }
+
+    /// The capture's upload copy, written beside it. The capture itself is left for the
+    /// caller to remove once the copy is queued.
+    private nonisolated static func encodedForUpload(_ audio: CapturedAudio) async throws -> CapturedAudio {
+        try await Task.detached(priority: .utility) {
+            try encodeForUpload(
+                audio,
+                destination: audio.url.deletingPathExtension().appendingPathExtension(UploadAudioFormat.fileExtension)
+            )
+        }.value
     }
 
     func deleteLocalNote(_ note: PhoneNote) {
@@ -687,16 +699,21 @@ final class AppModel: NSObject, ObservableObject {
         notes: String = "",
         calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
         bookmarkOffsetsMs: [Int64] = [],
-        placeReading: DeviceRecordingManifest.PlaceReading? = nil
+        placeReading: DeviceRecordingManifest.PlaceReading? = nil,
+        upload: CapturedAudio? = nil
     ) async -> Bool {
         do {
             try library.keep(kind: .meeting, title: title, text: notes,
                              date: Date(timeIntervalSince1970: Double(recordedAtUtcMs) / 1000), audio: audio)
+            let encoded: CapturedAudio
+            if let upload { encoded = upload }
+            else { encoded = try await Self.encodedForUpload(audio) }
             _ = try await queue.enqueue(
-                audio: audio, recordedAtUtcMs: recordedAtUtcMs, title: title, notes: notes,
+                audio: encoded, recordedAtUtcMs: recordedAtUtcMs, title: title, notes: notes,
                 calendarEvent: calendarEvent, bookmarkOffsetsMs: bookmarkOffsetsMs,
                 placeReading: placeReading
             )
+            try? FileManager.default.removeItem(at: audio.url)
             return true
         } catch { library.error = error.localizedDescription; return false }
     }
@@ -917,15 +934,20 @@ final class AppModel: NSObject, ObservableObject {
             _ = await delivery.saving.value
             if let draftError { library.error = draftError }
             guard capture.isThought, let audio = capture.audio else { return }
+            let upload: CapturedAudio
+            do { upload = try await Self.encodedForUpload(audio) }
+            catch { library.error = error.localizedDescription; return }
+            try? FileManager.default.removeItem(at: audio.url)
             let thought = QueuedThought(
                 origin: .voice, text: capture.text, link: nil,
-                attachments: [ThoughtAttachment(kind: .audio(durationMs: audio.durationMs),
-                    file: "audio.pcm", byteLength: audio.byteLength, sha256: audio.sha256)]
+                attachments: [ThoughtAttachment(kind: .audio(durationMs: upload.durationMs),
+                    file: UploadAudioFormat.fileName, byteLength: upload.byteLength, sha256: upload.sha256,
+                    audioCodec: upload.codec)]
             )
             AppModel.tap()
             thoughtsKept += 1
             await enqueue(thought: thought, capturedAtUtcMs: Int64(capture.startedAt.timeIntervalSince1970 * 1000),
-                          files: [audio.url])
+                          files: [upload.url])
         }
     }
 
@@ -1221,15 +1243,17 @@ extension AppModel: WCSessionDelegate {
         WCSession.default.activate()
     }
 
-    /// A watch recording joins the same outbox as a phone recording, after the phone
-    /// resamples it: the watch never speaks the vault protocol.
+    /// A watch recording joins the same outbox as a phone recording. Newer watches
+    /// already encode their file; older watches send WAV and the phone encodes it.
     nonisolated func session(_ session: WCSession, didReceive file: WCSessionFile) {
+        let compact = file.metadata?["audio_codec"] as? String == UploadAudioFormat.codec
         let source = FileManager.default.temporaryDirectory
-            .appending(path: "watch-\(UUID().uuidString).wav")
+            .appending(path: "watch-\(UUID().uuidString).\(compact ? "aac" : "wav")")
         try? FileManager.default.copyItem(at: file.fileURL, to: source)
         let recordedAtUtcMs =
             (file.metadata?["recorded_at_utc_ms"] as? NSNumber)?.int64Value
             ?? Int64(Date().timeIntervalSince1970 * 1000)
+        let durationMs = (file.metadata?["duration_ms"] as? NSNumber)?.int64Value
         let destination = FileManager.default.temporaryDirectory
             .appending(path: "watch-\(UUID().uuidString).pcm")
         Task { @MainActor [weak self] in
@@ -1243,18 +1267,19 @@ extension AppModel: WCSessionDelegate {
             }
             working = UIApplication.shared.beginBackgroundTask(withName: "Save watch recording") { release() }
             defer { release() }
-            guard let audio = try? await Task.detached(priority: .utility, operation: {
-                try transcodeToCaptureFormat(source: source, destination: destination)
+            guard let prepared = try? await Task.detached(priority: .utility, operation: {
+                try prepareWatchAudio(source: source, destination: destination, durationMs: durationMs)
             }).value else { return }
-            try? FileManager.default.removeItem(at: source)
             let kept = await self.enqueue(
-                audio: audio,
+                audio: prepared.capture,
                 recordedAtUtcMs: recordedAtUtcMs,
                 title: AppModel.title(
                     prefix: NSLocalizedString("title.watch", comment: ""),
                     utcMs: recordedAtUtcMs
-                )
+                ),
+                upload: prepared.upload
             )
+            try? FileManager.default.removeItem(at: source)
             if kept { await self.drain() }
         }
     }

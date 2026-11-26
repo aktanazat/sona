@@ -162,6 +162,98 @@ final class OutboxDrainTests: XCTestCase {
         XCTAssertLessThanOrEqual(worker.mostChunksInFlight, 3)
     }
 
+    /// A recording queued after its capture was encoded uploads the encoded bytes, and
+    /// its manifest names their codec so the Mac picks the right decoder.
+    func testEncodedRecordingUploadsTheEncodedBytesUnderItsCodec() async throws {
+        let worker = try await FakeWorker.start()
+        defer { worker.stop() }
+        worker.holdFirstChunk = true
+        let root = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")
+        let queue = try makeQueue(worker, root: root)
+        let capture = try writeSpeechLikeCapture(seconds: 3)
+        let upload = try encodeForUpload(
+            capture, destination: capture.url.deletingPathExtension().appendingPathExtension("aac")
+        )
+        let encoded = try Data(contentsOf: upload.url)
+        let item = try await queue.enqueue(audio: upload, recordedAtUtcMs: 1, title: "Encoded")
+
+        let pass = Task { await queue.drain() }
+        try await worker.waitUntilHolding()
+        let manifest = try JSONDecoder().decode(
+            DeviceRecordingManifest.self,
+            from: stagedPlaintext(root, item, file: "manifest.bin", index: 0, kind: .manifest)
+        )
+        let chunk = try stagedPlaintext(root, item, file: "chunk-000000.bin", index: 0, kind: .chunk)
+        worker.release()
+        await pass.value
+
+        XCTAssertEqual(manifest.audio.codec, "aac_adts")
+        XCTAssertEqual(manifest.audio.byte_length, encoded.count)
+        XCTAssertEqual(manifest.audio.sha256, sha256Base64URL(encoded))
+        XCTAssertEqual(chunk, encoded)
+        XCTAssertEqual(worker.refusals, [])
+        XCTAssertEqual(worker.committedObjects, [item.objectId])
+    }
+
+    /// A recording the previous app version queued has no codec and only its PCM file;
+    /// after the update it still uploads that PCM, named as PCM.
+    func testRecordingQueuedBeforeTheUpdateStillUploadsItsPcm() async throws {
+        let worker = try await FakeWorker.start()
+        defer { worker.stop() }
+        worker.holdFirstChunk = true
+        let root = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")
+        let queue = try makeQueue(worker, root: root)
+        let capture = try writeSpeechLikeCapture(seconds: 1)
+        let pcm = try Data(contentsOf: capture.url)
+        let item = QueuedObject(
+            objectId: randomOpaqueId(), revisionId: randomOpaqueId(), uploadId: randomOpaqueId(),
+            capturedAtUtcMs: 1,
+            payload: .recording(QueuedRecording(
+                durationMs: capture.durationMs, title: "Queued before", audioByteLength: pcm.count,
+                audioSha256: capture.sha256
+            )),
+            stagedForVaultId: nil, chunkSizes: [], chunkDigests: [], attempts: 0,
+            nextAttemptUtcMs: 0, lastError: nil, parked: false
+        )
+        let itemJson = try JSONEncoder().encode(item)
+        XCTAssertFalse(String(decoding: itemJson, as: UTF8.self).contains("audioCodec"),
+                       "an item without a codec is byte for byte what the previous version wrote")
+        let directory = root.appending(path: item.objectId)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try itemJson.write(to: directory.appending(path: "item.json"))
+        try FileManager.default.moveItem(at: capture.url, to: directory.appending(path: "audio.pcm"))
+
+        let pass = Task { await queue.drain() }
+        try await worker.waitUntilHolding()
+        let manifest = try JSONDecoder().decode(
+            DeviceRecordingManifest.self,
+            from: stagedPlaintext(root, item, file: "manifest.bin", index: 0, kind: .manifest)
+        )
+        let chunk = try stagedPlaintext(root, item, file: "chunk-000000.bin", index: 0, kind: .chunk)
+        worker.release()
+        await pass.value
+
+        XCTAssertEqual(manifest.audio.codec, "pcm_s16le")
+        XCTAssertEqual(manifest.audio.byte_length, pcm.count)
+        XCTAssertEqual(chunk, pcm)
+        XCTAssertEqual(worker.committedObjects, [item.objectId])
+    }
+
+    /// One staged payload of a single-chunk recording, opened as the Mac opens it.
+    private func stagedPlaintext(
+        _ root: URL, _ item: QueuedObject, file: String, index: UInt64, kind: ObjectContentKind
+    ) throws -> Data {
+        try openObjectRevisionPayload(
+            vaultRoot: Data(repeating: 7, count: 32),
+            context: ObjectRevisionCryptoContext(
+                vaultId: "vault_outbox", objectId: item.objectId, revisionId: item.revisionId,
+                index: index, total: 1, contentKind: kind,
+                sourceFormat: DeviceRecordingObject.sourceFormat
+            ),
+            encryptedPayload: Data(contentsOf: root.appending(path: item.objectId).appending(path: file))
+        )
+    }
+
     private func makeQueue(
         _ worker: FakeWorker,
         root: URL = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")

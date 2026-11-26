@@ -62,7 +62,7 @@ struct DeviceRecordingManifest: Codable, Equatable {
 }
 
 /// Recording capture format. The phone resamples to this before anything is written,
-/// so every byte that leaves the device is already in it.
+/// so every capture on disk is already in it; `UploadAudioFormat` is what leaves.
 enum RecordingAudioFormat {
     static let codec = "pcm_s16le"
     static let sampleRateHz = 16000
@@ -93,6 +93,7 @@ enum DeviceRecordingObject {
         title: String,
         audioByteLength: Int,
         audioSha256: String,
+        audioCodec: String = RecordingAudioFormat.codec,
         notes: String? = nil,
         calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
         bookmarkOffsetsMs: [Int64] = [],
@@ -106,7 +107,7 @@ enum DeviceRecordingObject {
             duration_ms: durationMs,
             title: title,
             audio: DeviceRecordingManifest.Audio(
-                codec: RecordingAudioFormat.codec,
+                codec: audioCodec,
                 sample_rate_hz: RecordingAudioFormat.sampleRateHz,
                 channels: RecordingAudioFormat.channels,
                 byte_length: audioByteLength,

@@ -892,11 +892,27 @@ pub(crate) fn decode_media_into(
     extension: &str,
     cancellation: &AtomicBool,
     max_samples: usize,
-    mut emit: impl FnMut(&[f32]) -> std::result::Result<(), AudioImportError>,
+    emit: impl FnMut(&[f32]) -> std::result::Result<(), AudioImportError>,
 ) -> std::result::Result<usize, DecodeFailure> {
     let file =
         File::open(path).map_err(|_| DecodeFailure::Failed(AudioImportError::invalid_file()))?;
-    let media_stream = MediaSourceStream::new(Box::new(file), Default::default());
+    decode_media_stream_into(
+        MediaSourceStream::new(Box::new(file), Default::default()),
+        extension,
+        cancellation,
+        max_samples,
+        emit,
+    )
+}
+
+/// Decode an owned media stream without staging plaintext in a file.
+pub(crate) fn decode_media_stream_into(
+    media_stream: MediaSourceStream,
+    extension: &str,
+    cancellation: &AtomicBool,
+    max_samples: usize,
+    mut emit: impl FnMut(&[f32]) -> std::result::Result<(), AudioImportError>,
+) -> std::result::Result<usize, DecodeFailure> {
     let mut hint = Hint::new();
     hint.with_extension(extension);
     let probed = symphonia::default::get_probe()
