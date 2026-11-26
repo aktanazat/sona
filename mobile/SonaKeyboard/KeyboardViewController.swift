@@ -72,10 +72,15 @@ final class KeyboardViewController: UIInputViewController {
     private var requestedAt: Date?
     private var requestedID: UUID?
     private var warmStyleRequestID: UUID?
-    /// The top bar, then the letter layout's rows at the system keyboard's row height.
+    /// The top bar, then the letter layout's rows at the system keyboard's row height. The
+    /// iPad's rows are taller, and taller still with the iPad on its side.
     private var wantedHeight: CGFloat {
-        let compact = traitCollection.verticalSizeClass == .compact
-        return KeyboardView.barHeight + CGFloat(typing.rowCount) * (compact ? 40 : 54) + 4
+        let row: CGFloat = if typing.wide {
+            view.window.map { $0.bounds.width > $0.bounds.height } == true ? 86 : 66
+        } else {
+            traitCollection.verticalSizeClass == .compact ? 40 : 54
+        }
+        return KeyboardView.barHeight + CGFloat(typing.rowCount) * row + 4
     }
 
     override func viewDidLoad() {
@@ -154,10 +159,15 @@ final class KeyboardViewController: UIInputViewController {
             host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor), minimum,
         ])
         host.didMove(toParent: self)
+        registerForTraitChanges([UITraitHorizontalSizeClass.self, UITraitVerticalSizeClass.self]) {
+            (self: Self, _: UITraitCollection) in self.view.setNeedsLayout()
+        }
     }
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
+        let wide = traitCollection.horizontalSizeClass == .regular && traitCollection.verticalSizeClass == .regular
+        if typing.wide != wide { typing.wide = wide }
         if let minimumHeight, minimumHeight.constant != wantedHeight { minimumHeight.constant = wantedHeight }
     }
 
@@ -399,6 +409,9 @@ final class KeyboardViewController: UIInputViewController {
             setLanguage(KeyboardLanguages.shared().next(after: typing.language))
         case .nextKeyboard:
             advanceToNextInputMode()
+            return
+        case .dismissKeyboard:
+            dismissKeyboard()
             return
         }
         afterKey()
@@ -938,7 +951,7 @@ private struct KeyboardView: View {
     var body: some View {
         VStack(spacing: 0) {
             bar
-                .frame(maxWidth: KeyGrid.maxWidth)
+                .frame(maxWidth: typing.maxWidth)
                 .frame(height: Self.barHeight)
                 .padding(.horizontal, 8)
                 .zIndex(0)
@@ -948,18 +961,18 @@ private struct KeyboardView: View {
                     Spacer(minLength: 0)
                     if state.hasFullAccess, let draft = state.draft {
                         DraftPanel(text: draft.text, insert: insert, discard: discard)
-                            .frame(maxWidth: KeyGrid.maxWidth)
+                            .frame(maxWidth: typing.maxWidth)
                             .padding(.horizontal, KeyGrid.margin)
                             .frame(height: rowHeight * CGFloat(typing.rowCount - 1))
-                        keys([typing.bottomRow(withDelete: true)]).frame(height: rowHeight)
+                        keys([typing.bottomRow(below: .draft)]).frame(height: rowHeight)
                     } else if tools.isOpen, tools.composing == nil {
                         ToolsPanel(tools: tools, canCopy: state.hasFullAccess)
-                            .frame(maxWidth: KeyGrid.maxWidth)
+                            .frame(maxWidth: typing.maxWidth)
                             .frame(height: rowHeight * CGFloat(typing.rowCount - 1))
                             .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .bottom)))
-                        keys([typing.bottomRow(withDelete: false)]).frame(height: rowHeight)
+                        keys([typing.bottomRow(below: .tools)]).frame(height: rowHeight)
                     } else {
-                        let rows = typing.rows + [typing.bottomRow(withDelete: false)]
+                        let rows = typing.rows + [typing.bottomRow(below: .keys)]
                         keys(rows).frame(height: rowHeight * CGFloat(rows.count))
                     }
                 }
@@ -1017,9 +1030,13 @@ private struct KeyboardView: View {
                 GeometryReader { proxy in
                     let room = proxy.frame(in: .named(Self.space)).minY
                     if let preview = typing.preview {
-                        KeyPreviewBalloon(preview: preview, bounds: proxy.size, room: room)
+                        KeyPreviewBalloon(
+                            preview: preview, bounds: proxy.size, room: room, spacing: typing.spacing, inPlace: typing.wide
+                        )
                     }
-                    if let choice = typing.accentChoice { AccentPopup(choice: choice, room: room) }
+                    if let choice = typing.accentChoice {
+                        AccentPopup(choice: choice, room: room, rowGap: typing.spacing.rowGap)
+                    }
                 }
             }
     }

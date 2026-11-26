@@ -49,7 +49,7 @@ struct DictationScreen: View {
                     .accessibilityIdentifier("dictation-transcript")
                 messages
             }
-            .frame(maxWidth: Self.readableWidth)
+            .frame(maxWidth: Theme.readableWidth)
             .padding(.horizontal, Theme.pageInset)
             .padding(.bottom, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -74,10 +74,6 @@ struct DictationScreen: View {
         }
         .tint(Theme.accent)
     }
-
-    /// The widest the transcript and controls get, so the inner display of iPhone Duo shows
-    /// a readable column instead of lines that run edge to edge.
-    static let readableWidth: CGFloat = 640
 
     @ViewBuilder
     private var messages: some View {
@@ -183,7 +179,7 @@ struct DictationScreen: View {
                     }
                 }
         }
-        .frame(maxWidth: Self.readableWidth)
+        .frame(maxWidth: Theme.readableWidth)
         .padding(.horizontal, Theme.pageInset)
         .padding(.vertical, 8)
     }

@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>status.keptForRetry</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Couldn’t save the recording. It’s kept on this iPhone and Sona will try again.</string>
+			<key>ipad</key>
+			<string>Couldn’t save the recording. It’s kept on this iPad and Sona will try again.</string>
+		</dict>
+	</dict>
+	<key>consent.body1</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Meetings are transcribed on your Mac. Dictation is transcribed on this iPhone. If you enable keyboard dictation, the microphone stays on for the session you choose.</string>
+			<key>ipad</key>
+			<string>Meetings are transcribed on your Mac. Dictation is transcribed on this iPad. If you enable keyboard dictation, the microphone stays on for the session you choose.</string>
+		</dict>
+	</dict>
+	<key>pair.notApproved</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Not approved yet. Approve this phone on your Mac.</string>
+			<key>ipad</key>
+			<string>Not approved yet. Approve this iPad on your Mac.</string>
+		</dict>
+	</dict>
+	<key>agent.needsPairing</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Pair this iPhone with your Mac to ask Sona</string>
+			<key>ipad</key>
+			<string>Pair this iPad with your Mac to ask Sona</string>
+		</dict>
+	</dict>
+	<key>agent.failure.notSent</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>This question didn't leave this iPhone.</string>
+			<key>ipad</key>
+			<string>This question didn't leave this iPad.</string>
+		</dict>
+	</dict>
+	<key>dictation.privacy</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Speech and writing styles run on this iPhone. Dictations stay in Notes, with audio you can replay or delete.</string>
+			<key>ipad</key>
+			<string>Speech and writing styles run on this iPad. Dictations stay in Notes, with audio you can replay or delete.</string>
+		</dict>
+	</dict>
+	<key>search.notes</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Show notes in iPhone search</string>
+			<key>ipad</key>
+			<string>Show notes in iPad search</string>
+		</dict>
+	</dict>
+	<key>dictation.styleUnavailable</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Writing styles need Apple Intelligence enabled on a supported iPhone. Your vocabulary and snippets still work.</string>
+			<key>ipad</key>
+			<string>Writing styles need Apple Intelligence enabled on a supported iPad. Your vocabulary and snippets still work.</string>
+		</dict>
+	</dict>
+	<key>library.delete</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Delete from this iPhone</string>
+			<key>ipad</key>
+			<string>Delete from this iPad</string>
+		</dict>
+	</dict>
+	<key>library.saved</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Saved on this iPhone.</string>
+			<key>ipad</key>
+			<string>Saved on this iPad.</string>
+		</dict>
+	</dict>
+	<key>library.noteGone</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>This note is no longer on this iPhone</string>
+			<key>ipad</key>
+			<string>This note is no longer on this iPad</string>
+		</dict>
+	</dict>
+	<key>calendar.privacy</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Sona reads the next seven days from this iPhone's calendars only when enabled. Nothing is recorded automatically.</string>
+			<key>ipad</key>
+			<string>Sona reads the next seven days from this iPad's calendars only when enabled. Nothing is recorded automatically.</string>
+		</dict>
+	</dict>
+	<key>memory.sourceNotSynced</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Source not synced to this iPhone.</string>
+			<key>ipad</key>
+			<string>Source not synced to this iPad.</string>
+		</dict>
+	</dict>
+	<key>memory.conversationNotSynced</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Conversation not synced to this iPhone.</string>
+			<key>ipad</key>
+			<string>Conversation not synced to this iPad.</string>
+		</dict>
+	</dict>
+	<key>Pair this iPhone with your Mac to ask Sona.</key>
+	<dict>
+		<key>NSStringDeviceSpecificRuleType</key>
+		<dict>
+			<key>iphone</key>
+			<string>Pair this iPhone with your Mac to ask Sona.</string>
+			<key>ipad</key>
+			<string>Pair this iPad with your Mac to ask Sona.</string>
+		</dict>
+	</dict>
+</dict>
+</plist>
