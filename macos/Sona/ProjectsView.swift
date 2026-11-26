@@ -85,7 +85,6 @@ struct ProjectsView: View {
             }
         }
         .animation(Motion.settle(reduced: reduceMotion), value: store.selectedProjectId)
-        .task { await store.start() }
         .task(id: store.selectedProjectId) {
             if let id = store.selectedProjectId { await store.loadDetail(id) }
         }

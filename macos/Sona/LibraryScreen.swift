@@ -589,7 +589,7 @@ private struct HistoryRowView: View {
                     processAgain: processAgain)
             }
         }
-        .task(id: row.id) { await store.loadReceipts(for: row.id) }
+        .task(id: row.id) { store.loadReceipts(for: row.id) }
     }
 
     private var line: some View {
@@ -855,7 +855,7 @@ private struct ReceiptInspector: View {
                     .foregroundStyle(Theme.inkTertiary)
             }
             switch store.receipts[row.id] {
-            case .none, .loading:
+            case .none:
                 Text("Loading run receipts…").metaText()
             case .failed:
                 Text("Run receipt data is unavailable for this entry.").metaText()

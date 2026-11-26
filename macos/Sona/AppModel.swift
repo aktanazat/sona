@@ -499,6 +499,8 @@ final class AppModel {
     @ObservationIgnored var openWindows = 0
     /// Notes open in windows of their own, saved before Sona quits.
     @ObservationIgnored var windowNotes: [ScratchpadStore] = []
+    /// Set at each core start until the stores only a window shows are read.
+    @ObservationIgnored private var windowStoresDue = false
     private static let reopenWindowKey = "reopenMainWindow"
 
     init() {
@@ -1279,6 +1281,7 @@ final class AppModel {
 
     /// Every store reads the core: at the first start, and again after a
     /// restart, since the new core knows nothing of what the stores showed.
+    /// The stores only a window shows wait for the first window.
     private func load() {
         Task {
             await onboarding.start()
@@ -1286,26 +1289,15 @@ final class AppModel {
         }
         Task { await settings.start() }
         Task { await secureInput.start() }
-        Task { await overview.start() }
-        Task { await evening.start() }
         Task { await live.start() }
-        Task { await meetings.start() }
         Task { await meetingSettings.start() }
         Task { await projects.start() }
         Task { await people.start() }
-        Task { await vocabulary.start() }
-        Task { await prompts.start() }
-        Task { await workflows.start() }
         Task { await quicklinks.load() }
         Task { await agents.start() }
         Task { await cloudSync.start() }
-        Task { await shared.start() }
-        Task { await privacy.start() }
         Task { await imports.start() }
-        Task { await documents.start() }
         Task { await query.start() }
-        Task { await about.start() }
-        Task { await debug.start() }
         Task { await spotlight.start() }
         Task { await routines.start() }
         Task {
@@ -1319,6 +1311,26 @@ final class AppModel {
         Task { await self.loadModels() }
         Task { await library.coreStarted() }
         call { try await self.loadPill() }
+        windowStoresDue = true
+        loadWindowStoresIfShown()
+    }
+
+    /// Reads what only a window shows, once per core start and not before a
+    /// window opens: Sona often runs as its menu bar mark alone.
+    func loadWindowStoresIfShown() {
+        guard windowStoresDue, openWindows > 0 else { return }
+        windowStoresDue = false
+        Task { await overview.start() }
+        Task { await evening.start() }
+        Task { await meetings.start() }
+        Task { await vocabulary.start() }
+        Task { await prompts.start() }
+        Task { await workflows.start() }
+        Task { await shared.start() }
+        Task { await privacy.start() }
+        Task { await documents.start() }
+        Task { await about.start() }
+        Task { await debug.start() }
     }
 
     /// The socket closed under the shell. A recording in flight is over with
@@ -1326,6 +1338,8 @@ final class AppModel {
     /// and says the core needs a restart.
     private func coreClosed() {
         coreStopped = true
+        windowStoresDue = false
+        meetings.coreClosed()
         dictationRunID = nil
         liveText = ""
         cancelConfirmation = nil

@@ -1,5 +1,6 @@
 import AppIntents
 import CoreSpotlight
+import CryptoKit
 
 /// Keeps Spotlight in step with the people, meetings, tasks, projects and
 /// notes the core lists to the system. A meeting of a series kept on this Mac
@@ -13,13 +14,10 @@ final class SpotlightStore {
 
     private let core: Core
     private let index = CSSearchableIndex(name: "Sona")
-    /// What the index holds, by id. Nil until the first write since launch,
-    /// which replaces whatever an earlier run left.
-    private var people: [String: SystemPerson]?
-    private var meetings: [MeetingSessionId: SystemMeeting]?
-    private var tasks: [String: SystemTask]?
-    private var projects: [String: SystemProject]?
-    private var notes: [String: SystemNote]?
+    private let stampFile: URL?
+    /// What the index holds, kept across launches so a launch writes only
+    /// the rows that changed since the last run.
+    private var stamp: SpotlightStamp
     private var syncing = false
     /// What changed since the last read. A meeting change marks the work too:
     /// keeping a series on this Mac hides the tasks drawn from it.
@@ -28,6 +26,10 @@ final class SpotlightStore {
 
     init(core: Core) {
         self.core = core
+        stampFile = try? FileManager.default.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        ).appending(path: "Sona/spotlight-index.json")
+        stamp = stampFile.flatMap(SpotlightStamp.load) ?? SpotlightStamp()
         for name in [CoreEvent.meetingArtifactChanged, CoreEvent.meetingSessionChanged, CoreEvent.meetingRemoved] {
             core.observe(name) { [weak self] _ in self?.refresh() }
         }
@@ -36,7 +38,12 @@ final class SpotlightStore {
         }
     }
 
+    /// The stamp holds only while the index still carries the mark written
+    /// with it: a rebuilt or erased index has none, and is written whole.
     func start() async {
+        if (try? await index.fetchLastClientState()) != stamp.mark {
+            stamp = SpotlightStamp()
+        }
         due = [.meetings, .work]
         await sync()
     }
@@ -59,68 +66,123 @@ final class SpotlightStore {
     private func sync() async {
         guard !syncing else { return }
         syncing = true
+        let before = stamp
         while !due.isEmpty {
             let parts = due
             due = []
             if parts.contains(.meetings) { await reindexMeetings() }
             if parts.contains(.work) { await reindexWork() }
         }
+        if stamp != before, let stampFile {
+            let mark = Data(UUID().uuidString.utf8)
+            index.beginBatch()
+            do {
+                try await index.endBatch(withClientState: mark)
+                stamp.mark = mark
+                try stamp.save(to: stampFile)
+            } catch {
+                try? FileManager.default.removeItem(at: stampFile)
+            }
+        }
         syncing = false
     }
 
     private func reindexMeetings() async {
         guard let list: SystemIndex = try? await core.request("sona_query_system_index") else { return }
-        let people = Dictionary(list.people.map { ($0.id, $0) }) { first, _ in first }
-        let meetings = Dictionary(list.meetings.map { ($0.id, $0) }) { first, _ in first }
+        let peopleBefore = stamp.kinds[SpotlightStamp.kind(PersonEntity.self)]
         do {
-            try await write(people, over: self.people, as: PersonEntity.init)
-            try await write(meetings, over: self.meetings, as: MeetingEntity.init)
+            try await write(list.people, as: PersonEntity.init)
+            try await write(list.meetings, as: MeetingEntity.init)
         } catch {
-            self.people = nil
-            self.meetings = nil
+            stamp.forget(PersonEntity.self)
+            stamp.forget(MeetingEntity.self)
             return
         }
-        if self.people != people {
+        if stamp.kinds[SpotlightStamp.kind(PersonEntity.self)] != peopleBefore {
             SonaShortcuts.updateAppShortcutParameters()
         }
-        self.people = people
-        self.meetings = meetings
     }
 
     private func reindexWork() async {
         guard let list: SystemWork = try? await core.request("sona_query_system_work") else { return }
-        let tasks = Dictionary(list.tasks.map { ($0.id, $0) }) { first, _ in first }
-        let projects = Dictionary(list.projects.map { ($0.id, $0) }) { first, _ in first }
-        let notes = Dictionary(list.notes.map { ($0.id, $0) }) { first, _ in first }
         do {
-            try await write(tasks, over: self.tasks, as: TaskEntity.init)
-            try await write(projects, over: self.projects, as: ProjectEntity.init)
-            try await write(notes, over: self.notes, as: NoteEntity.init)
+            try await write(list.tasks, as: TaskEntity.init)
+            try await write(list.projects, as: ProjectEntity.init)
+            try await write(list.notes, as: NoteEntity.init)
         } catch {
-            self.tasks = nil
-            self.projects = nil
-            self.notes = nil
-            return
+            stamp.forget(TaskEntity.self)
+            stamp.forget(ProjectEntity.self)
+            stamp.forget(NoteEntity.self)
         }
-        self.tasks = tasks
-        self.projects = projects
-        self.notes = notes
     }
 
-    private func write<Row: Equatable, Entity: IndexedEntity>(
-        _ rows: [String: Row], over indexed: [String: Row]?, as entity: (Row) -> Entity
-    ) async throws where Entity.ID == String {
-        if let indexed {
-            let gone = indexed.keys.filter { rows[$0] == nil }
-            if !gone.isEmpty {
-                try await index.deleteAppEntities(identifiedBy: gone, ofType: Entity.self)
-            }
-        } else {
-            try await index.deleteAppEntities(ofType: Entity.self)
+    private func write<Row: Encodable & Identifiable, Entity: IndexedEntity>(
+        _ rows: [Row], as entity: (Row) -> Entity
+    ) async throws where Row.ID == String, Entity.ID == String {
+        let byId = Dictionary(rows.map { ($0.id, $0) }) { first, _ in first }
+        let digests = SpotlightStamp.digests(byId)
+        let change = stamp.change(to: digests, for: Entity.self)
+        switch change.gone {
+        case nil: try await index.deleteAppEntities(ofType: Entity.self)
+        case let gone? where !gone.isEmpty:
+            try await index.deleteAppEntities(identifiedBy: gone, ofType: Entity.self)
+        default: break
         }
-        let changed = rows.compactMap { id, row in indexed?[id] == row ? nil : entity(row) }
-        if !changed.isEmpty {
-            try await index.indexAppEntities(changed)
+        if !change.written.isEmpty {
+            try await index.indexAppEntities(change.written.compactMap { byId[$0].map(entity) })
         }
+        stamp.kinds[SpotlightStamp.kind(Entity.self)] = digests
+    }
+}
+
+/// One digest per indexed row, by entity kind and id.
+struct SpotlightStamp: Codable, Equatable {
+    /// Raise when what an entity puts in the index changes, so every row is
+    /// written again once.
+    static let currentVersion = 1
+
+    var version = currentVersion
+    var kinds: [String: [String: String]] = [:]
+    /// The client state written to the index with this stamp.
+    var mark: Data?
+
+    /// A missing, unreadable or older stamp reads as none, so the index is
+    /// replaced whole.
+    static func load(from url: URL) -> SpotlightStamp? {
+        guard let data = try? Data(contentsOf: url),
+              let stamp = try? JSONDecoder().decode(SpotlightStamp.self, from: data),
+              stamp.version == currentVersion else { return nil }
+        return stamp
+    }
+
+    func save(to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(self).write(to: url, options: .atomic)
+    }
+
+    static func kind<Entity>(_ entity: Entity.Type) -> String {
+        String(describing: entity)
+    }
+
+    static func digests<Row: Encodable>(_ rows: [String: Row]) -> [String: String] {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return rows.compactMapValues { row in
+            (try? encoder.encode(row)).map { Data(SHA256.hash(data: $0)).base64EncodedString() }
+        }
+    }
+
+    /// Ids to take out of the index (nil: every row of the kind, since what
+    /// it holds is unknown) and ids to write.
+    func change<Entity>(to digests: [String: String], for entity: Entity.Type) -> (gone: [String]?, written: [String]) {
+        guard let indexed = kinds[Self.kind(entity)] else { return (nil, Array(digests.keys)) }
+        let gone = indexed.keys.filter { digests[$0] == nil }
+        let written = digests.compactMap { id, digest in indexed[id] == digest ? nil : id }
+        return (gone, written)
+    }
+
+    mutating func forget<Entity>(_ entity: Entity.Type) {
+        kinds[Self.kind(entity)] = nil
     }
 }
