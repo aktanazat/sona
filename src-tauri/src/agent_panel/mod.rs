@@ -3353,7 +3353,7 @@ pub async fn agent_panel_dismiss_action(
 }
 
 /// The titles the history button lists, newest first.
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn agent_chat_history_list(
     manager: State<'_, AgentPanelManager>,
@@ -3361,7 +3361,7 @@ pub fn agent_chat_history_list(
     Ok(manager.history_list())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn agent_chat_open(
     manager: State<'_, AgentPanelManager>,
@@ -3370,7 +3370,7 @@ pub fn agent_chat_open(
     manager.open_conversation(&conversation_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn agent_chat_new(
     manager: State<'_, AgentPanelManager>,
