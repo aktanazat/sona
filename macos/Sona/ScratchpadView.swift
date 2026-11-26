@@ -189,7 +189,7 @@ private struct ScratchNoteEditorPage: View {
     let showSynthesis: () -> Void
     let showSubjects: () -> Void
 
-    @FocusState private var editorFocused: Bool
+    @State private var editorFocused = false
     @State private var confirmingDelete = false
     @State private var showingHistory = false
     @State private var showingSources = false
@@ -692,12 +692,12 @@ private struct ScratchTrigger: Equatable {
 
 /// The note's words, growing with them: a few lines when empty, a line more
 /// for every line written, so the page scrolls and the editor never does.
-/// A `TextEditor` is an `NSTextView`, which is where the system's dictation
+/// The editor is an `NSTextView`, which is where the system's dictation
 /// insertion lands while the cursor is in it. `/` at the start of a word
 /// offers blocks; `@` offers people, projects and tasks to mention.
 private struct ScratchNoteEditor: View {
     @Binding var text: String
-    var focused: FocusState<Bool>.Binding
+    @Binding var focused: Bool
     let mentions: (String) -> [ScratchMention]
     let mention: (ScratchMention) -> Void
     let noteId: String?
@@ -732,43 +732,19 @@ private struct ScratchNoteEditor: View {
 
     private var choices: Int { trigger?.mark == "/" ? commands.count : people.count }
 
-    /// The words up to the end of the cursor's line, to measure where the
-    /// menu goes.
-    private var throughCaretLine: String {
-        guard let trigger else { return "" }
-        let end = text[trigger.range.upperBound...].firstIndex(of: "\n") ?? text.endIndex
-        return String(text[..<end])
-    }
-
     var body: some View {
-        // The editor cannot size itself to its words; a hidden copy of them
-        // can. The copy wraps a little narrower, so it is never the shorter.
-        Text(text + " ")
-            .font(TypeScale.body())
-            .padding(.horizontal, 8)
-            .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
+        MarkdownTextEditor(
+            text: $text, selection: $selection, focused: $focused, label: "Note", minHeight: 240, keys: key,
+            selectionMoved: { caretBottom = $0 })
             .padding(.bottom, 8)
-            .hidden()
-            .background(alignment: .topLeading) {
-                Text(throughCaretLine + " ")
-                    .font(TypeScale.body())
-                    .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .hidden()
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { caretBottom = $0 }
-            }
+            .focusedValue(\.quotedSelection, quoted)
             .overlay(alignment: .topLeading) {
-                ZStack(alignment: .topLeading) {
-                    if text.isEmpty {
-                        Text("Note, or / for blocks and @ to mention")
-                            .font(TypeScale.body())
-                            .foregroundStyle(Theme.inkTertiary)
-                            .padding(.horizontal, 5)
-                    }
-                    MarkdownTextEditor(text: $text, selection: $selection, focused: focused, label: "Note", keys: key)
+                if text.isEmpty {
+                    Text("Note, or / for blocks and @ to mention")
                         .font(TypeScale.body())
-                        .foregroundStyle(Theme.ink)
-                        .focusedValue(\.quotedSelection, quoted)
+                        .foregroundStyle(Theme.inkTertiary)
+                        .padding(.horizontal, 5)
+                        .allowsHitTesting(false)
                 }
             }
             .overlay(alignment: .topLeading) {
@@ -831,26 +807,24 @@ private struct ScratchNoteEditor: View {
         }
     }
 
-    private func key(_ press: KeyPress) -> KeyPress.Result {
-        guard choices > 0 else { return .ignored }
-        switch press.key {
-        case .upArrow:
+    private func key(_ key: MarkdownEditorKey) -> Bool {
+        guard choices > 0 else { return false }
+        switch key {
+        case .up:
             highlighted = (highlighted + choices - 1) % choices
-        case .downArrow:
+        case .down:
             highlighted = (highlighted + 1) % choices
         case .escape:
             dismissed = trigger
-        case .return, .tab:
+        case .newline, .tab:
             let index = min(highlighted, choices - 1)
             if trigger?.mark == "/" {
                 run(commands[index])
             } else {
                 insert(people[index])
             }
-        default:
-            return .ignored
         }
-        return .handled
+        return true
     }
 
     private func run(_ command: ScratchSlashCommand) {

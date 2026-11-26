@@ -334,7 +334,7 @@ private struct DetailNotes: View {
     @Environment(AppModel.self) private var model
     @State private var text = ""
     @State private var editing = false
-    @FocusState private var focused: Bool
+    @State private var focused = false
     @State private var hovering = false
     @State private var selection: TextSelection?
 
@@ -406,27 +406,21 @@ private struct DetailNotes: View {
 
     private var editor: some View {
         ZStack(alignment: .topLeading) {
-            Text(text.isEmpty ? " " : text + "\n")
-                .font(TypeScale.body(14))
-                .lineSpacing(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .hidden()
             if text.isEmpty {
                 Text("Add details, a checklist or links").font(TypeScale.body(14)).foregroundStyle(Theme.inkDisabled)
                     .allowsHitTesting(false)
             }
-            MarkdownTextEditor(text: $text, selection: $selection, focused: $focused, label: "Details")
-                .font(TypeScale.body(14))
-                .lineSpacing(3)
-                .foregroundStyle(Theme.ink)
-                .textEditorStyle(.plain)
-                .padding(.horizontal, -5)
-                .focusedValue(\.quotedSelection, quoted)
-                .withoutWritingTools()
-                .onExitCommand {
+            MarkdownTextEditor(
+                text: $text, selection: $selection, focused: $focused, label: "Details", lineSpacing: 3,
+                writingTools: false,
+                keys: { key in
+                    guard key == .escape else { return false }
                     text = row.details ?? ""
                     focused = false
-                }
+                    return true
+                })
+                .padding(.horizontal, -5)
+                .focusedValue(\.quotedSelection, quoted)
         }
         .onChange(of: focused) { _, now in
             if !now {
