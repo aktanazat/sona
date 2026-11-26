@@ -2838,7 +2838,9 @@ mod phone_decisions {
         .collect()
     }
 
-    fn state(conn: &Connection) -> (Vec<(String, WorkStatus, i64)>, HashMap<String, (bool, bool)>) {
+    type Notices = HashMap<String, (bool, bool)>;
+
+    fn state(conn: &Connection) -> (Vec<(String, WorkStatus, i64)>, Notices) {
         let tasks = items::items(conn, true)
             .expect("the tasks")
             .into_iter()
