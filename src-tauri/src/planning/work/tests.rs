@@ -2764,3 +2764,188 @@ fn a_negated_blank_repeat_rule_inside_a_saved_group_is_refused() {
     );
     assert!(items::views(&desk.history).expect("saved views").is_empty());
 }
+
+mod phone_decisions {
+    use super::super::sessions::{self, ActivityInput, WorkSelectOption, WorkSessionActivityKind};
+    use super::super::{decide, PhoneDecision};
+    use super::*;
+
+    fn task(conn: &Connection, title: &str, status: WorkStatus) -> String {
+        items::insert(
+            conn,
+            &NewItem {
+                title,
+                details: None,
+                status,
+                priority: 0,
+                project_id: None,
+                milestone_id: None,
+                owner: &WorkOwner::Myself,
+                due_at_ms: Some(AT),
+                label_ids: &[],
+                source_loop_id: None,
+                recurrence: None,
+            },
+            WorkActor::Me,
+            AT,
+        )
+        .expect("a task")
+        .id
+    }
+
+    fn ask(conn: &Connection, task_id: &str) -> String {
+        let session =
+            sessions::start(conn, task_id, "Claude Code", false, None, AT).expect("a session");
+        sessions::emit(
+            conn,
+            &session,
+            "Claude Code",
+            WorkSessionActivityKind::Elicitation,
+            &ActivityInput {
+                body: Some("Which vendor?".to_owned()),
+                options: vec![WorkSelectOption {
+                    label: "Acme".to_owned(),
+                    value: "acme".to_owned(),
+                }],
+                ..ActivityInput::default()
+            },
+            None,
+            AT,
+        )
+        .expect("a question");
+        session
+    }
+
+    /// Every notice, read, archived or not, by id: (read, archived).
+    fn notices(conn: &Connection) -> HashMap<String, (bool, bool)> {
+        inbox::notifications(
+            conn,
+            inbox::Shown {
+                snoozed: true,
+                archived: true,
+                ..inbox::Shown::default()
+            },
+            AT + 10,
+        )
+        .expect("the inbox")
+        .into_iter()
+        .map(|notice| {
+            (
+                notice.id,
+                (notice.read_at_ms.is_some(), notice.archived_at_ms.is_some()),
+            )
+        })
+        .collect()
+    }
+
+    fn state(conn: &Connection) -> (Vec<(String, WorkStatus, i64)>, HashMap<String, (bool, bool)>) {
+        let tasks = items::items(conn, true)
+            .expect("the tasks")
+            .into_iter()
+            .map(|item| (item.id, item.status, item.revision))
+            .collect();
+        (tasks, notices(conn))
+    }
+
+    #[test]
+    fn each_phone_decision_lands_once_as_the_user() {
+        let mut conn = Connection::open_in_memory().expect("an in-memory history database");
+        schema::apply_all(&conn).expect("the planner schema");
+        let due = task(&conn, "Send the deck", WorkStatus::NotStarted);
+        let taken = task(&conn, "Call the venue", WorkStatus::Triage);
+        let dropped = task(&conn, "Old idea", WorkStatus::Triage);
+        let vendor = task(&conn, "Pick a vendor", WorkStatus::InProgress);
+        let room = task(&conn, "Book the room", WorkStatus::InProgress);
+        let answered = ask(&conn, &vendor);
+        ask(&conn, &room);
+        let asked = notices(&conn);
+        let notice_on = |task_id: &str| {
+            inbox::notifications(&conn, inbox::Shown::default(), AT + 10)
+                .expect("the inbox")
+                .into_iter()
+                .find(|notice| notice.item_id.as_deref() == Some(task_id))
+                .expect("the question's notice")
+                .id
+        };
+        let read = vec![notice_on(&vendor)];
+        let archived = vec![notice_on(&room)];
+        assert_eq!(asked.len(), 2);
+        let revision = items::item(&conn, &due).expect("the due task").revision;
+
+        let decisions = [
+            PhoneDecision::Done {
+                task: &due,
+                revision,
+            },
+            PhoneDecision::Accept { task: &taken },
+            PhoneDecision::Decline { task: &dropped },
+            PhoneDecision::Mark {
+                notices: &read,
+                how: inbox::Mark::Read,
+            },
+            PhoneDecision::Mark {
+                notices: &archived,
+                how: inbox::Mark::Archive,
+            },
+            PhoneDecision::Answer {
+                session: &answered,
+                body: None,
+                value: Some("acme"),
+            },
+        ];
+        let operations: Vec<String> = decisions.iter().map(|_| operation()).collect();
+        let run = |conn: &mut Connection| {
+            for (decision, op) in decisions.iter().zip(&operations) {
+                let change = Change {
+                    operation_id: op,
+                    actor: WorkActor::Me,
+                    at_ms: AT + 1,
+                };
+                decide(conn, None, None, change, decision).expect("the decision");
+            }
+        };
+        run(&mut conn);
+
+        let status = |id: &str| items::item(&conn, id).expect("a task").status;
+        assert_eq!(status(&due), WorkStatus::Done);
+        assert!(status(&taken).is_open());
+        assert!(status(&dropped).is_closed());
+        let after = notices(&conn);
+        assert!(after[&read[0]].0);
+        assert!(after[&archived[0]].1);
+        let session = sessions::session(&conn, &answered, AT + 2).expect("the session");
+        assert!(session.question.is_none());
+        let reply = session.activities.last().expect("the reply");
+        assert_eq!(reply.kind, WorkSessionActivityKind::Prompt);
+        assert_eq!(reply.value.as_deref(), Some("acme"));
+
+        let once = state(&conn);
+        let replies = session.activities.len();
+        run(&mut conn);
+        assert_eq!(state(&conn), once);
+        assert_eq!(
+            sessions::session(&conn, &answered, AT + 2)
+                .expect("the session")
+                .activities
+                .len(),
+            replies
+        );
+
+        let stale = Change {
+            operation_id: &operation(),
+            actor: WorkActor::Me,
+            at_ms: AT + 3,
+        };
+        assert!(decide(
+            &mut conn,
+            None,
+            None,
+            stale,
+            &PhoneDecision::Done {
+                task: &room,
+                revision: revision + 99,
+            },
+        )
+        .is_err());
+    }
+}

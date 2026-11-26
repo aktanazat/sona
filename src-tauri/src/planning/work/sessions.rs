@@ -971,6 +971,31 @@ pub(crate) fn reply_as(
     )
 }
 
+/// The user's answer to a session's question, as one planner operation.
+pub(super) fn replied(
+    conn: &mut Connection,
+    change: super::Change<'_>,
+    session_id: &str,
+    body: Option<&str>,
+    value: Option<&str>,
+) -> Result<Done<String>> {
+    let by = Author {
+        actor: change.actor,
+        agent: None,
+    };
+    let id = store::mutate(
+        conn,
+        change.operation_id,
+        "work_session_reply",
+        &(session_id, by.actor, by.agent, body, value),
+        change.at_ms,
+        |tx| reply(tx, session_id, by, body, value, change.at_ms),
+    )?;
+    let mut effects = Effects::default();
+    effects.items.push(task_of(conn, &id)?);
+    Ok(Done { value: id, effects })
+}
+
 pub(crate) fn sessions_read(
     app: &AppHandle,
     task_id: Option<&str>,

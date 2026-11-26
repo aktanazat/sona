@@ -1547,7 +1547,7 @@ pub(crate) fn mark(conn: &Connection, id: &str, mark: Mark, now_ms: i64) -> Resu
     notification(conn, &id)
 }
 
-fn marked(
+pub(super) fn marked(
     history: &mut Connection,
     change: Change<'_>,
     ids: &[String],

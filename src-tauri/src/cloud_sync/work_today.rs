@@ -17,12 +17,11 @@ use super::{
     MAX_PLAINTEXT_CHUNK_BYTES,
 };
 use crate::managers::history::HistoryManager;
-use crate::planning::work::comments::Author;
 use crate::planning::work::inbox::{
     self, rows::InboxRow, InboxFilter, Mark, NotificationKind, Shown,
 };
-use crate::planning::work::types::{WorkActor, WorkDirection, WorkItem, WorkPatch, WorkStatus};
-use crate::planning::work::{digest, items, sessions};
+use crate::planning::work::types::{WorkActor, WorkDirection, WorkItem, WorkStatus};
+use crate::planning::work::{digest, items, sessions, PhoneDecision};
 use crate::query::KeptLocal;
 use anyhow::Result;
 use rusqlite::Connection;
@@ -522,68 +521,44 @@ fn ensure_directory(directory: &Path) -> Result<(), CloudRuntimeError> {
         .map_err(|_| CloudRuntimeError::File)
 }
 
+/// What the phone asked for, or `None` for a decision this Mac does not
+/// know or one missing what it needs.
+fn decision(action: &WorkAction) -> Option<PhoneDecision<'_>> {
+    let task = action.task_id.as_deref();
+    Some(match (action.action.as_str(), task) {
+        ("done", Some(task)) => PhoneDecision::Done {
+            task,
+            revision: action.expected_revision?,
+        },
+        ("accept", Some(task)) => PhoneDecision::Accept { task },
+        ("decline", Some(task)) => PhoneDecision::Decline { task },
+        ("read" | "archive", _) if !action.notice_ids.is_empty() => PhoneDecision::Mark {
+            notices: &action.notice_ids,
+            how: if action.action == "read" {
+                Mark::Read
+            } else {
+                Mark::Archive
+            },
+        },
+        ("answer", _) => PhoneDecision::Answer {
+            session: action.session_id.as_deref()?,
+            body: action.body.as_deref(),
+            value: action.value.as_deref(),
+        },
+        _ => return None,
+    })
+}
+
 /// Applies one decision as the user. The planner refuses one that no longer
 /// fits (a task moved on, a question already answered), and that is an
 /// outcome the phone is told, not an error to retry.
 async fn apply(app: &AppHandle, object_id: &str, action: &WorkAction) -> Outcome {
     let operation_id = Uuid::new_v5(&ACTION_NAMESPACE, object_id.as_bytes()).to_string();
-    let op = operation_id.as_str();
-    let task = action.task_id.as_deref();
-    let applied = match (action.action.as_str(), task) {
-        ("done", Some(task)) => match action.expected_revision {
-            Some(revision) => {
-                let patch = WorkPatch {
-                    status: Some(WorkStatus::Done),
-                    ..WorkPatch::default()
-                };
-                crate::planning::work::update_as(app, WorkActor::Me, op, task, revision, &patch)
-                    .await
-                    .is_ok()
-            }
-            None => false,
-        },
-        ("accept", Some(task)) => crate::planning::work::triage_accept_as(
-            app,
-            WorkActor::Me,
-            op,
-            &[task.to_owned()],
-            true,
-        )
-        .await
-        .is_ok(),
-        ("decline", Some(task)) => crate::planning::work::triage_decline_as(
-            app,
-            WorkActor::Me,
-            op,
-            &[task.to_owned()],
-            None,
-        )
-        .await
-        .is_ok(),
-        ("read" | "archive", _) if !action.notice_ids.is_empty() => {
-            let mark = if action.action == "read" {
-                Mark::Read
-            } else {
-                Mark::Archive
-            };
-            inbox::mark_as(app, op, &action.notice_ids, mark).is_ok()
-        }
-        ("answer", _) => match action.session_id.as_deref() {
-            Some(session) => sessions::reply_as(
-                app,
-                Author {
-                    actor: WorkActor::Me,
-                    agent: None,
-                },
-                op,
-                session,
-                action.body.as_deref(),
-                action.value.as_deref(),
-            )
+    let applied = match decision(action) {
+        Some(decision) => crate::planning::work::decide_as_me(app, &operation_id, &decision)
+            .await
             .is_ok(),
-            None => false,
-        },
-        _ => false,
+        None => false,
     };
     if applied {
         Outcome::Applied

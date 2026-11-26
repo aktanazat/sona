@@ -2299,6 +2299,66 @@ pub(crate) async fn triage_decline_as(
     .await
 }
 
+/// A decision the paired phone sent about this Mac's work.
+pub(crate) enum PhoneDecision<'a> {
+    /// Done, if the task is still at the revision the phone saw.
+    Done { task: &'a str, revision: i64 },
+    Accept { task: &'a str },
+    Decline { task: &'a str },
+    Mark { notices: &'a [String], how: inbox::Mark },
+    Answer {
+        session: &'a str,
+        body: Option<&'a str>,
+        value: Option<&'a str>,
+    },
+}
+
+/// Makes one phone decision as the user would in the app, under the
+/// change's operation id, so the same decision twice changes nothing.
+fn decide(
+    history: &mut Connection,
+    meetings: Option<&Connection>,
+    user_name: Option<&str>,
+    change: Change<'_>,
+    decision: &PhoneDecision<'_>,
+) -> StorageResult<Done<()>> {
+    let effects = match *decision {
+        PhoneDecision::Done { task, revision } => {
+            let patch = WorkPatch {
+                status: Some(WorkStatus::Done),
+                ..WorkPatch::default()
+            };
+            update(history, meetings, change, task, revision, &patch)?.effects
+        }
+        PhoneDecision::Accept { task } => {
+            accept(history, meetings, user_name, change, &[task.to_owned()], true)?.effects
+        }
+        PhoneDecision::Decline { task } => {
+            decline(history, meetings, change, &[task.to_owned()], None)?.effects
+        }
+        PhoneDecision::Mark { notices, how } => inbox::marked(history, change, notices, how)?.effects,
+        PhoneDecision::Answer {
+            session,
+            body,
+            value,
+        } => sessions::replied(history, change, session, body, value)?.effects,
+    };
+    Ok(Done { value: (), effects })
+}
+
+pub(crate) async fn decide_as_me(
+    app: &AppHandle,
+    operation_id: &str,
+    decision: &PhoneDecision<'_>,
+) -> Result<(), String> {
+    let change = Change::now(operation_id, WorkActor::Me);
+    let user_name = app.state::<Arc<MeetingSessionManager>>().user_name();
+    run_with_meetings(app, |history, meetings| {
+        decide(history, meetings, user_name.as_deref(), change, decision)
+    })
+    .await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn work_triage_decline(
