@@ -2492,7 +2492,7 @@ pub fn get_agent_bridge_hook_snippet(app: tauri::AppHandle) -> Result<String, St
     serde_json::to_string_pretty(&serde_json::json!({
         "claude": command_hook_config(
             &shell_invocation(hook, "claude"),
-            &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"],
+            &["UserPromptSubmit", "PermissionRequest", "Stop"],
         ),
         "codex": command_hook_config(
             &shell_invocation(hook, "codex"),

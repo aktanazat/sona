@@ -14,7 +14,7 @@ use crate::planning::EvidenceSourceKind;
 use rusqlite::Connection;
 use serde::Serialize;
 use specta::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Serialize, Type)]
 pub struct SystemPerson {
@@ -115,12 +115,14 @@ pub(crate) fn person_promises(
 
 /// Every task that is not archived, binned or a duplicate, every project out
 /// of the bin, and every note but the personal ones. `hides` names the
-/// meeting evidence a task may not draw on.
+/// meeting evidence a task or note may not draw on: a note that quotes or
+/// cites a hidden meeting stays out like a task drawn from one.
 pub(crate) fn system_work(
     conn: &Connection,
     hides: impl Fn(EvidenceSourceKind, &str) -> bool,
 ) -> anyhow::Result<SystemWork> {
-    let hidden = crate::planning::work::drawing_on(conn, hides)?;
+    let hidden = crate::planning::work::drawing_on(conn, &hides)?;
+    let hidden_notes = notes_drawing_on(conn, &hides)?;
     let projects: Vec<SystemProject> = crate::planning::store::projects(conn, false)?
         .into_iter()
         .map(|summary| SystemProject {
@@ -151,7 +153,7 @@ pub(crate) fn system_work(
         .collect();
     let notes = crate::scratchpad::list_notes_with_connection(conn, "")?
         .into_iter()
-        .filter(|note| !note.personal)
+        .filter(|note| !note.personal && !hidden_notes.contains(&note.id))
         .map(|note| SystemNote {
             id: note.id,
             title: note.title,
@@ -163,6 +165,28 @@ pub(crate) fn system_work(
         projects,
         notes,
     })
+}
+
+/// Notes that carry a meeting's words or cite it: a saved passage, or a
+/// meeting among the note's sources.
+fn notes_drawing_on(
+    conn: &Connection,
+    hides: impl Fn(EvidenceSourceKind, &str) -> bool,
+) -> anyhow::Result<HashSet<String>> {
+    let mut statement = conn.prepare(
+        "SELECT note_id, meeting_id FROM scratch_note_passages
+         UNION ALL
+         SELECT note_id, target_id FROM scratch_note_sources WHERE kind = 'meeting'",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut hidden = HashSet::new();
+    while let Some(row) = rows.next()? {
+        let meeting: String = row.get(1)?;
+        if hides(EvidenceSourceKind::Meeting, &meeting) {
+            hidden.insert(row.get(0)?);
+        }
+    }
+    Ok(hidden)
 }
 
 #[cfg(test)]
@@ -210,11 +234,22 @@ mod tests {
         task(&conn, "Raise the salary question", Some(&kept_loop));
         let note =
             crate::scratchpad::create_note_in(&conn, "Harbor plan", Author::Me, 1).expect("a note");
+        let quote = crate::scratchpad::create_note_in(&conn, "What she said about pay", Author::Me, 3)
+            .expect("a quote");
+        conn.execute(
+            "INSERT INTO scratch_note_passages
+                (note_id, meeting_id, segment_id, start_ms, end_ms, wording)
+             VALUES (?1, ?2, 'segment', 0, 1000, 'raw')",
+            rusqlite::params![quote.id, kept],
+        )
+        .expect("a passage from the kept meeting");
         crate::scratchpad::personal::create_in(&conn, "My salary numbers", Author::Me, 2)
             .expect("a personal document");
 
-        let work = system_work(&conn, |kind, source_id| {
-            kind == EvidenceSourceKind::Loop && source_id.starts_with(kept)
+        let work = system_work(&conn, |kind, source_id| match kind {
+            EvidenceSourceKind::Loop => source_id.starts_with(kept),
+            EvidenceSourceKind::Meeting => source_id == kept,
+            _ => false,
         })
         .expect("the listing");
 

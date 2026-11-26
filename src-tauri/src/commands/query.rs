@@ -134,10 +134,14 @@ pub async fn sona_query_system_work(
 
 /// The lines that answer a question, for Siri and Shortcuts: read the way an
 /// agent on this Mac reads them, so nothing said in a series kept on this Mac
-/// and no personal document answers.
+/// and no personal document answers. A shortcut can hand the answer on to
+/// anything, so it needs the consent an agent needs.
 #[tauri::command]
 #[specta::specta]
 pub async fn sona_query_system_ask(app: AppHandle, question: String) -> Result<WorkAnswer, String> {
+    if !crate::settings::get_settings(&app).external_query_enabled {
+        return Err("Turn on Settings > Agents > External access to ask Sona from Shortcuts.".to_owned());
+    }
     crate::planning::work::ask::answer(&app, QueryAudience::External, &question).await
 }
 

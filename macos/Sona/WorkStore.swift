@@ -747,22 +747,24 @@ final class WorkStore {
     }
 
     /// Hands one task to a coding agent and starts the agent on it in a terminal, in a
-    /// folder picked for the task's project. Sona's connection to that agent and folder
-    /// is turned on first, as Settings > Agents would, so the run shows on the task.
+    /// folder picked for the task's project. When Sona's connection to that agent is on,
+    /// the folder is added to it first, as Settings > Agents would, so the run shows on the
+    /// task. A connection that is off stays off: turning it on would also bring back every
+    /// agent and folder it held.
     func start(_ id: String, with agent: AgentLaunch) {
         guard let row = rows([id]).first, let folder = AgentLaunch.folder(for: row.projectId) else { return }
         let undo = remember("Started \(agent.name) on 1 task", .delegate([(id: row.id, agent: row.doer?.agent)]))
         enqueue {
             do {
-                let _: AgentBridgeSettings = try await self.core.request(
-                    "set_agent_bridge_master", ["enabled": JSONValue.bool(true)])
-                let _: AgentBridgeSettings = try await self.core.request(
-                    "set_agent_bridge_agent_enabled",
-                    ["agent": JSONValue.string(agent.bridgeAgent.rawValue), "enabled": .bool(true)])
+                let settings: AgentBridgeAppSettings = try await self.core.request("get_app_settings")
+                guard let bridge = settings.agentBridge, bridge.masterEnabled, bridge.isEnabled(agent.bridgeAgent) else {
+                    self.mutationError = "This run won't show here: turn on \(agent.name) in Settings > Agents."
+                    return
+                }
                 let _: AgentBridgeSettings = try await self.core.request(
                     "authorize_agent_bridge_project", ["selectedPath": JSONValue.string(folder.path)])
             } catch {
-                self.mutationError = "Sona can't follow this run: \(error.localizedDescription)"
+                self.mutationError = "This run won't show here: \(error.localizedDescription)"
             }
         }
         hand([id], to: agent.name, undo: undo) { prompts in
