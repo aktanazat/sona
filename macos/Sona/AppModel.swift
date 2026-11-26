@@ -339,6 +339,8 @@ final class AppModel {
     var paletteShown = false {
         didSet { if !paletteShown { workFocus.picker = nil } }
     }
+    /// The first key of a two-key shortcut, while the second is awaited.
+    var chordHint: String?
     var sidebarHidden = UserDefaults.standard.bool(forKey: "sidebarHidden") {
         didSet { UserDefaults.standard.set(sidebarHidden, forKey: "sidebarHidden") }
     }

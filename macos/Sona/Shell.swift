@@ -40,6 +40,12 @@ struct Shell: View {
                     CommandPalette()
                         .transition(.identity)
                 }
+                if let first = model.chordHint {
+                    ChordHint(first: first)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, 28)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .background(Theme.page.ignoresSafeArea())
