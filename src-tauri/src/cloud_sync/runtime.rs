@@ -102,6 +102,9 @@ pub(crate) mod phone_thoughts;
 #[path = "revision_upload.rs"]
 mod revision_upload;
 
+#[path = "work_today.rs"]
+mod work_today;
+
 const PROTOCOL_AUDIENCE: &str = "sona-companion";
 const PROTOCOL_VERSION: u32 = 1;
 const CRYPTO_VERSION: u32 = 1;
@@ -593,9 +596,11 @@ enum RemoteObject {
     Thought(phone_thoughts::ThoughtImport),
     /// A question from the phone, for the worker that answers it.
     AgentAsk(agent_asks::AgentAsk),
-    /// A device recording this Mac wrote itself, or an answer a Mac wrote to
-    /// the phone. Nothing in either is for this Mac to import, so the
-    /// revision is acknowledged and nothing else happens.
+    /// A decision the phone made about this Mac's work.
+    WorkAction(work_today::WorkAction),
+    /// A device recording this Mac wrote itself, or an answer or a work
+    /// snapshot a Mac wrote for the phone. Nothing in any is for this Mac to
+    /// import, so the revision is acknowledged and nothing else happens.
     OwnDeviceRecording,
 }
 
@@ -1771,6 +1776,7 @@ impl CloudSyncRuntime {
             self.backfill_phone_thoughts(&access).await?;
             dictation_profile::sync(self, &access).await?;
             memory_index::sync(self, &access).await?;
+            work_today::sync(self, &access).await?;
         }
         Ok(())
     }
@@ -3216,6 +3222,10 @@ impl CloudSyncRuntime {
             RemoteObject::AgentAsk(ask) => {
                 self.remember_agent_ask(access, object_id, revision_id, sequence, ask)
             }
+            RemoteObject::WorkAction(action) => {
+                self.apply_work_action(access, object_id, revision_id, sequence, action)
+                    .await
+            }
             RemoteObject::OwnDeviceRecording => {
                 acknowledge_remote_revision(&access.store, object_id, revision_id, sequence)
             }
@@ -3307,7 +3317,21 @@ impl CloudSyncRuntime {
                 .await
                 .map(RemoteObject::AgentAsk);
         }
+        if let Some(action) = work_today::open_action(
+            &*access.keys.vault_root,
+            &manifest_context,
+            &encrypted_manifest,
+        )? {
+            return self
+                .download_work_action(access, object_id, revision_id, &envelope, action)
+                .await
+                .map(RemoteObject::WorkAction);
+        }
         if agent_asks::is_reply(
+            &*access.keys.vault_root,
+            &manifest_context,
+            &encrypted_manifest,
+        ) || work_today::is_snapshot(
             &*access.keys.vault_root,
             &manifest_context,
             &encrypted_manifest,

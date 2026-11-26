@@ -395,6 +395,50 @@ pub(super) fn is_reply(
     open_object_revision_payload(vault_root, &context, ciphertext).is_ok()
 }
 
+/// Fetch the one empty chunk of an object whose manifest says everything,
+/// and verify its writer signed the envelope.
+pub(super) async fn download_empty_object(
+    runtime: &CloudSyncRuntime,
+    access: &CloudAccess,
+    object_id: &str,
+    revision_id: &str,
+    envelope: &ObjectRevisionEnvelope,
+    source_format: &str,
+) -> Result<(), CloudRuntimeError> {
+    let signing_key = runtime.writer_signing_key(access, envelope).await?;
+    let descriptors = runtime
+        .download_chunks(access, object_id, revision_id, envelope, |index, bytes| {
+            let plaintext = open_object_revision_payload(
+                &*access.keys.vault_root,
+                &ObjectRevisionCryptoContext {
+                    vault_id: &access.state.vault_id,
+                    object_id,
+                    revision_id,
+                    index,
+                    total: u64::from(envelope.chunk_count),
+                    content_kind: ObjectContentKind::Chunk,
+                    source_format,
+                },
+                &bytes,
+            )
+            .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
+            if plaintext.is_empty() {
+                Ok(())
+            } else {
+                Err(CloudRuntimeError::IntegrityFailure)
+            }
+        })
+        .await?;
+    verify_writer_signature(
+        &access.state.vault_id,
+        object_id,
+        revision_id,
+        envelope,
+        &descriptors,
+        &signing_key,
+    )
+}
+
 impl CloudSyncRuntime {
     fn edit_asks(
         &self,
@@ -430,38 +474,15 @@ impl CloudSyncRuntime {
         ask: AgentAsk,
     ) -> Result<AgentAsk, CloudRuntimeError> {
         ask.validate(envelope, &access.state.device_id)?;
-        let signing_key = self.writer_signing_key(access, envelope).await?;
-        let descriptors = self
-            .download_chunks(access, object_id, revision_id, envelope, |index, bytes| {
-                let plaintext = open_object_revision_payload(
-                    &*access.keys.vault_root,
-                    &ObjectRevisionCryptoContext {
-                        vault_id: &access.state.vault_id,
-                        object_id,
-                        revision_id,
-                        index,
-                        total: u64::from(envelope.chunk_count),
-                        content_kind: ObjectContentKind::Chunk,
-                        source_format: ASK_SOURCE_FORMAT,
-                    },
-                    &bytes,
-                )
-                .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-                if plaintext.is_empty() {
-                    Ok(())
-                } else {
-                    Err(CloudRuntimeError::IntegrityFailure)
-                }
-            })
-            .await?;
-        verify_writer_signature(
-            &access.state.vault_id,
+        download_empty_object(
+            self,
+            access,
             object_id,
             revision_id,
             envelope,
-            &descriptors,
-            &signing_key,
-        )?;
+            ASK_SOURCE_FORMAT,
+        )
+        .await?;
         Ok(ask)
     }
 
