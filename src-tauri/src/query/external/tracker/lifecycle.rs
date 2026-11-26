@@ -4,8 +4,8 @@
 
 use super::organize::sent_before;
 use super::{
-    handle, iso_day, now_ms, pick, refusal, task_ref, Board, ExternalWorkRef, TaskRef, TasksArgs,
-    Tracker, WorkAnswer, WriteArgs,
+    handle, iso_day, now_ms, pick, refusal, task_ref, Board, ExternalWorkRef, MeetingFence,
+    TaskRef, TasksArgs, Tracker, WorkAnswer, WriteArgs,
 };
 use crate::planning;
 use crate::planning::work::agents;
@@ -1767,9 +1767,24 @@ impl Tracker<'_> {
         })
     }
 
+    /// Whether a notice's subject stays out of an outside reader's inbox: a
+    /// personal note, or a meeting the fence hides.
+    fn hidden_subject(
+        subject: &NoticeSubject,
+        personal: &std::collections::HashSet<String>,
+        meetings: &MeetingFence,
+    ) -> bool {
+        match subject.kind {
+            SubjectKind::Note => personal.contains(&subject.id),
+            SubjectKind::Meeting => meetings.hides_meeting(&subject.id),
+            SubjectKind::Project | SubjectKind::Initiative | SubjectKind::View => false,
+        }
+    }
+
     fn notices(
         &self,
         board: &Board,
+        meetings: &MeetingFence,
         shown: Shown,
         filter: &InboxFilter,
     ) -> Result<Vec<ExternalNotification>, ExternalError> {
@@ -1777,9 +1792,10 @@ impl Tracker<'_> {
             let mut found = inbox::filtered(conn, shown, filter, now_ms())?;
             let personal = crate::scratchpad::personal::personal_ids(conn)?;
             found.retain(|notice| {
-                !notice.subject.as_ref().is_some_and(|subject| {
-                    subject.kind == SubjectKind::Note && personal.contains(&subject.id)
-                })
+                !notice
+                    .subject
+                    .as_ref()
+                    .is_some_and(|subject| Self::hidden_subject(subject, &personal, meetings))
             });
             inbox::name_notes(conn, &mut found)?;
             Ok(found)
@@ -1796,6 +1812,7 @@ impl Tracker<'_> {
     fn rows(
         &self,
         board: &Board,
+        meetings: &MeetingFence,
         shown: Shown,
         filter: &InboxFilter,
     ) -> Result<Vec<ExternalInboxRow>, ExternalError> {
@@ -1803,9 +1820,10 @@ impl Tracker<'_> {
             let mut found = inbox::rows_of(conn, shown, filter, now_ms())?;
             let personal = crate::scratchpad::personal::personal_ids(conn)?;
             found.retain(|row| {
-                !row.lead.subject.as_ref().is_some_and(|subject| {
-                    subject.kind == SubjectKind::Note && personal.contains(&subject.id)
-                })
+                !row.lead
+                    .subject
+                    .as_ref()
+                    .is_some_and(|subject| Self::hidden_subject(subject, &personal, meetings))
             });
             Ok(found)
         })
@@ -1827,9 +1845,11 @@ impl Tracker<'_> {
 
     pub(super) async fn inbox(&self, args: &InboxArgs) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
+        let meetings = MeetingFence::read(self.meetings).await?;
         let unread = self
             .notices(
                 &board,
+                &meetings,
                 Shown {
                     unread_only: true,
                     ..Shown::default()
@@ -1861,9 +1881,12 @@ impl Tracker<'_> {
             search: args.search.clone(),
         };
         let (notifications, rows) = if shown.by_task {
-            (Vec::new(), Some(self.rows(&board, shown, &filter)?))
+            (
+                Vec::new(),
+                Some(self.rows(&board, &meetings, shown, &filter)?),
+            )
         } else {
-            (self.notices(&board, shown, &filter)?, None)
+            (self.notices(&board, &meetings, shown, &filter)?, None)
         };
         Ok(WorkAnswer::Inbox(ExternalWorkInbox {
             schema_version: QUERY_SCHEMA_VERSION,
@@ -1951,6 +1974,7 @@ impl Tracker<'_> {
         args: &InboxMarkArgs,
     ) -> Result<WorkAnswer, ExternalError> {
         let board = self.board().await?;
+        let meetings = MeetingFence::read(self.meetings).await?;
         let how = match args.mark.as_str() {
             "read" => Mark::Read,
             "unread" => Mark::Unread,
@@ -1970,6 +1994,7 @@ impl Tracker<'_> {
         };
         let every = self.notices(
             &board,
+            &meetings,
             Shown {
                 unread_only: false,
                 snoozed: true,
@@ -2166,5 +2191,62 @@ mod tests {
         let first = run(&conn, &id, "Launch").expect("the first run");
         assert_eq!(run(&conn, &id, "Launch").expect("the retry"), first);
         assert!(run(&conn, &id, "Other").is_err());
+    }
+
+    #[test]
+    fn a_notice_about_a_meeting_the_fence_hides_stays_out() {
+        use super::{MeetingFence, NoticeSubject, SubjectKind, Tracker};
+        use crate::meeting::store::workflow_core_tests::{meeting, store};
+        let (_directory, meetings) = store();
+        let launch = meeting(&meetings, "Launch sync", 1_000);
+        meetings
+            .remember_calendar_facts(
+                launch,
+                &crate::meeting::detection::machine::CalendarEventSummary {
+                    event_key: "launch#1".to_owned(),
+                    series_key: "launch".to_owned(),
+                    title: "Launch sync".to_owned(),
+                    attendee_count: 2,
+                    start_utc_ms: 1_000,
+                    end_utc_ms: 2_000,
+                    attendees: Vec::new(),
+                    notes: None,
+                    calendar_name: None,
+                    location: None,
+                    url: None,
+                    place: None,
+                },
+            )
+            .expect("the calendar facts");
+        let about = |id: String| NoticeSubject {
+            kind: SubjectKind::Meeting,
+            id,
+            name: Some("Launch sync".to_owned()),
+        };
+        let hidden = |subject: &NoticeSubject, fence: &MeetingFence| {
+            Tracker::hidden_subject(subject, &std::collections::HashSet::new(), fence)
+        };
+        let launch_notice = about(launch.uuid().to_string());
+
+        let open = MeetingFence::of_store(Some(&meetings));
+        assert!(hidden(&launch_notice, &MeetingFence::of_store(None)));
+        assert!(!hidden(&launch_notice, &open));
+        assert!(hidden(
+            &about(Uuid::new_v4().to_string()),
+            &MeetingFence::of_store(Some(&meetings))
+        ));
+        meetings
+            .set_series_remote_opt_out(
+                &crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest {
+                    operation_id: crate::meeting::types::MeetingOperationId::new(),
+                    series_key: "launch".to_owned(),
+                    remote_intelligence_opt_out: true,
+                    expected_revision: 0,
+                },
+                3_000,
+            )
+            .expect("keep the series here");
+        let kept = MeetingFence::of_store(Some(&meetings));
+        assert!(hidden(&launch_notice, &kept));
     }
 }
