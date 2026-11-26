@@ -7,6 +7,7 @@ extension WorkSubjectKind {
         case .initiative: "initiative"
         case .note: "note"
         case .view: "view"
+        case .meeting: "meeting"
         case .unknown: "item"
         }
     }
@@ -17,6 +18,7 @@ extension WorkSubjectKind {
         case .initiative: "scope"
         case .note: "square.and.pencil"
         case .view: "line.3.horizontal.decrease.circle"
+        case .meeting: "person.2"
         case .unknown: "questionmark.circle"
         }
     }
@@ -27,13 +29,14 @@ extension WorkSubjectKind {
         case .project: "its updates and status changes"
         case .view: "tasks that join it, finish or are canceled"
         case .note: "agents' edits to it"
-        case .initiative, .unknown: "what changes"
+        case .initiative, .meeting, .unknown: "what changes"
         }
     }
 }
 
 extension AppModel {
-    /// A project's page, an initiative's, a note, or Tasks on a saved view.
+    /// A project's page, an initiative's, a note, Tasks on a saved view, or
+    /// a meeting's page.
     func openSubject(_ subject: WorkNoticeSubject) {
         switch subject.kind {
         case .project:
@@ -47,6 +50,8 @@ extension AppModel {
             go(.tasks)
             workFocus.open(nil, in: .tasks)
             workFocus.switchTab(.view(subject.id))
+        case .meeting:
+            openMeeting(subject.id)
         case .unknown:
             break
         }

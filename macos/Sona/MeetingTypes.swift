@@ -1030,6 +1030,17 @@ struct MeetingGeneratedArtifacts: Decodable {
     let leftOut: [MeetingLeftOutSpan]?
 }
 
+/// `DecisionDrift`: an earlier meeting's decision that the decision at
+/// `decision` in the open meeting's notes changes, from
+/// `meeting_decision_drift`.
+struct MeetingDecisionDrift: Decodable {
+    let decision: Int
+    let earlierSessionId: MeetingSessionId
+    let earlierTitle: String
+    let earlierStartedAtUtcMs: Int64?
+    let earlier: ArtifactCitedText
+}
+
 struct MeetingNoteEditSource: Codable, Equatable, Identifiable {
     let sessionId: MeetingSessionId
     let artifactId: MeetingArtifactId

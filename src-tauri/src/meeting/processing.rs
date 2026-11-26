@@ -41,6 +41,7 @@ use super::prompt_types::{
 use super::relay_generator::RelayTextGenerator;
 use super::store::meeting_maybe::HeardVoice;
 use super::store::recall::RecallMemory;
+use super::store::series::{DriftRef, EarlierDecisions};
 use super::store::voice_identity::{
     DiarizationEvidenceKind, DiarizationEvidenceSpanInput, VoiceEnrollmentEvidence,
     VoiceEnrollmentRecord,
@@ -802,6 +803,14 @@ const fn choose_text_engine(facts: TextEngineFacts) -> TextEngineChoice {
     }
 }
 
+/// Whether an earlier meeting's decisions may be compared, on `route`, with
+/// those of a meeting whose notes are being written there. A meeting kept on
+/// this Mac goes only to the engine on this Mac, and only for a meeting kept
+/// here too, since its words are saved on the newer meeting's notes.
+const fn may_compare(earlier_kept: bool, here_kept: bool, route: ProcessingRoute) -> bool {
+    !earlier_kept || (here_kept && matches!(route, ProcessingRoute::Local))
+}
+
 /// The engine on this Mac as one reading of the settings, so the generator
 /// a choice is made on and the state reported for that choice describe the
 /// same engine. A settings write during a slow endpoint probe otherwise
@@ -1452,6 +1461,49 @@ impl MeetingProcessingService {
         route == ProcessingRoute::Local
             || (self.remote_intelligence_enabled()
                 && !self.series_opted_out_of_remote(store, session_id))
+    }
+
+    /// The decisions in a meeting's new notes that change one an earlier
+    /// meeting of its series, or of a project it is filed to, made, asked of
+    /// the engine that wrote the notes. An earlier meeting goes only where
+    /// [`may_compare`] lets it. Apple Intelligence is not asked: on 22
+    /// made-up pairs it flagged 4 of 9 unrelated ones that shared a word,
+    /// and 6 of 9 when asked to name what both decide (`drift_probe`).
+    fn decision_drift(
+        &self,
+        store: &MeetingStore,
+        generator: &dyn MeetingTextGenerator,
+        session_id: MeetingSessionId,
+        route: ProcessingRoute,
+        decisions: &[CitedArtifactText],
+        check: &dyn Fn() -> Result<(), RunFailure>,
+    ) -> Result<Vec<DriftRef>, RunFailure> {
+        if decisions.is_empty() || generator.model_id() == AppleIntelligenceGenerator.model_id() {
+            return Ok(Vec::new());
+        }
+        let linked =
+            crate::planning::work::meetings_sharing_a_project(self.app.as_ref(), session_id);
+        let read = crate::query::KeptLocal::read(store).and_then(|kept| {
+            store
+                .earlier_decisions(session_id, &linked, complete_reading::DRIFT_MEETINGS_MAX)
+                .map(|earlier| (kept, earlier))
+        });
+        let (kept, earlier) = match read {
+            Ok(read) => read,
+            Err(error) => {
+                log::warn!("Earlier decisions for {session_id:?} could not be read: {error:?}");
+                return Ok(Vec::new());
+            }
+        };
+        let here = kept.hides(session_id);
+        let earlier: Vec<EarlierDecisions> = earlier
+            .into_iter()
+            .filter(|meeting| may_compare(kept.hides(meeting.session_id), here, route))
+            .collect();
+        let may_send = |earlier: MeetingSessionId| {
+            route == ProcessingRoute::Local || !self.series_opted_out_of_remote(store, earlier)
+        };
+        complete_reading::decision_drift(generator, decisions, &earlier, &may_send, check)
     }
 
     /// Park every run at its next checkpoint until the returned gate drops.
@@ -3260,6 +3312,14 @@ impl MeetingProcessingService {
             &mut content,
             checkpoint,
         )?;
+        let drift = self.decision_drift(
+            store,
+            generator.as_ref(),
+            session_id,
+            route,
+            &content.decisions,
+            &checkpoint,
+        )?;
         checkpoint()?;
         let artifact = store
             .store_artifact_revision(ArtifactRevisionInput {
@@ -3274,6 +3334,13 @@ impl MeetingProcessingService {
                 generated_at_utc_ms: utc_now_ms(),
             })
             .map_err(RunFailure::from)?;
+        let changed = match store.record_decision_drift(artifact.artifact_id, &drift) {
+            Ok(()) => drift.len(),
+            Err(error) => {
+                log::warn!("Changed decisions of {session_id:?} could not be kept: {error:?}");
+                0
+            }
+        };
         // Two passes read the revision that just landed, in this order and
         // only here.
         //
@@ -3299,6 +3366,7 @@ impl MeetingProcessingService {
             log::warn!("Could not carry loops forward into {session_id:?}: {error:?}");
         }
         crate::planning::work::take_in(self.app.as_ref(), store, session_id);
+        crate::planning::work::decisions_changed(self.app.as_ref(), store, session_id, changed);
         crate::planning::work::watch::after_meeting(self.app.as_ref(), store, session_id);
         // Third pass over the same landed revision: the summary and transcript
         // a reader will search for are final now, so this is where the meeting
@@ -11781,6 +11849,212 @@ pub(crate) mod tests {
             .find(|thread| thread.topic == "Support")
             .expect("the support thread");
         assert_eq!(support.state, LedgerThreadState::Decided);
+    }
+
+    /// An engine that finds every decision it is shown changed, or none
+    /// when `unrelated`, runs `on_ask` on each request, and keeps what it
+    /// was shown.
+    #[derive(Default)]
+    struct DriftWitness {
+        id: &'static str,
+        unrelated: bool,
+        on_ask: Option<Box<dyn Fn() + Send + Sync>>,
+        shown: Mutex<Vec<String>>,
+    }
+
+    impl MeetingTextGenerator for DriftWitness {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            self.id
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            evidence: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            if let Some(on_ask) = &self.on_ask {
+                on_ask();
+            }
+            self.shown
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(evidence.to_owned());
+            Ok(if self.unrelated {
+                r#"{"relation": "unrelated"}"#
+            } else {
+                r#"{"relation": "changes"}"#
+            }
+            .to_owned())
+        }
+    }
+
+    /// A meeting of the "launch" series at `start_utc_ms`, with `decision`
+    /// in its notes when there is one.
+    fn launch_meeting(
+        store: &MeetingStore,
+        start_utc_ms: i64,
+        decision: Option<&str>,
+    ) -> MeetingSessionId {
+        use crate::meeting::store::workflow_core_tests::{current_artifact, meeting};
+        let session_id = meeting(store, "Launch sync", start_utc_ms);
+        store
+            .remember_calendar_facts(
+                session_id,
+                &crate::meeting::detection::machine::CalendarEventSummary {
+                    event_key: format!("launch#{start_utc_ms}"),
+                    series_key: "launch".to_owned(),
+                    title: "Launch sync".to_owned(),
+                    attendee_count: 2,
+                    start_utc_ms,
+                    end_utc_ms: start_utc_ms + 500,
+                    attendees: Vec::new(),
+                    notes: None,
+                    calendar_name: None,
+                    location: None,
+                    url: None,
+                    place: None,
+                },
+            )
+            .expect("the calendar facts");
+        if let Some(decision) = decision {
+            current_artifact(
+                store,
+                session_id,
+                &serde_json::json!({"decisions": [{"text": decision, "citations": []}]}),
+                start_utc_ms,
+            );
+        }
+        session_id
+    }
+
+    fn keep_launch_here(store: &MeetingStore) {
+        store
+            .set_series_remote_opt_out(
+                &crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest {
+                    operation_id: MeetingOperationId::new(),
+                    series_key: "launch".to_owned(),
+                    remote_intelligence_opt_out: true,
+                    expected_revision: 0,
+                },
+                3_000,
+            )
+            .expect("keep the series here");
+    }
+
+    #[test]
+    fn a_series_kept_here_mid_comparison_reaches_the_relay_no_more() {
+        let (_directory, store) = crate::meeting::store::workflow_core_tests::store();
+        launch_meeting(&store, 1_000, Some("Launch moves to March 3"));
+        launch_meeting(&store, 1_500, Some("Launch moves to March 5"));
+        let now = launch_meeting(&store, 2_000, None);
+        let keeping = Arc::clone(&store);
+        let witness = DriftWitness {
+            unrelated: true,
+            on_ask: Some(Box::new(move || keep_launch_here(&keeping))),
+            ..DriftWitness::default()
+        };
+        let decisions = [CitedArtifactText {
+            text: "Launch moves to April 9".to_owned(),
+            citations: Vec::new(),
+        }];
+
+        MeetingProcessingService::new(None)
+            .decision_drift(
+                &store,
+                &witness,
+                now,
+                ProcessingRoute::Relay,
+                &decisions,
+                &|| Ok(()),
+            )
+            .expect("drift");
+
+        let shown = witness
+            .shown
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(shown.len(), 1, "{shown:#?}");
+        assert!(shown[0].contains("March 5"));
+    }
+
+    #[test]
+    fn a_meeting_kept_on_this_mac_is_compared_only_by_the_engine_here() {
+        let (_directory, store) = crate::meeting::store::workflow_core_tests::store();
+        let earlier = launch_meeting(&store, 1_000, Some("Launch moves to March 3"));
+        let now = launch_meeting(&store, 2_000, None);
+        let service = MeetingProcessingService::new(None);
+        let witness = DriftWitness::default();
+        let decisions = [CitedArtifactText {
+            text: "Launch moves to April 9".to_owned(),
+            citations: Vec::new(),
+        }];
+        let drift = |route| {
+            service
+                .decision_drift(&store, &witness, now, route, &decisions, &|| Ok(()))
+                .expect("drift")
+        };
+        let shown = || {
+            witness
+                .shown
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+        };
+
+        let open = drift(ProcessingRoute::Relay);
+        assert_eq!(open.len(), 1, "compared on the relay");
+        assert_eq!(open[0].earlier_session_id, earlier);
+        assert_eq!(shown(), 1);
+
+        keep_launch_here(&store);
+        assert!(drift(ProcessingRoute::Relay).is_empty());
+        assert_eq!(shown(), 1, "kept: never sent to the relay");
+
+        assert_eq!(drift(ProcessingRoute::Local).len(), 1);
+        assert_eq!(shown(), 2, "kept: compared on this Mac");
+
+        let apple = DriftWitness {
+            id: AppleIntelligenceGenerator.model_id(),
+            ..DriftWitness::default()
+        };
+        let asked = service
+            .decision_drift(
+                &store,
+                &apple,
+                now,
+                ProcessingRoute::Local,
+                &decisions,
+                &|| Ok(()),
+            )
+            .expect("drift");
+        assert!(asked.is_empty(), "Apple Intelligence is not asked");
+        assert!(apple.shown.lock().expect("the record").is_empty());
+    }
+
+    #[test]
+    fn a_kept_meeting_is_never_compared_beside_one_that_is_not() {
+        for route in [ProcessingRoute::Local, ProcessingRoute::Relay] {
+            assert!(may_compare(false, false, route));
+            assert!(may_compare(false, true, route));
+            assert!(!may_compare(true, false, route));
+        }
+        assert!(may_compare(true, true, ProcessingRoute::Local));
+        assert!(!may_compare(true, true, ProcessingRoute::Relay));
     }
 }
 

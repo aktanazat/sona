@@ -481,6 +481,82 @@ pub(crate) fn take_in(app: Option<&AppHandle>, store: &MeetingStore, session_id:
     loops::meeting_ended(app, &history, store, session_id);
 }
 
+/// The meetings filed to a project this one is filed to, on the project or
+/// on one of its tasks or milestones. None without the tracker.
+pub(crate) fn meetings_sharing_a_project(
+    app: Option<&AppHandle>,
+    session_id: MeetingSessionId,
+) -> Vec<MeetingSessionId> {
+    let Some(history) = app.and_then(|app| app.try_state::<Arc<HistoryManager>>()) else {
+        return Vec::new();
+    };
+    let meeting_id = session_id.uuid().to_string();
+    match history.with_connection(|conn| sharing_a_project(conn, &meeting_id)) {
+        Ok(ids) => ids
+            .iter()
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok())
+            .map(MeetingSessionId::from_uuid)
+            .collect(),
+        Err(error) => {
+            log::warn!("The meetings sharing a project could not be read: {error:#}");
+            Vec::new()
+        }
+    }
+}
+
+fn sharing_a_project(conn: &Connection, meeting_id: &str) -> StorageResult<Vec<String>> {
+    let mut statement = conn.prepare_cached(
+        "WITH filed AS MATERIALIZED (
+            SELECT l.source_id AS meeting_id,
+                   CASE l.target_kind
+                       WHEN 'project' THEN l.target_id
+                       WHEN 'task' THEN (SELECT project_id FROM planning_tasks WHERE id = l.target_id)
+                       WHEN 'milestone' THEN
+                           (SELECT project_id FROM planning_milestones WHERE id = l.target_id)
+                   END AS project_id
+              FROM planning_evidence_links l
+             WHERE l.source_kind = 'meeting')
+         SELECT DISTINCT other.meeting_id
+           FROM filed mine JOIN filed other ON other.project_id = mine.project_id
+          WHERE mine.meeting_id = ?1 AND other.meeting_id != ?1",
+    )?;
+    let ids = statement
+        .query_map([meeting_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(ids)
+}
+
+/// Brings the inbox's notice that a meeting's notes changed `changed`
+/// decisions earlier meetings made up to date; none takes it back.
+pub(crate) fn decisions_changed(
+    app: Option<&AppHandle>,
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    changed: usize,
+) {
+    let Some(app) = app else { return };
+    let Some(history) = app.try_state::<Arc<HistoryManager>>() else {
+        return;
+    };
+    let title = match changed {
+        0 => String::new(),
+        _ => match store.session_snapshot(session_id) {
+            Ok(snapshot) => snapshot.title,
+            Err(error) => {
+                log::warn!("A meeting with changed decisions could not be read: {error:?}");
+                return;
+            }
+        },
+    };
+    let meeting_id = session_id.uuid().to_string();
+    match history.with_connection(|conn| {
+        inbox::decisions_changed(conn, &meeting_id, &title, changed, now_ms())
+    }) {
+        Ok(()) => tell(app, &Effects::default()),
+        Err(error) => log::warn!("A meeting's changed decisions missed the inbox: {error:#}"),
+    }
+}
+
 /// Moves the tracker after a loop moved in its meeting, and returns the
 /// other loops that moved with it. The meeting's own change already stands,
 /// so a failure here is logged and left to the next start's reconcile.

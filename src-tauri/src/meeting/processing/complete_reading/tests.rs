@@ -3168,4 +3168,187 @@ mod tests {
             "{text}"
         );
     }
+
+    /// A judge of two decisions that finds the launch date changed and the
+    /// billing database kept, and every other pair unrelated, keeping each
+    /// comparison it was asked.
+    #[derive(Default)]
+    struct DriftJudge {
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl MeetingTextGenerator for DriftJudge {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "drift-judge"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+        fn generate(
+            &self,
+            prompt: &str,
+            pack: &str,
+            _: i32,
+            shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            assert_eq!((prompt, shape), (DECISION_DRIFT, ReplyShape::Json));
+            self.asked
+                .lock()
+                .expect("the judge's record")
+                .push(pack.to_owned());
+            let relation = if pack.contains("March 3") && pack.contains("April 9") {
+                "changes"
+            } else if pack.matches("Postgres").count() == 2 {
+                "same"
+            } else {
+                "unrelated"
+            };
+            Ok(format!(r#"{{"relation": "{relation}"}}"#))
+        }
+    }
+
+    fn decided(text: &str) -> CitedArtifactText {
+        CitedArtifactText {
+            text: text.to_owned(),
+            citations: Vec::new(),
+        }
+    }
+
+    fn earlier_meeting(decisions: &[&str]) -> EarlierDecisions {
+        EarlierDecisions {
+            session_id: MeetingSessionId::from_uuid(uuid::Uuid::new_v4()),
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            decisions: decisions.iter().map(|text| decided(text)).collect(),
+        }
+    }
+
+    fn sent_anywhere(_: MeetingSessionId) -> bool {
+        true
+    }
+
+    #[test]
+    fn a_changed_decision_is_flagged_and_a_kept_or_unrelated_one_is_not() {
+        let earlier = earlier_meeting(&[
+            "Launch moves to March 3",
+            "Billing stays on Postgres",
+            "Hire a contractor for the logo",
+        ]);
+        let decisions = [
+            decided("Order new office chairs"),
+            decided("Launch moves to April 9"),
+            decided("Billing runs on Postgres"),
+            decided("Billing review moves to Friday"),
+        ];
+        let judge = DriftJudge::default();
+
+        let drift = decision_drift(
+            &judge,
+            &decisions,
+            std::slice::from_ref(&earlier),
+            &sent_anywhere,
+            &|| Ok(()),
+        )
+        .expect("drift");
+
+        assert_eq!(
+            drift,
+            vec![DriftRef {
+                decision: 1,
+                earlier_session_id: earlier.session_id,
+                earlier_artifact_id: earlier.artifact_id.clone(),
+                earlier_decision: 0,
+            }]
+        );
+        let asked = judge.asked.lock().expect("the judge's record");
+        assert_eq!(asked.len(), 4, "{asked:#?}");
+        assert!(
+            !asked
+                .iter()
+                .any(|pack| pack.contains("office chairs") || pack.contains("logo")),
+            "a pair about different things never reaches the model: {asked:#?}"
+        );
+    }
+
+    #[test]
+    fn comparisons_stop_at_their_bounds() {
+        let launch: Vec<String> = (1..=30)
+            .map(|day| format!("Launch moves to day {day}"))
+            .collect();
+        let launch: Vec<&str> = launch.iter().map(String::as_str).collect();
+        let earlier: Vec<_> = (0..DRIFT_MEETINGS_MAX)
+            .map(|_| earlier_meeting(&launch))
+            .collect();
+        let decisions: Vec<_> = (31..=50)
+            .map(|day| decided(&format!("Launch moves to day {day}")))
+            .collect();
+        let judge = DriftJudge::default();
+
+        let drift = decision_drift(&judge, &decisions, &earlier, &sent_anywhere, &|| Ok(()))
+            .expect("drift");
+
+        assert!(drift.is_empty());
+        let asked = judge.asked.lock().expect("the judge's record");
+        assert_eq!(asked.len(), DRIFT_ASKS_MAX);
+        for day in 31..=50 {
+            let new = format!("New decision: Launch moves to day {day}\n");
+            assert!(
+                asked.iter().filter(|pack| pack.contains(&new)).count() <= DRIFT_ASKS_PER_DECISION
+            );
+        }
+        let unread: Vec<String> = (13..=30)
+            .map(|day| format!("Earlier decision: Launch moves to day {day}\n"))
+            .collect();
+        assert!(
+            !asked
+                .iter()
+                .any(|pack| unread.iter().any(|earlier| pack.contains(earlier))),
+            "only the first decisions of each earlier meeting are read"
+        );
+    }
+
+    #[test]
+    fn the_same_words_again_ask_nothing() {
+        let earlier = earlier_meeting(&["Launch moves to March 3"]);
+        let judge = DriftJudge::default();
+
+        let drift = decision_drift(
+            &judge,
+            &[decided("launch moves to March 3.")],
+            std::slice::from_ref(&earlier),
+            &sent_anywhere,
+            &|| Ok(()),
+        )
+        .expect("drift");
+
+        assert!(drift.is_empty());
+        assert!(judge.asked.lock().expect("the judge's record").is_empty());
+    }
+
+    #[test]
+    fn a_meeting_that_may_not_be_sent_is_never_asked_about() {
+        let kept = earlier_meeting(&["Launch moves to March 3"]);
+        let kept_id = kept.session_id;
+        let open = earlier_meeting(&["Launch moves to March 5"]);
+        let judge = DriftJudge::default();
+
+        let drift = decision_drift(
+            &judge,
+            &[decided("Launch moves to April 9")],
+            &[kept, open],
+            &|meeting| meeting != kept_id,
+            &|| Ok(()),
+        )
+        .expect("drift");
+
+        assert!(drift.is_empty());
+        let asked = judge.asked.lock().expect("the judge's record");
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].contains("March 5"), "{asked:#?}");
+    }
 }

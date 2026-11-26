@@ -1314,6 +1314,22 @@ pub struct GeneratedMeetingArtifacts {
     pub left_out: Vec<LeftOutSpan>,
 }
 
+/// An earlier meeting's decision that a decision in a meeting's notes
+/// changes, as read for the review page. Stored only as a reference beside
+/// the notes (`meeting_decision_drift`), so the earlier words never travel
+/// with the newer meeting's notes and are left out once the earlier meeting
+/// is gone, rewritten or kept on this Mac while the newer one is not.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct DecisionDrift {
+    /// The changing decision's place in the notes' `decisions`.
+    pub decision: u32,
+    pub earlier_session_id: MeetingSessionId,
+    pub earlier_title: String,
+    pub earlier_started_at_utc_ms: Option<i64>,
+    /// The earlier decision as its notes wrote it, with the lines it cites.
+    pub earlier: CitedArtifactText,
+}
+
 /// One stretch of a meeting the notes could not read, and why. The offsets
 /// are absent for a transcript whose lines carry no times.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

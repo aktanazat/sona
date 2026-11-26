@@ -1661,6 +1661,20 @@ static MIGRATIONS: &[M] = &[
             'person_saved'
         ",
     )),
+    // Which decisions in a notes revision change one an earlier meeting made:
+    // only where the earlier decision sits, never its words, so they stay
+    // out of everything that carries the newer meeting's notes.
+    M::up(
+        "CREATE TABLE meeting_decision_drift (
+            artifact_id TEXT NOT NULL
+                REFERENCES meeting_artifact_revisions(artifact_id) ON DELETE CASCADE,
+            decision INTEGER NOT NULL CHECK (decision >= 0),
+            earlier_session_id TEXT NOT NULL,
+            earlier_artifact_id TEXT NOT NULL,
+            earlier_decision INTEGER NOT NULL CHECK (earlier_decision >= 0),
+            PRIMARY KEY (artifact_id, decision)
+        );",
+    ),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

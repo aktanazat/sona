@@ -57,10 +57,13 @@ pub enum NotificationKind {
     Housekeeping,
     /// A followed task's last open blocker finished; `to` is the status it finished in.
     Unblocked,
+    /// A meeting's notes changed decisions earlier meetings made; the
+    /// subject is the meeting, `from` its title and `to` how many changed.
+    Decision,
 }
 
 impl NotificationKind {
-    pub(crate) const ALL: [Self; 15] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::Status,
         Self::Comment,
         Self::Mention,
@@ -76,6 +79,7 @@ impl NotificationKind {
         Self::Note,
         Self::Housekeeping,
         Self::Unblocked,
+        Self::Decision,
     ];
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -108,6 +112,7 @@ crate::planning::types::sql_enum!(NotificationKind {
     Note => "note",
     Housekeeping => "housekeeping",
     Unblocked => "unblocked",
+    Decision => "decision",
 });
 
 /// Notices without a task, kinds for a field change, Sona's own posts
@@ -435,6 +440,78 @@ CREATE TRIGGER planning_notifications_view_delete AFTER DELETE ON planning_views
     DELETE FROM planning_notifications WHERE subject_kind = 'view' AND subject_id = old.id;
 END;";
 
+/// Adds the decision kind and notices about a meeting; every other row and
+/// trigger is kept as it was. The note trigger is made again by running
+/// `NOTE_NOTICES_MIGRATION` once more.
+pub(crate) const DECISION_NOTICES_MIGRATION: &str =
+    "DROP TRIGGER IF EXISTS planning_task_lifecycle_delete;
+DROP TRIGGER IF EXISTS planning_notifications_run_delete;
+DROP TRIGGER IF EXISTS planning_notifications_project_delete;
+DROP TRIGGER IF EXISTS planning_notifications_initiative_delete;
+DROP TRIGGER IF EXISTS planning_notifications_view_delete;
+DROP TRIGGER IF EXISTS planning_notifications_note_delete;
+CREATE TABLE planning_notifications_next (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT,
+    kind TEXT NOT NULL CHECK(kind IN ('status', 'comment', 'mention', 'assigned', 'changed',
+        'reminder', 'due', 'automation', 'digest', 'question', 'project', 'view', 'note',
+        'housekeeping', 'unblocked', 'decision')),
+    actor TEXT NOT NULL CHECK(actor IN ('sona', 'agent')),
+    agent TEXT CHECK(agent IS NULL OR length(trim(agent)) > 0),
+    activity_id TEXT,
+    comment_id TEXT,
+    field TEXT,
+    run_id TEXT,
+    event_key TEXT UNIQUE,
+    from_value TEXT,
+    to_value TEXT,
+    digest TEXT,
+    subject_kind TEXT CHECK(subject_kind IN ('project', 'initiative', 'note', 'view', 'meeting')),
+    subject_id TEXT,
+    created_at_ms INTEGER NOT NULL,
+    read_at_ms INTEGER,
+    snoozed_until_ms INTEGER,
+    archived_at_ms INTEGER,
+    CHECK((subject_kind IS NULL) = (subject_id IS NULL)),
+    CHECK((kind = 'digest') = (digest IS NOT NULL)),
+    CHECK(task_id IS NOT NULL OR run_id IS NOT NULL OR subject_id IS NOT NULL
+        OR kind IN ('digest', 'housekeeping'))
+);
+INSERT INTO planning_notifications_next (rowid, id, task_id, kind, actor, agent, activity_id,
+        comment_id, field, run_id, event_key, from_value, to_value, digest, subject_kind,
+        subject_id, created_at_ms, read_at_ms, snoozed_until_ms, archived_at_ms)
+    SELECT rowid, id, task_id, kind, actor, agent, activity_id, comment_id, field, run_id,
+        event_key, from_value, to_value, digest, subject_kind, subject_id, created_at_ms,
+        read_at_ms, snoozed_until_ms, archived_at_ms
+    FROM planning_notifications;
+DROP TABLE planning_notifications;
+ALTER TABLE planning_notifications_next RENAME TO planning_notifications;
+CREATE INDEX planning_notifications_created ON planning_notifications(created_at_ms);
+CREATE INDEX planning_notifications_task ON planning_notifications(task_id);
+CREATE INDEX planning_notifications_subject ON planning_notifications(subject_kind, subject_id);
+CREATE TRIGGER planning_task_lifecycle_delete AFTER DELETE ON planning_tasks BEGIN
+    DELETE FROM planning_task_versions WHERE task_id = old.id;
+    DELETE FROM planning_task_subscriptions WHERE task_id = old.id;
+    DELETE FROM planning_notifications WHERE task_id = old.id;
+    DELETE FROM planning_favorites WHERE kind = 'task' AND target_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_run_delete AFTER DELETE ON planning_loop_runs BEGIN
+    DELETE FROM planning_notifications WHERE run_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_project_delete AFTER DELETE ON planning_projects BEGIN
+    DELETE FROM planning_follows WHERE kind = 'project' AND target_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'project' AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_initiative_delete AFTER DELETE ON planning_initiatives
+BEGIN
+    DELETE FROM planning_notifications WHERE subject_kind = 'initiative'
+        AND subject_id = old.id;
+END;
+CREATE TRIGGER planning_notifications_view_delete AFTER DELETE ON planning_views BEGIN
+    DELETE FROM planning_follows WHERE kind = 'view' AND target_id = old.id;
+    DELETE FROM planning_notifications WHERE subject_kind = 'view' AND subject_id = old.id;
+END;";
+
 /// What a notice is about when it is not a task.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -443,6 +520,7 @@ pub enum SubjectKind {
     Initiative,
     Note,
     View,
+    Meeting,
 }
 
 crate::planning::types::sql_enum!(SubjectKind {
@@ -450,6 +528,7 @@ crate::planning::types::sql_enum!(SubjectKind {
     Initiative => "initiative",
     Note => "note",
     View => "view",
+    Meeting => "meeting",
 });
 
 /// The project, initiative, note or view a notice is about, with its name
@@ -1184,6 +1263,58 @@ pub(crate) fn batch_posted(
     Ok(())
 }
 
+/// Keeps the one notice that a meeting's notes changed `changed` decisions
+/// earlier meetings made: posted the first time, brought up to date and
+/// unread again when notes written again change a different number, and
+/// taken back when they change none.
+pub(crate) fn decisions_changed(
+    conn: &Connection,
+    meeting_id: &str,
+    title: &str,
+    changed: usize,
+    now_ms: i64,
+) -> Result<()> {
+    let key = format!("decision:{meeting_id}");
+    if changed == 0 {
+        conn.execute(
+            "DELETE FROM planning_notifications WHERE event_key = ?1",
+            [&key],
+        )?;
+        return Ok(());
+    }
+    let changed = changed.to_string();
+    let notice = Notice {
+        key: Some(&key),
+        from: Some(title),
+        to: Some(&changed),
+        ..Notice::about(
+            NotificationKind::Decision,
+            SubjectKind::Meeting,
+            meeting_id,
+            WorkActor::Sona,
+        )
+    };
+    if !notify(conn, &notice, now_ms)? {
+        conn.execute(
+            "UPDATE planning_notifications
+             SET from_value = ?2, to_value = ?3, created_at_ms = ?4, read_at_ms = NULL,
+                 snoozed_until_ms = NULL, archived_at_ms = NULL
+             WHERE event_key = ?1 AND to_value IS NOT ?3",
+            params![key, title, changed, now_ms],
+        )?;
+    }
+    Ok(())
+}
+
+/// What a decision notice says its meeting did, from the count it holds;
+/// the meeting itself is who did it.
+pub(crate) fn changed_decisions(count: Option<&str>) -> String {
+    match count {
+        None | Some("1") => "changed an earlier decision".to_owned(),
+        Some(count) => format!("changed {count} earlier decisions"),
+    }
+}
+
 /// The batch a housekeeping notice stands for.
 pub(crate) fn batch_key(conn: &Connection, notice_id: &str) -> Result<Option<String>> {
     Ok(conn
@@ -1293,6 +1424,7 @@ const COLUMNS: &str = "x.id, x.task_id, x.kind, x.actor, coalesce(a.agent, x.age
         WHEN 'project' THEN (SELECT title FROM planning_projects WHERE id = x.subject_id)
         WHEN 'initiative' THEN (SELECT name FROM planning_initiatives WHERE id = x.subject_id)
         WHEN 'view' THEN (SELECT name FROM planning_views WHERE id = x.subject_id)
+        WHEN 'meeting' THEN x.from_value
     END,
     (SELECT body FROM planning_task_comments c WHERE c.id = x.comment_id)";
 
@@ -1842,7 +1974,10 @@ mod update_due_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::mentions_sona;
+    use super::{
+        changed_decisions, decisions_changed, mentions_sona, notifications, NotificationKind,
+        Shown, SubjectKind,
+    };
 
     #[test]
     fn sona_is_mentioned_only_as_a_whole_name() {
@@ -1850,5 +1985,46 @@ mod tests {
         assert!(mentions_sona("@sona"));
         assert!(!mentions_sona("@Sonata is not Sona"));
         assert!(!mentions_sona("no mention here"));
+    }
+
+    #[test]
+    fn a_meeting_keeps_one_notice_that_follows_its_notes_written_again() {
+        let conn = rusqlite::Connection::open_in_memory().expect("an in-memory history database");
+        crate::planning::schema::apply_all(&conn).expect("the planner schema");
+        let meeting = uuid::Uuid::new_v4().to_string();
+        let notices = || notifications(&conn, Shown::default(), 100).expect("the inbox");
+        let read_all = || {
+            conn.execute("UPDATE planning_notifications SET read_at_ms = 15", [])
+                .expect("read")
+        };
+
+        decisions_changed(&conn, &meeting, "Launch sync", 2, 10).expect("posted");
+        let first = notices();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].kind, NotificationKind::Decision);
+        let subject = first[0].subject.as_ref().expect("the meeting");
+        assert_eq!(
+            (subject.kind, subject.id.as_str(), subject.name.as_deref()),
+            (SubjectKind::Meeting, meeting.as_str(), Some("Launch sync"))
+        );
+        assert_eq!(
+            changed_decisions(first[0].to.as_deref()),
+            "changed 2 earlier decisions"
+        );
+
+        read_all();
+        decisions_changed(&conn, &meeting, "Launch sync", 3, 20).expect("rewritten");
+        let rewritten = notices();
+        assert_eq!(rewritten.len(), 1);
+        assert_eq!(rewritten[0].to.as_deref(), Some("3"));
+        assert_eq!(rewritten[0].read_at_ms, None, "a new count is news again");
+
+        read_all();
+        decisions_changed(&conn, &meeting, "Launch sync", 3, 30).expect("the same again");
+        let same = notices();
+        assert_eq!(same[0].read_at_ms, Some(15), "kept read");
+
+        decisions_changed(&conn, &meeting, "Launch sync", 0, 40).expect("none now");
+        assert!(notices().is_empty());
     }
 }

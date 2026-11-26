@@ -3,7 +3,7 @@ use crate::meeting::loop_types::{
     MeetingLoopResolveRequest, MeetingLoopsResult,
 };
 use crate::meeting::session::MeetingSessionManager;
-use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
+use crate::meeting::types::{DecisionDrift, MeetingCommandError, MeetingSessionId};
 use std::sync::Arc;
 use tauri::State;
 
@@ -14,6 +14,15 @@ pub async fn meeting_loops(
     session_id: MeetingSessionId,
 ) -> Result<MeetingLoopsResult, MeetingCommandError> {
     manager.loops_list(session_id).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_decision_drift(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Result<Vec<DecisionDrift>, MeetingCommandError> {
+    manager.decision_drift(session_id).await
 }
 
 #[tauri::command]

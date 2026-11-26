@@ -3365,6 +3365,18 @@ impl MeetingSessionManager {
             .map_err(map_store_error)
     }
 
+    /// The earlier decisions this meeting's notes change, as the review page
+    /// shows them.
+    pub async fn decision_drift(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<DecisionDrift>, MeetingCommandError> {
+        self.store()
+            .await?
+            .decision_drift(session_id)
+            .map_err(map_store_error)
+    }
+
     /// D26. Turn this meeting's record into a message the user can send.
     ///
     /// Nothing about the meeting changes, so this takes no expected revision:
