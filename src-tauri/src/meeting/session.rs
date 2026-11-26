@@ -488,6 +488,8 @@ pub enum MeetingStopSurface {
     ConsentPanel,
     /// The confirmation Sona asks for when it quits during a capture.
     Quit,
+    /// Stop Meeting Recording, run from Shortcuts, Siri or Spotlight.
+    Shortcut,
 }
 
 impl MeetingStopSurface {
@@ -496,6 +498,7 @@ impl MeetingStopSurface {
             Self::MeetingLive => "the live meeting screen",
             Self::ConsentPanel => "the consent panel",
             Self::Quit => "quitting Sona",
+            Self::Shortcut => "a shortcut",
         }
     }
 }

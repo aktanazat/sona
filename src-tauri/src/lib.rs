@@ -2148,6 +2148,8 @@ pub fn run(cli_args: CliArgs) {
             commands::query::sona_query_pack,
             commands::query::sona_open_link,
             commands::query::sona_query_system_index,
+            commands::query::sona_query_system_work,
+            commands::query::sona_query_system_ask,
             commands::query::sona_query_person_promises,
             commands::automations::meeting_series_automations_get,
             commands::automations::meeting_series_automations_for_session,

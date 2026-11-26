@@ -3,8 +3,10 @@ use crate::meeting::detection::calendar::CalendarSource;
 use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::MeetingFolderId;
+use crate::planning::work::ask::WorkAnswer;
+use crate::planning::EvidenceSourceKind;
 use crate::query::pack::QueryPack;
-use crate::query::system::{PersonPromises, SystemIndex};
+use crate::query::system::{PersonPromises, SystemIndex, SystemWork};
 use crate::query::{
     QueryAudience, QueryCursor, QueryError, QueryEventsPage, QueryScope, QuerySearchPage,
 };
@@ -102,6 +104,41 @@ pub async fn sona_query_system_index(
 ) -> Result<SystemIndex, QueryError> {
     let store = meetings.store().await?;
     crate::query::system::system_index(&store)
+}
+
+/// The tasks, projects and notes Spotlight may list, without the work drawn
+/// from series kept on this Mac or the personal documents. While the meetings
+/// cannot be opened, nothing says which series are kept, so every task drawn
+/// from a meeting is left out and the rest still lists.
+#[tauri::command]
+#[specta::specta]
+pub async fn sona_query_system_work(
+    meetings: State<'_, Arc<MeetingSessionManager>>,
+    history: State<'_, Arc<HistoryManager>>,
+) -> Result<SystemWork, QueryError> {
+    let kept_local = match meetings.store().await {
+        Ok(store) => Some(crate::query::KeptLocal::read(&store)?),
+        Err(_) => None,
+    };
+    history
+        .with_connection(|conn| {
+            crate::query::system::system_work(conn, |kind, source_id| match &kept_local {
+                Some(kept_local) => {
+                    crate::query::external::evidence_kept_local(kind, source_id, kept_local)
+                }
+                None => matches!(kind, EvidenceSourceKind::Meeting | EvidenceSourceKind::Loop),
+            })
+        })
+        .map_err(|_| QueryError::Failed)
+}
+
+/// The lines that answer a question, for Siri and Shortcuts: read the way an
+/// agent on this Mac reads them, so nothing said in a series kept on this Mac
+/// and no personal document answers.
+#[tauri::command]
+#[specta::specta]
+pub async fn sona_query_system_ask(app: AppHandle, question: String) -> Result<WorkAnswer, String> {
+    crate::planning::work::ask::answer(&app, QueryAudience::External, &question).await
 }
 
 /// What one person promised, for Siri and Shortcuts: null when no person has

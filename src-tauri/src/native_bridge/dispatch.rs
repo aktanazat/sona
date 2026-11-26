@@ -4636,6 +4636,14 @@ pub(super) async fn call(
         "sona_query_system_index" => {
             reply(crate::commands::query::sona_query_system_index(app.state()).await)
         }
+        "sona_query_system_work" => {
+            reply(crate::commands::query::sona_query_system_work(app.state(), app.state()).await)
+        }
+        "sona_query_system_ask" => {
+            let mut args = Args::parse(params)?;
+            let question = args.take("question")?;
+            reply(crate::commands::query::sona_query_system_ask(app.clone(), question).await)
+        }
         "sona_query_person_promises" => {
             let mut args = Args::parse(params)?;
             let person_id = args.take("personId")?;
