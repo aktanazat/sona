@@ -605,6 +605,7 @@ final class AppModel: NSObject, ObservableObject {
             let folders = try await Task.detached { try PhoneCaptureJournal.pending(under: root) }.value
             for folder in folders {
                 guard let id = UUID(uuidString: folder.lastPathComponent),
+                      !savingCaptureIDs.contains(id),
                       !recorder.capturesStartedThisRun.contains(id)
                 else { continue }
                 do {
@@ -633,7 +634,8 @@ final class AppModel: NSObject, ObservableObject {
     private func keepCapture(
         _ journal: PhoneCaptureJournal, audio: CapturedAudio?, title: String, notes: String = "",
         calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
-        placeReading: DeviceRecordingManifest.PlaceReading? = nil
+        placeReading: DeviceRecordingManifest.PlaceReading? = nil,
+        upload: CapturedAudio? = nil
     ) async throws -> Bool {
         savingCaptureIDs.insert(journal.id)
         defer { savingCaptureIDs.remove(journal.id) }
@@ -651,9 +653,18 @@ final class AppModel: NSObject, ObservableObject {
         }
         let date = Date(timeIntervalSince1970: Double(journal.recordedAtUtcMs) / 1000)
         let note = try await library.keepRecording(id: journal.id, title: title, notes: notes, date: date, audio: captured)
-        let upload = try await Self.encodedForUpload(captured)
+        let encoded: CapturedAudio
+        if let upload {
+            let destination = directory.appending(path: UploadAudioFormat.fileName)
+            try FileManager.default.copyItem(at: upload.url, to: destination)
+            var copy = upload
+            copy.url = destination
+            encoded = copy
+        } else {
+            encoded = try await Self.encodedForUpload(captured)
+        }
         _ = try await queue.enqueue(
-            audio: upload, recordedAtUtcMs: journal.recordedAtUtcMs, title: note.title, notes: note.text,
+            audio: encoded, recordedAtUtcMs: journal.recordedAtUtcMs, title: note.title, notes: note.text,
             calendarEvent: calendarEvent, bookmarkOffsetsMs: journal.bookmarkOffsetsMs.filter { $0 <= captured.durationMs },
             placeReading: placeReading, captureDirectory: directory
         )
@@ -1246,18 +1257,28 @@ extension AppModel: WCSessionDelegate {
     /// A watch recording joins the same outbox as a phone recording. Newer watches
     /// already encode their file; older watches send WAV and the phone encodes it.
     nonisolated func session(_ session: WCSession, didReceive file: WCSessionFile) {
-        let compact = file.metadata?["audio_codec"] as? String == UploadAudioFormat.codec
-        let source = FileManager.default.temporaryDirectory
-            .appending(path: "watch-\(UUID().uuidString).\(compact ? "aac" : "wav")")
-        try? FileManager.default.copyItem(at: file.fileURL, to: source)
         let recordedAtUtcMs =
             (file.metadata?["recorded_at_utc_ms"] as? NSNumber)?.int64Value
             ?? Int64(Date().timeIntervalSince1970 * 1000)
         let durationMs = (file.metadata?["duration_ms"] as? NSNumber)?.int64Value
-        let destination = FileManager.default.temporaryDirectory
-            .appending(path: "watch-\(UUID().uuidString).pcm")
+        let format: PhoneCaptureJournal.WatchSource =
+            file.metadata?["audio_codec"] as? String == UploadAudioFormat.codec ? .aac : .wave
+        let journal: PhoneCaptureJournal
+        do {
+            journal = try PhoneCaptureJournal.receiveWatch(
+                source: file.fileURL,
+                format: format,
+                recordedAtUtcMs: recordedAtUtcMs
+            )
+        } catch {
+            Task { @MainActor [weak self] in self?.library.error = error.localizedDescription }
+            return
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard !self.savingCaptureIDs.contains(journal.id) else { return }
+            self.savingCaptureIDs.insert(journal.id)
+            defer { self.savingCaptureIDs.remove(journal.id) }
             /* The watch's file can arrive with Sona in the background, which would be
              * suspended before the recording is converted, queued and uploaded. */
             var working = UIBackgroundTaskIdentifier.invalid
@@ -1267,20 +1288,22 @@ extension AppModel: WCSessionDelegate {
             }
             working = UIApplication.shared.beginBackgroundTask(withName: "Save watch recording") { release() }
             defer { release() }
-            guard let prepared = try? await Task.detached(priority: .utility, operation: {
-                try prepareWatchAudio(source: source, destination: destination, durationMs: durationMs)
-            }).value else { return }
-            let kept = await self.enqueue(
-                audio: prepared.capture,
-                recordedAtUtcMs: recordedAtUtcMs,
-                title: AppModel.title(
-                    prefix: NSLocalizedString("title.watch", comment: ""),
-                    utcMs: recordedAtUtcMs
-                ),
-                upload: prepared.upload
-            )
-            try? FileManager.default.removeItem(at: source)
-            if kept { await self.drain() }
+            do {
+                let root = self.recorder.captureRoot
+                let source = journal.directory(under: root)
+                    .appending(path: format.rawValue)
+                let prepared = try await Task.detached(priority: .utility) {
+                    try prepareWatchAudio(
+                        source: source, destination: journal.audioURL(under: root), durationMs: durationMs
+                    )
+                }.value
+                let kept = try await self.keepCapture(
+                    journal, audio: prepared.capture,
+                    title: AppModel.title(prefix: NSLocalizedString("title.watch", comment: ""), utcMs: recordedAtUtcMs),
+                    upload: prepared.upload
+                )
+                if kept { await self.drain() }
+            } catch { self.library.error = error.localizedDescription }
         }
     }
 }

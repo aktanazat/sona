@@ -95,8 +95,7 @@ final class PhoneRecorder: ObservableObject {
     private var interruptionObserver: NSObjectProtocol?
     private var activity: Activity<RecordingActivityAttributes>?
 
-    init(captureRoot: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appending(path: "unfinished-recordings", directoryHint: .isDirectory)) {
+    init(captureRoot: URL = PhoneCaptureJournal.defaultRoot) {
         self.captureRoot = captureRoot
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,

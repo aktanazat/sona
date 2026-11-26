@@ -6,10 +6,29 @@ struct PhoneCaptureJournal: Codable, Sendable {
     private static let audioFile = "audio.pcm"
     private static let fileProtection = FileProtectionType.completeUntilFirstUserAuthentication
     private static let writeOptions: Data.WritingOptions = [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+    static let defaultRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appending(path: "unfinished-recordings", directoryHint: .isDirectory)
+
+    enum WatchSource: String, Codable, Sendable {
+        case aac = "watch.aac"
+        case wave = "watch.wav"
+    }
 
     let id: UUID
     let recordedAtUtcMs: Int64
     var bookmarkOffsetsMs: [Int64] = []
+    var watchSource: WatchSource? = nil
+
+    static func receiveWatch(
+        source: URL, format: WatchSource, recordedAtUtcMs: Int64, root: URL = defaultRoot
+    ) throws -> Self {
+        let journal = Self(id: UUID(), recordedAtUtcMs: recordedAtUtcMs, watchSource: format)
+        try journal.begin(under: root)
+        try FileManager.default.copyItem(
+            at: source, to: journal.directory(under: root).appending(path: format.rawValue)
+        )
+        return journal
+    }
 
     func directory(under root: URL) -> URL {
         root.appending(path: id.uuidString, directoryHint: .isDirectory)
@@ -76,6 +95,12 @@ struct PhoneCaptureJournal: Codable, Sendable {
     }
 
     func recoverAudio(under root: URL) throws -> CapturedAudio? {
+        if let watchSource {
+            return try transcodeToCaptureFormat(
+                source: directory(under: root).appending(path: watchSource.rawValue),
+                destination: audioURL(under: root)
+            )
+        }
         let url = audioURL(under: root)
         let metadata: URLResourceValues
         do {

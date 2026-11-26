@@ -42,6 +42,7 @@
 		CC0000000000000000000006 /* CompanionClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000006 /* CompanionClient.swift */; };
 		CC0000000000000000000007 /* UploadQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000007 /* UploadQueue.swift */; };
 		CC0000000000000000000008 /* PCMResampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000008 /* PCMResampler.swift */; };
+		CC00000000000000000000F9 /* PhoneCaptureJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000F9 /* PhoneCaptureJournal.swift */; };
 		CC0000000000000000000010 /* CryptoVectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000010 /* CryptoVectorTests.swift */; };
 		CC0000000000000000000011 /* DeviceRecordingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000011 /* DeviceRecordingTests.swift */; };
 		CC0000000000000000000012 /* crypto-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000012 /* crypto-v1.json */; };
@@ -971,6 +972,7 @@
 				CC0000000000000000000006 /* CompanionClient.swift in Sources */,
 				CC0000000000000000000007 /* UploadQueue.swift in Sources */,
 				CC0000000000000000000008 /* PCMResampler.swift in Sources */,
+				CC00000000000000000000F9 /* PhoneCaptureJournal.swift in Sources */,
 				CC0000000000000000000030 /* ThoughtObject.swift in Sources */,
 				CC0000000000000000000031 /* CardObject.swift in Sources */,
 				CC0000000000000000000032 /* VaultReader.swift in Sources */,

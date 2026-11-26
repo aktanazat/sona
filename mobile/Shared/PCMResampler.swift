@@ -219,14 +219,14 @@ func prepareADTSUpload(at url: URL, durationMs: Int64) throws -> CapturedAudio {
     )
 }
 
-/// A watch from before compact capture sends WAV; a newer one sends AAC. Decode for
-/// the phone's local library either way, but only encode an older watch's upload.
+/// Keep any watch audio the phone can decode. An unsupported compact stream is
+/// encoded from the decoded capture rather than discarded.
 func prepareWatchAudio(
     source: URL, destination: URL, durationMs: Int64?
 ) throws -> (capture: CapturedAudio, upload: CapturedAudio?) {
     let capture = try transcodeToCaptureFormat(source: source, destination: destination)
     let upload = source.pathExtension == UploadAudioFormat.fileExtension
-        ? try prepareADTSUpload(at: source, durationMs: durationMs ?? capture.durationMs) : nil
+        ? try? prepareADTSUpload(at: source, durationMs: durationMs ?? capture.durationMs) : nil
     return (capture, upload)
 }
 

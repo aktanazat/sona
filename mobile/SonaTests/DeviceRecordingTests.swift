@@ -338,6 +338,64 @@ final class DeviceRecordingTests: XCTestCase {
         XCTAssertNil(prepared.upload, "the older phone follows its existing decode-then-encode path")
         XCTAssertGreaterThan(prepared.capture.byteLength, 0)
     }
+
+    func testDecodableWatchAudioOutsideTheUploadFormatIsKeptAndEncoded() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "watch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "watch.aac")
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 22_050, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 22_050))
+        buffer.frameLength = 22_050
+        let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+        for index in 0..<22_050 {
+            samples[index] = 0.25 * sin(Float(index) * 2 * .pi * 300 / 22_050)
+        }
+        let output = try AVAudioFile(
+            forWriting: source, settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 22_050, AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 24_000,
+            ]
+        )
+        try output.write(from: buffer)
+        output.close()
+
+        let prepared = try prepareWatchAudio(
+            source: source, destination: root.appending(path: "audio.pcm"), durationMs: 1000
+        )
+
+        XCTAssertNil(prepared.upload)
+        XCTAssertGreaterThan(prepared.capture.byteLength, 30_000)
+        let upload = try encodeForUpload(prepared.capture, destination: root.appending(path: "audio.aac"))
+        XCTAssertEqual(upload.codec, "aac_adts")
+        XCTAssertEqual(try AVAudioFile(forReading: upload.url).fileFormat.sampleRate, 16_000)
+    }
+
+    func testFailedWatchDecodeKeepsItsSourceForRecovery() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "watch-recovery-\(UUID().uuidString)")
+        let source = root.appending(path: "incoming.aac")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let bytes = Data("not a decodable recording".utf8)
+        try bytes.write(to: source)
+        let journal = try PhoneCaptureJournal.receiveWatch(
+            source: source, format: .aac, recordedAtUtcMs: 1234, root: root
+        )
+        try FileManager.default.removeItem(at: source)
+        XCTAssertThrowsError(try journal.recoverAudio(under: root))
+
+        let pending = try PhoneCaptureJournal.pending(under: root)
+        XCTAssertEqual(pending, [journal.directory(under: root)])
+        let recovered = try PhoneCaptureJournal.load(from: XCTUnwrap(pending.first))
+        XCTAssertEqual(recovered.id, journal.id)
+        XCTAssertEqual(recovered.recordedAtUtcMs, 1234)
+        XCTAssertEqual(recovered.watchSource, .aac)
+        XCTAssertEqual(
+            try Data(contentsOf: recovered.directory(under: root).appending(path: "watch.aac")),
+            bytes
+        )
+    }
 }
 
 /// Capture-format PCM shaped like speech: a gliding voiced tone in syllable-length
