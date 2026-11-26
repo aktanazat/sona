@@ -42,8 +42,10 @@ enum AgentLaunch: String, CaseIterable {
     }
 
     /// Writes the prompt and a script that runs the agent on it from `folder`, then opens
-    /// the script. The script removes both files before the agent starts. The prompt goes
-    /// through a file so no character in it reaches the shell as syntax.
+    /// the script. The prompt goes through a file so no character in it reaches the shell
+    /// as syntax. The shell reads the user's own setup, `.zshrc` included, so it finds the
+    /// agent where their terminal does; when it still cannot, both files stay and the
+    /// script says how to run it again.
     func open(prompt: String, in folder: URL) throws {
         let files = FileManager.default
         let directory = files.temporaryDirectory.appending(path: "sona-agent-start", directoryHint: .isDirectory)
@@ -53,8 +55,13 @@ enum AgentLaunch: String, CaseIterable {
         let script = directory.appending(path: id + ".command")
         try prompt.write(to: promptFile, atomically: true, encoding: .utf8)
         let text = """
-            #!/bin/zsh -l
+            #!/bin/zsh -il
             cd -- \(Self.quoted(folder.path)) || exit 1
+            if ! command -v \(command) >/dev/null 2>&1; then
+                print -r -- "Sona could not find \(command). Install \(name), then open this file again:"
+                print -r -- \(Self.quoted(script.path))
+                exit 1
+            fi
             prompt="$(cat -- \(Self.quoted(promptFile.path)))"
             rm -f -- \(Self.quoted(promptFile.path)) \(Self.quoted(script.path))
             exec \(command) "$prompt"

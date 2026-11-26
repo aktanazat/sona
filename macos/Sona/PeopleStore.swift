@@ -297,9 +297,11 @@ final class PeopleStore {
             let notes: String?
         }
         write { _, core in
-            try await core.request(
-                "person_profile_set",
-                Params(personId: personId, aliases: aliases, role: role, organization: organization, notes: notes))
+            try await Self.namesTaken("Someone else already goes by one of these names.") {
+                try await core.request(
+                    "person_profile_set",
+                    Params(personId: personId, aliases: aliases, role: role, organization: organization, notes: notes))
+            }
         }
     }
 
@@ -307,11 +309,27 @@ final class PeopleStore {
     /// opens once they exist.
     func create(named displayName: String) {
         write(
-            { _, core in try await core.request("person_create", ["displayName": displayName]) },
+            { _, core in
+                try await Self.namesTaken("Someone is already called \(displayName).") {
+                    try await core.request("person_create", ["displayName": displayName])
+                }
+            },
             then: { store, result in
                 guard let id = result.person?.id else { return store.reload() }
                 store.openPerson(id)
             })
+    }
+
+    /// Neither write carries a revision, so the core's stale-revision refusal
+    /// can only mean a name another person already has.
+    private static func namesTaken(
+        _ sentence: String, _ write: () async throws -> PeopleMutationResult
+    ) async throws -> PeopleMutationResult {
+        do {
+            return try await write()
+        } catch let error as CoreError where error.remote(as: PeopleCommandError.self) == .staleRevision {
+            throw PersonFailure(message: sentence)
+        }
     }
 
     func choosePhotoSource() {

@@ -47,13 +47,12 @@ CREATE TRIGGER planning_agent_sessions_task_delete AFTER DELETE ON planning_task
     DELETE FROM planning_agent_sessions WHERE task_id = old.id;
 END;";
 
-/// The folder a session's agent works in, and whether Sona keeps the session
-/// from the agent's hooks rather than the agent reporting it. The Mac reads the
-/// session's code changes in the folder.
+/// The folder a session's agent works in, and for a session Sona keeps from
+/// the agent's hooks rather than the agent reporting it, the hooks' own id of
+/// that session. The Mac reads the session's code changes in the folder.
 pub(crate) const WATCHED_MIGRATION: &str =
     "ALTER TABLE planning_agent_sessions ADD COLUMN folder TEXT;
-ALTER TABLE planning_agent_sessions ADD COLUMN watched INTEGER NOT NULL DEFAULT 0
-    CHECK(watched IN (0, 1));";
+ALTER TABLE planning_agent_sessions ADD COLUMN watched_session TEXT;";
 
 /// Names a watched session's record on its task, so every step of one session
 /// working one task lands in one record.
@@ -232,11 +231,12 @@ struct Stored {
     ended_at_ms: Option<i64>,
     end_kind: Option<String>,
     folder: Option<String>,
-    watched: bool,
+    watched_session: Option<String>,
 }
 
 const SESSION_COLUMNS: &str = "id, task_id, agent, created_at_ms, heartbeat_at_ms,
-    stop_requested_at_ms, stop_requested_by, plan_json, ended_at_ms, end_kind, folder, watched";
+    stop_requested_at_ms, stop_requested_by, plan_json, ended_at_ms, end_kind, folder,
+    watched_session";
 
 const ACTIVITY_COLUMNS: &str = "id, kind, at_ms, author_kind, author_name, body, action,
     parameter, result, options_json, answer_value, ephemeral";
@@ -254,7 +254,7 @@ fn read_stored(row: &Row<'_>) -> rusqlite::Result<Stored> {
         ended_at_ms: row.get(8)?,
         end_kind: row.get(9)?,
         folder: row.get(10)?,
-        watched: row.get(11)?,
+        watched_session: row.get(11)?,
     })
 }
 
@@ -372,7 +372,7 @@ fn view(
         unread_prompts,
         activities: if full { log } else { Vec::new() },
         folder: stored.folder,
-        watched: stored.watched,
+        watched: stored.watched_session.is_some(),
     })
 }
 
@@ -791,9 +791,12 @@ pub(crate) fn start_as(
     )
 }
 
-/// Keeps a watched session on its task: the first step makes the task's record
-/// of the session, in the folder the agent works in, and each later step adds
-/// to it. The record carries no stop or reply: the user does those in the agent.
+/// Keeps a watched session on its task. The first step makes the task's record
+/// of the session, in the folder the agent works in, and closes the session's
+/// record on any other task: the agent has moved on. Each step counts as the
+/// agent heard from. A finished turn finishes the record, since the agent
+/// waits for its user in the terminal; the next step opens it again. The
+/// record carries no stop or reply: the user does those in the agent.
 pub(crate) fn watch(
     conn: &Connection,
     task_id: &str,
@@ -802,16 +805,29 @@ pub(crate) fn watch(
     at_ms: i64,
 ) -> Result<String> {
     let task = super::items::item(conn, &store::uuid(task_id)?)?;
+    if task.archived_at_ms.is_some() {
+        return Err(Refusal::Invalid.into());
+    }
     let id = Uuid::new_v5(
         &WATCH_NAMESPACE,
         format!("{}\0{}", watched.session_id, task.id).as_bytes(),
     )
     .to_string();
     conn.execute(
+        "UPDATE planning_agent_sessions SET ended_at_ms = ?3, end_kind = 'response'
+         WHERE watched_session = ?1 AND id != ?2 AND ended_at_ms IS NULL",
+        params![watched.session_id, id, at_ms],
+    )?;
+    conn.execute(
         "INSERT OR IGNORE INTO planning_agent_sessions
-            (id, task_id, agent, created_at_ms, folder, watched)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1)",
-        params![id, task.id, agent, at_ms, watched.folder],
+            (id, task_id, agent, created_at_ms, folder, watched_session)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, task.id, agent, at_ms, watched.folder, watched.session_id],
+    )?;
+    conn.execute(
+        "UPDATE planning_agent_sessions
+         SET heartbeat_at_ms = ?2, ended_at_ms = NULL, end_kind = NULL WHERE id = ?1",
+        params![id, at_ms],
     )?;
     let (kind, input) = match &watched.step {
         Watched::Started => return Ok(id),
@@ -824,7 +840,7 @@ pub(crate) fn watch(
             },
         ),
         Watched::Turn { message } => (
-            WorkSessionActivityKind::Thought,
+            WorkSessionActivityKind::Response,
             ActivityInput {
                 body: Some(
                     message
@@ -841,6 +857,12 @@ pub(crate) fn watch(
         agent: Some(agent),
     };
     insert_activity(conn, &id, kind, author, &input, None, at_ms)?;
+    if kind.ends() {
+        conn.execute(
+            "UPDATE planning_agent_sessions SET ended_at_ms = ?2, end_kind = ?3 WHERE id = ?1",
+            params![id, at_ms, kind.stored()],
+        )?;
+    }
     Ok(id)
 }
 
@@ -1107,12 +1129,15 @@ mod tests {
     }
 
     /// A watched session keeps one record on its task however many steps it
-    /// reports: in its folder, marked watched, its tools and turns in order.
+    /// reports, in its folder, its tools and turns in order. It shows working
+    /// from its first step, finished when a turn ends, working again with its
+    /// next step, and finished on this task once it moves to another one.
     #[test]
-    fn a_watched_session_keeps_one_record_of_its_steps() {
+    fn a_watched_session_keeps_one_record_that_follows_its_turns() {
         let conn = Connection::open_in_memory().expect("a history database");
         schema::apply_all(&conn).expect("the planner schema");
         let task = filed(&conn, "Book the offsite venue");
+        let other = filed(&conn, "Send the invitations");
         let step = |event: &str, step: Watched| WatchedStep {
             session_id: "claude-session".to_owned(),
             task: "S-1".to_owned(),
@@ -1120,21 +1145,25 @@ mod tests {
             event_id: event.to_owned(),
             step,
         };
-        let tool = Watched::Tool {
+        let bash = || Watched::Tool {
             name: "Bash".to_owned(),
             input: Some("cargo test".to_owned()),
         };
-        let ids = [
-            (step("start", Watched::Started), 1),
-            (step("bash", tool), 2),
-            (step("stop", Watched::Turn { message: None }), 3),
-        ]
-        .map(|(step, at)| watch(&conn, &task, "Claude Code", &step, at).expect("a kept step"));
-        assert_eq!([&ids[1], &ids[2]], [&ids[0], &ids[0]]);
-        let record = session(&conn, &ids[0], 4).expect("the record");
+        let state = |id: &str, at: i64| session(&conn, id, at).expect("the record").state;
+        let first = watch(&conn, &task, "Claude Code", &step("start", Watched::Started), 1)
+            .expect("a kept start");
+        assert_eq!(state(&first, 20_000), WorkSessionState::Active);
+        for (event, kept, at) in [
+            ("bash", bash(), 2),
+            ("stop", Watched::Turn { message: None }, 3),
+        ] {
+            let id = watch(&conn, &task, "Claude Code", &step(event, kept), at).expect("a kept step");
+            assert_eq!(id, first);
+        }
+        let record = session(&conn, &first, 4).expect("the record");
         assert_eq!(
             (record.folder.as_deref(), record.watched, record.state),
-            (Some("/Users/me/venue"), true, WorkSessionState::Active)
+            (Some("/Users/me/venue"), true, WorkSessionState::Complete)
         );
         let kept: Vec<_> = record
             .activities
@@ -1145,8 +1174,12 @@ mod tests {
             kept,
             [
                 (WorkSessionActivityKind::Action, Some("Bash"), None),
-                (WorkSessionActivityKind::Thought, None, Some("Finished a turn")),
+                (WorkSessionActivityKind::Response, None, Some("Finished a turn")),
             ]
         );
+        watch(&conn, &task, "Claude Code", &step("again", bash()), 5).expect("a kept step");
+        assert_eq!(state(&first, 6), WorkSessionState::Active);
+        watch(&conn, &other, "Claude Code", &step("moved", bash()), 7).expect("a kept step");
+        assert_eq!(state(&first, 8), WorkSessionState::Complete);
     }
 }

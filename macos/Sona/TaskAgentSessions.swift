@@ -81,7 +81,7 @@ private struct SessionCard: View {
                 }
                 SessionTimeline(session: session)
                 if let folder = session.folder {
-                    SessionChanges(folder: folder, moved: session.lastActivityAtMs ?? session.createdAtMs)
+                    SessionChanges(folder: folder, read: session.endedAtMs ?? session.createdAtMs)
                 }
                 if session.isOpen && !session.watched {
                     SessionReply(session: session)
@@ -105,12 +105,12 @@ private struct SessionCard: View {
     }
 }
 
-/// The uncommitted changes in the folder a session's agent works in, read with git each
-/// time the session moves. Git cannot tell who made a change, so the user's own edits in
-/// that checkout show too.
+/// The uncommitted changes in the folder a session's agent works in, read with git when
+/// the card shows and each time the agent finishes a turn. Git cannot tell who made a
+/// change, so the user's own edits in that checkout show too.
 private struct SessionChanges: View {
     let folder: String
-    let moved: Int64
+    let read: Int64
     @State private var changes: [FolderChange] = []
 
     private static let shown = 12
@@ -137,7 +137,7 @@ private struct SessionChanges: View {
                 }
             }
         }
-        .task(id: moved) {
+        .task(id: read) {
             let folder = folder
             changes = await Task.detached(priority: .utility) { FolderChange.read(in: folder) }.value
         }
@@ -151,15 +151,22 @@ struct FolderChange: Identifiable, Equatable, Sendable {
     var id: String { path }
 
     /// The changes in the checkout holding `folder`, paths from its top; none when the
-    /// folder is in no checkout or git cannot read it. Git runs only inside a checkout.
+    /// folder is in no checkout or git cannot read it. Git runs only inside a checkout,
+    /// and never in one at or above the home folder unless the agent works there:
+    /// a home folder kept in git is the user's settings, not the agent's work.
+    /// Untracked folders count as one change each.
     static func read(in folder: String) -> [FolderChange] {
-        var root = URL(fileURLWithPath: folder, isDirectory: true)
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let start = URL(fileURLWithPath: folder, isDirectory: true).standardizedFileURL
+        var root = start
         while !FileManager.default.fileExists(atPath: root.appending(path: ".git").path) {
-            guard root.pathComponents.count > 1 else { return [] }
+            guard root.pathComponents.count > 1, root.path != home else { return [] }
             root.deleteLastPathComponent()
         }
-        guard let edited = git(["diff", "--numstat", "HEAD", "--"], in: root.path),
-              let added = git(["ls-files", "--others", "--exclude-standard"], in: root.path)
+        let holdsHome = home == root.path || home.hasPrefix(root.path.hasSuffix("/") ? root.path : root.path + "/")
+        guard !holdsHome || root.path == start.path,
+              let edited = git(["diff", "--numstat", "HEAD", "--"], in: root.path),
+              let added = git(["ls-files", "--others", "--exclude-standard", "--directory"], in: root.path)
         else { return [] }
         let edits = edited.split(separator: "\n").compactMap { line -> FolderChange? in
             let fields = line.split(separator: "\t", maxSplits: 2)

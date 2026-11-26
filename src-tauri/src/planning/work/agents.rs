@@ -964,29 +964,46 @@ pub(crate) fn follow_session(app: &AppHandle, agent: &str, session_id: &str, tas
 }
 
 /// Keeps each watched session's steps on the task it named, in the order they
-/// came. A step whose task is gone or cannot be read is dropped; the session
+/// came: one thread writes them all, so a later batch never lands first. A
+/// step whose task is gone, archived or unreadable is dropped; the session
 /// goes on either way.
 pub(crate) fn watch_sessions(app: &AppHandle, steps: Vec<(&'static str, WatchedStep)>) {
-    if steps.is_empty() {
-        return;
-    }
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        for (agent, step) in steps {
-            let agent = agent_name(Some(agent));
-            let named = crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
-                named_item(conn, &step.task)
-            });
-            let recorded = match named {
-                Ok(Some(id)) => sessions::watch_as(&app, &id, &agent, &step),
-                Ok(None) => continue,
-                Err(message) => Err(message),
-            };
-            if let Err(message) = recorded {
-                log::info!("A watched session's step was not kept on its task: {message}");
+    type Kept = (AppHandle, &'static str, WatchedStep);
+    static KEEPER: std::sync::LazyLock<std::sync::mpsc::Sender<Kept>> =
+        std::sync::LazyLock::new(|| {
+            let (send, receive) = std::sync::mpsc::channel::<Kept>();
+            let spawned = std::thread::Builder::new()
+                .name("sona-watched-steps".to_owned())
+                .spawn(move || {
+                    for (app, agent, step) in receive {
+                        keep_step(&app, agent, &step);
+                    }
+                });
+            if let Err(error) = spawned {
+                log::warn!("Watched sessions' steps will not be kept: {error}");
             }
+            send
+        });
+    for (agent, step) in steps {
+        if KEEPER.send((app.clone(), agent, step)).is_err() {
+            return;
         }
+    }
+}
+
+fn keep_step(app: &AppHandle, agent: &str, step: &WatchedStep) {
+    let agent = agent_name(Some(agent));
+    let named = crate::planning::history(&app.state::<Arc<HistoryManager>>(), |conn| {
+        named_item(conn, &step.task)
     });
+    let kept = match named {
+        Ok(Some(id)) => sessions::watch_as(app, &id, &agent, step),
+        Ok(None) => return,
+        Err(message) => Err(message),
+    };
+    if let Err(message) = kept {
+        log::info!("A watched session's step was not kept on its task: {message}");
+    }
 }
 
 fn priority_name(priority: u8) -> Option<&'static str> {
