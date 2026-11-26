@@ -5,6 +5,8 @@ import SwiftUI
 /// way back.
 struct ScratchpadView: View {
     let store: ScratchpadStore
+    /// In a window of its own, with no list to go back to.
+    var windowed = false
     /// An action another part of the app offers for the open note, such as
     /// sharing it. Nothing shows until one is passed.
     var share: ((ScratchNote) -> Void)? = nil
@@ -16,7 +18,7 @@ struct ScratchpadView: View {
         Group {
             if store.editing {
                 ScratchNoteEditorPage(
-                    store: store, share: share, openSource: openSource,
+                    store: store, windowed: windowed, share: share, openSource: openSource,
                     showSynthesis: { showingSynthesis = true },
                     showSubjects: { showingSubjects = true })
             } else {
@@ -46,6 +48,7 @@ private struct ScratchNoteListPage: View {
     let store: ScratchpadStore
     let showSynthesis: () -> Void
     let showSubjects: () -> Void
+    @Environment(AppModel.self) private var model
 
     private var searching: Bool {
         !store.activeQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -134,6 +137,9 @@ private struct ScratchNoteListPage: View {
                 ScratchNoteRow(note: note) {
                     Task { await store.open(note) }
                 }
+                .contextMenu {
+                    Button("Open in New Window") { model.openWindow(.note(note.id)) }
+                }
             }
         }
     }
@@ -176,6 +182,7 @@ private struct ScratchNoteRow: View {
 
 private struct ScratchNoteEditorPage: View {
     let store: ScratchpadStore
+    let windowed: Bool
     @Environment(AppModel.self) private var model
     let share: ((ScratchNote) -> Void)?
     let openSource: ((String) -> Void)?
@@ -244,7 +251,8 @@ private struct ScratchNoteEditorPage: View {
     }
 
     var body: some View {
-        Page(back: PageBack("Notes") { Task { await store.close() } }, title: store.saved?.title ?? "New note") {
+        Page(back: windowed ? nil : PageBack("Notes") { Task { await store.close() } },
+             title: store.saved?.title ?? "New note") {
             VStack(alignment: .leading, spacing: 6) {
                 Text(store.saved?.title ?? "New note")
                     .heroText()

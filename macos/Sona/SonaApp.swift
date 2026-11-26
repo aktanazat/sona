@@ -12,14 +12,14 @@ struct SonaApp: App {
     var body: some Scene {
         Window("Sona", id: "main") {
             Shell().environment(model)
-                // In the Dock and the app switcher only while this window is
-                // open; the rest of the time Sona is its menu bar mark.
+                // In the Dock and the app switcher only while one of its
+                // windows is open; the rest of the time Sona is its menu bar mark.
                 .onAppear {
-                    NSApp.setActivationPolicy(.regular)
+                    model.windowOpened()
                     model.mainWindowOpen = true
                 }
                 .onDisappear {
-                    NSApp.setActivationPolicy(.accessory)
+                    model.windowClosed()
                     model.mainWindowOpen = false
                 }
         }
@@ -31,7 +31,7 @@ struct SonaApp: App {
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) { OpenInWindowMenuItem(model: model) }
             CommandGroup(replacing: .sidebar) { SidebarMenuItem(model: model) }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
@@ -61,6 +61,15 @@ struct SonaApp: App {
                     .keyboardShortcut("/", modifiers: .command)
             }
         }
+
+        WindowGroup("Sona", id: "item", for: ItemWindow.self) { $item in
+            if let item { ItemWindowView(item: item).environment(model) }
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
+        .defaultSize(width: 900, height: 760)
+        .restorationBehavior(.disabled)
+        .commandsRemoved()
 
         MenuBarExtra {
             MenuBarMenu().environment(model)
@@ -165,9 +174,19 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
                         detail: model.scratchpad.error, button: "Keep editing")
                     return
                 }
-                // A person may type in either editor while the other's
-                // request is out. Both must be settled in this same turn.
+                for note in model.windowNotes {
+                    guard await note.flush() else {
+                        cancelTermination(
+                            sender, place: .scratchpad,
+                            message: "A note in its own window could not be saved. Your words are still in that window.",
+                            detail: note.error, button: "Keep editing")
+                        return
+                    }
+                }
+                // A person may type in any editor while another's request
+                // is out. All must be settled in this same turn.
             } while model.live.hasPendingLiveNotes || model.scratchpad.hasPendingSave
+                || model.windowNotes.contains(where: \.hasPendingSave)
             if meeting {
                 guard await stopMeeting(sender) else { return }
             }
@@ -288,6 +307,7 @@ struct MenuBarMark: View {
         }
         .onAppear {
             model.presentMainWindow = { openWindow(id: "main") }
+            model.presentItemWindow = { openWindow(value: $0) }
             model.reopenMainWindow()
         }
         .task(id: model.ready) {

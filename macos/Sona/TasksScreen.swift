@@ -649,6 +649,12 @@ struct WorkActionMenu: View {
             }
             if rows.count == 1, let row = rows.first {
                 Button {
+                    model.openWindow(.task(row.id))
+                } label: {
+                    Label("Open in New Window", systemImage: "macwindow.badge.plus")
+                }
+                .keyboardShortcut(keys ? KeyboardShortcut("o", modifiers: [.command, .option]) : nil)
+                Button {
                     model.sheet = .saveTemplate(row.id)
                 } label: {
                     Label("Save as template…", systemImage: "doc.on.doc")

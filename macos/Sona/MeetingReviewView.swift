@@ -6,6 +6,8 @@ import SwiftUI
 struct MeetingReviewView: View {
     let store: MeetingsStore
     let settings: MeetingSettingsStore
+    /// In a window of its own, with no list to go back to.
+    var windowed = false
     var openPerson: (String) -> Void = { _ in }
     var openMeetingSettings: () -> Void = {}
     /// Opens the agent with a question about this meeting begun, for the
@@ -18,7 +20,7 @@ struct MeetingReviewView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            Page(back: PageBack("Meetings") { store.closeReview() }) {
+            Page(back: windowed ? nil : PageBack("Meetings") { store.closeReview() }) {
                 if let snapshot = store.snapshot {
                     pane(snapshot)
                 } else {

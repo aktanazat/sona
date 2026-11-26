@@ -484,7 +484,11 @@ final class AppModel {
     /// the menu bar mark hands it over when it first appears. Observed, so a
     /// reveal the core asked for before then runs again once it can.
     var presentMainWindow: () -> Void = {}
+    @ObservationIgnored var presentItemWindow: (ItemWindow) -> Void = { _ in }
     @ObservationIgnored var mainWindowOpen = false
+    @ObservationIgnored var openWindows = 0
+    /// Notes open in windows of their own, saved before Sona quits.
+    @ObservationIgnored var windowNotes: [ScratchpadStore] = []
     private static let reopenWindowKey = "reopenMainWindow"
 
     init() {
