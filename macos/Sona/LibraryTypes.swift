@@ -499,9 +499,10 @@ struct TrendProjection: Decodable {
 // MARK: - Audio, storage, retention
 
 /// One bounded fragment of a stored recording. The core identifies the media
-/// through the history row and never hands out a path.
+/// through the history row and never hands out a path. The bytes arrive as
+/// base64.
 struct HistoryAudioChunk: Decodable {
-    let bytes: [UInt8]
+    let bytes: Data
     let eof: Bool
 }
 
