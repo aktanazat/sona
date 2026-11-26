@@ -9,6 +9,7 @@ struct SonaWidgets: WidgetBundle {
         RecordMeetingControl()
         RecordingLiveActivity()
         MicrophoneLiveActivityWidget()
+        TodayWidget()
     }
 }
 
@@ -249,5 +250,118 @@ private struct EndMicrophoneButton: View {
         .buttonStyle(.bordered)
         .buttonBorderShape(.capsule)
         .tint(Theme.accent)
+    }
+}
+
+/// Today on the Home Screen and the Lock Screen: what the Mac says needs you, as of the
+/// app's last look at the vault. Task titles are hidden while the iPhone is locked.
+struct TodayWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: WorkTodayGlance.widgetKind, provider: TodayProvider()) { entry in
+            TodayWidgetView(glance: entry.glance)
+                .containerBackground(.fill.tertiary, for: .widget)
+                .widgetURL(WorkTodayGlance.url)
+        }
+        .configurationDisplayName(Text("today.title"))
+        .description(Text("widget.today.description"))
+        .supportedFamilies([.systemSmall, .systemMedium, .accessoryRectangular, .accessoryCircular, .accessoryInline])
+    }
+}
+
+struct TodayGlanceEntry: TimelineEntry {
+    let date: Date
+    let glance: WorkTodayGlance?
+}
+
+/// The app reloads the timeline whenever the Mac's Today changes, so one entry is enough.
+struct TodayProvider: TimelineProvider {
+    private static let sample = WorkTodayGlance(
+        producedAt: .now, dueTitles: ["Send the deck", "Book the room"], dueCount: 2,
+        triageCount: 1, questionCount: 1, inboxCount: 3
+    )
+
+    func placeholder(in context: Context) -> TodayGlanceEntry {
+        TodayGlanceEntry(date: .now, glance: Self.sample)
+    }
+
+    func getSnapshot(in context: Context, completion: @escaping (TodayGlanceEntry) -> Void) {
+        completion(TodayGlanceEntry(date: .now, glance: WorkTodayGlance.load() ?? (context.isPreview ? Self.sample : nil)))
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<TodayGlanceEntry>) -> Void) {
+        completion(Timeline(entries: [TodayGlanceEntry(date: .now, glance: WorkTodayGlance.load())], policy: .never))
+    }
+}
+
+struct TodayWidgetView: View {
+    let glance: WorkTodayGlance?
+    @Environment(\.widgetFamily) private var family
+
+    var body: some View {
+        if let glance {
+            switch family {
+            case .accessoryCircular:
+                ZStack {
+                    AccessoryWidgetBackground()
+                    VStack(spacing: 0) {
+                        Image(systemName: "sun.max")
+                            .font(.caption)
+                        Text(verbatim: "\(glance.decisions + glance.dueCount)")
+                            .font(.title3.weight(.semibold))
+                            .monospacedDigit()
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            case .accessoryInline:
+                Label {
+                    Text(counts(glance))
+                } icon: {
+                    Image(systemName: "sun.max")
+                }
+            case .accessoryRectangular:
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("today.title").font(.headline)
+                    Text(counts(glance)).font(.caption)
+                    if let first = glance.dueTitles.first {
+                        Text(verbatim: first)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .privacySensitive()
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            default:
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("today.title", systemImage: "sun.max")
+                        .font(.headline)
+                        .foregroundStyle(Theme.accent)
+                    Text(counts(glance))
+                        .font(.subheadline.weight(.semibold))
+                    ForEach(Array(glance.dueTitles.prefix(family == .systemSmall ? 2 : WorkTodayGlance.shownTitles).enumerated()), id: \.offset) { _, title in
+                        Text(verbatim: title)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .privacySensitive()
+                    }
+                    Spacer(minLength: 0)
+                    Text(glance.producedAt, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        } else {
+            Text("widget.today.empty")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func counts(_ glance: WorkTodayGlance) -> String {
+        [
+            String(format: NSLocalizedString("widget.today.decide %lld", comment: ""), Int64(glance.decisions)),
+            String(format: NSLocalizedString("widget.today.due %lld", comment: ""), Int64(glance.dueCount)),
+        ].joined(separator: " · ")
     }
 }

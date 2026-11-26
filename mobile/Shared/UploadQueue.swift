@@ -44,6 +44,7 @@ enum QueuedPayload: Codable, Equatable {
     case recording(QueuedRecording)
     case thought(QueuedThought)
     case ask(QueuedAsk)
+    case workAction(WorkActionManifest)
 }
 
 /// One object on its way into the vault.
@@ -73,9 +74,12 @@ struct QueuedObject: Codable, Equatable, Identifiable {
 
     var id: String { objectId }
 
-    var isAsk: Bool {
-        if case .ask = payload { return true }
-        return false
+    /// Someone is waiting on it: a question for the agent, or a decision for the Mac.
+    var isAwaited: Bool {
+        switch payload {
+        case .ask, .workAction: return true
+        case .recording, .thought: return false
+        }
     }
 
     static func nextRetry(in items: [Self], after now: Date) -> Date? {
@@ -199,8 +203,15 @@ actor UploadQueue {
         return item
     }
 
-    /// Try every item that is due, one at a time: questions for the agent first, because
-    /// someone is waiting for their answers, then everything else oldest first.
+    /// Take a decision about the Mac's work.
+    func enqueue(workAction: WorkActionManifest) throws -> QueuedObject {
+        let item = newItem(objectId: randomOpaqueId(), capturedAtUtcMs: workAction.acted_at_utc_ms, payload: .workAction(workAction))
+        try save(item)
+        return item
+    }
+
+    /// Try every item that is due, one at a time: questions for the agent and decisions
+    /// for the Mac first, because someone is waiting on them, then everything else oldest first.
     ///
     /// One pass at a time. A retryable failure ends the pass: the network or the Worker
     /// is unhappy and the remaining items would fail the same way. An upload the Worker
@@ -251,7 +262,7 @@ actor UploadQueue {
             !tried.contains(item.objectId)
                 && ((!item.parked && item.nextAttemptUtcMs <= now) || needsThoughtRestaging(item))
         }
-        return due.first(where: \.isAsk) ?? due.first
+        return due.first(where: \.isAwaited) ?? due.first
     }
 
     /// Take an item back unless it is being sent right now: its commit may already be on
@@ -501,6 +512,7 @@ actor UploadQueue {
         case .recording: return DeviceRecordingObject.sourceFormat
         case .thought: return ThoughtObject.sourceFormat
         case .ask: return AgentAskObject.sourceFormat
+        case .workAction: return WorkActionObject.sourceFormat
         }
     }
 
@@ -511,6 +523,7 @@ actor UploadQueue {
         case .recording: return "device-recording"
         case .thought: return "thought"
         case .ask: return "agent-ask"
+        case .workAction: return "work-action"
         }
     }
 
@@ -520,7 +533,7 @@ actor UploadQueue {
             return DeviceRecordingObject.chunkCount(audioByteLength: recording.audioByteLength)
         case let .thought(thought):
             return ThoughtObject.chunkCount(thought.attachments)
-        case .ask:
+        case .ask, .workAction:
             return 1
         }
     }
@@ -560,6 +573,8 @@ actor UploadQueue {
                     conversationId: ask.conversationId, question: ask.question, recentTurns: ask.recentTurns
                 )
             )
+        case let .workAction(action):
+            return try WorkActionObject.encodeManifest(action)
         }
     }
 
@@ -581,7 +596,7 @@ actor UploadQueue {
                 bytes.append(Data(count: size - bytes.count))
             }
             return bytes
-        case .ask:
+        case .ask, .workAction:
             return Data()
         }
     }

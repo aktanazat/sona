@@ -10,3 +10,6 @@
 "watch.microphoneUnavailable" = "The microphone did not start";
 "a11y.watch.record" = "Start recording";
 "a11y.watch.stop" = "Stop recording";
+"watch.complication" = "Record";
+"watch.complication.description" = "Opens Sona and starts recording.";
+"watch.complication.record" = "Record with Sona";

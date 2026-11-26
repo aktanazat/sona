@@ -174,7 +174,25 @@
 		CA0000000000000000A9E108 /* AgentChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E108 /* AgentChatScreen.swift */; };
 		CC0000000000000000A9E10A /* agent-ask-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E10A /* agent-ask-v1.json */; };
 		CC0000000000000000A9E10B /* agent-reply-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000A9E10B /* agent-reply-v1.json */; };
+		CA0000000000000000ADA001 /* WorkToday.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA001 /* WorkToday.swift */; };
+		CC0000000000000000ADA001 /* WorkToday.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA001 /* WorkToday.swift */; };
+		CE0000000000000000ADA001 /* WorkToday.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA001 /* WorkToday.swift */; };
+		CA0000000000000000ADA002 /* WorkTodayGlance.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA002 /* WorkTodayGlance.swift */; };
+		CC0000000000000000ADA002 /* WorkTodayGlance.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA002 /* WorkTodayGlance.swift */; };
+		CE0000000000000000ADA002 /* WorkTodayGlance.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA002 /* WorkTodayGlance.swift */; };
+		CA0000000000000000ADA003 /* PhoneToday.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA003 /* PhoneToday.swift */; };
+		CC0000000000000000ADA003 /* PhoneToday.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA003 /* PhoneToday.swift */; };
+		CA0000000000000000ADA004 /* TodayScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA004 /* TodayScreen.swift */; };
+		CC0000000000000000ADA005 /* WorkTodayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA005 /* WorkTodayTests.swift */; };
+		CC0000000000000000ADA006 /* work-action-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA006 /* work-action-v1.json */; };
+		CC0000000000000000ADA007 /* work-today-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA007 /* work-today-v1.json */; };
 		CA0000000000000000001DA0 /* Localizable.stringsdict in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000001DA0 /* Localizable.stringsdict */; };
+		CF0000000000000000ADA010 /* SonaWatchWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA010 /* SonaWatchWidgets.swift */; };
+		CF0000000000000000ADA011 /* WatchLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA011 /* WatchLink.swift */; };
+		CB0000000000000000ADA011 /* WatchLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA011 /* WatchLink.swift */; };
+		CF0000000000000000000019 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000019 /* Theme.swift */; };
+		CF0000000000000000000018 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000018 /* Localizable.strings */; };
+		CB0000000000000000ADA012 /* SonaWatchWidgets.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BB0000000000000000ADA012 /* SonaWatchWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -199,6 +217,13 @@
 			remoteGlobalIDString = E00000000000000000000005;
 			remoteInfo = SonaWidgets;
 		};
+		E20000000000000000000004 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E00000000000000000000006;
+			remoteInfo = SonaWatchWidgets;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -219,6 +244,15 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (CA0000000000000000000024 /* SonaKeyboard.appex in Embed App Extensions */, CA000000000000000000004E /* SonaWidgets.appex in Embed App Extensions */, );
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D20000000000000000000004 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (CB0000000000000000ADA012 /* SonaWatchWidgets.appex in Embed App Extensions */, );
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -342,7 +376,18 @@
 		BB0000000000000000A9E108 /* AgentChatScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentChatScreen.swift; sourceTree = "<group>"; };
 		BB0000000000000000A9E10A /* agent-ask-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "agent-ask-v1.json"; sourceTree = "<group>"; };
 		BB0000000000000000A9E10B /* agent-reply-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "agent-reply-v1.json"; sourceTree = "<group>"; };
+		BB0000000000000000ADA001 /* WorkToday.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkToday.swift; sourceTree = "<group>"; };
+		BB0000000000000000ADA002 /* WorkTodayGlance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkTodayGlance.swift; sourceTree = "<group>"; };
+		BB0000000000000000ADA003 /* PhoneToday.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneToday.swift; sourceTree = "<group>"; };
+		BB0000000000000000ADA004 /* TodayScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TodayScreen.swift; sourceTree = "<group>"; };
+		BB0000000000000000ADA005 /* WorkTodayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkTodayTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000ADA006 /* work-action-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "work-action-v1.json"; sourceTree = "<group>"; };
+		BB0000000000000000ADA007 /* work-today-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "work-today-v1.json"; sourceTree = "<group>"; };
 		BB0000000000000000001DA1 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.stringsdict; name = en; path = en.lproj/Localizable.stringsdict; sourceTree = "<group>"; };
+		BB0000000000000000ADA010 /* SonaWatchWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonaWatchWidgets.swift; sourceTree = "<group>"; };
+		BB0000000000000000ADA011 /* WatchLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchLink.swift; sourceTree = "<group>"; };
+		BB0000000000000000ADA012 /* SonaWatchWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SonaWatchWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB0000000000000000ADA013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -374,6 +419,12 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		D50000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D60000000000000000000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = ();
@@ -415,6 +466,7 @@
 				AA0000000000000000000004 /* Shared */,
 				AA0000000000000000000005 /* Sona */,
 				AA0000000000000000000006 /* SonaWatch */,
+				AA0000000000000000ADA020 /* SonaWatchWidgets */,
 				AA0000000000000000000007 /* SonaTests */,
 				AA0000000000000000000009 /* SonaKeyboard */,
 				AA000000000000000000000A /* SonaWidgets */,
@@ -430,6 +482,7 @@
 				BB0000000000000000000015 /* SonaTests.xctest */,
 				BB0000000000000000000024 /* SonaKeyboard.appex */,
 				BB000000000000000000004E /* SonaWidgets.appex */,
+				BB0000000000000000ADA012 /* SonaWatchWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -442,6 +495,8 @@
 				BB0000000000000000000031 /* CardObject.swift */,
 				BB0000000000000000000032 /* VaultReader.swift */,
 				BB0000000000000000000048 /* PortableMemoryIndex.swift */,
+				BB0000000000000000ADA001 /* WorkToday.swift */,
+				BB0000000000000000ADA002 /* WorkTodayGlance.swift */,
 				BB0000000000000000000001 /* CanonicalRecord.swift */,
 				BB0000000000000000000002 /* SonaCrypto.swift */,
 				BB0000000000000000000003 /* DeviceRecordingObject.swift */,
@@ -501,6 +556,8 @@
 				BB0000000000000000A9E104 /* MicrophoneChoice.swift */,
 				BB0000000000000000A9E105 /* DictationStats.swift */,
 				BB0000000000000000A9E107 /* PhoneAgentChat.swift */,
+				BB0000000000000000ADA003 /* PhoneToday.swift */,
+				BB0000000000000000ADA004 /* TodayScreen.swift */,
 				BB0000000000000000A9E108 /* AgentChatScreen.swift */,
 				BB0000000000000000000040 /* PhoneCallsScreen.swift */,
 				BB0000000000000000000042 /* Assets.xcassets */,
@@ -514,10 +571,20 @@
 			children = (
 				BB000000000000000000000E /* SonaWatchApp.swift */,
 				BB000000000000000000000F /* WatchRecorder.swift */,
+				BB0000000000000000ADA011 /* WatchLink.swift */,
 				BB0000000000000000000018 /* Localizable.strings */,
 				BB0000000000000000000043 /* Assets.xcassets */,
 			);
 			path = SonaWatch;
+			sourceTree = "<group>";
+		};
+		AA0000000000000000ADA020 /* SonaWatchWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000ADA010 /* SonaWatchWidgets.swift */,
+				BB0000000000000000ADA013 /* Info.plist */,
+			);
+			path = SonaWatchWidgets;
 			sourceTree = "<group>";
 		};
 		AA0000000000000000000007 /* SonaTests */ = {
@@ -528,6 +595,7 @@
 				BB0000000000000000000036 /* BoardIndexTests.swift */,
 				BB0000000000000000000037 /* UploadQueueTests.swift */,
 				BB0000000000000000A9E109 /* PhoneAgentTests.swift */,
+				BB0000000000000000ADA005 /* WorkTodayTests.swift */,
 				BB0000000000000000A9E10C /* OutboxDrainTests.swift */,
 				BB0000000000000000000010 /* CryptoVectorTests.swift */,
 				BB0000000000000000000011 /* DeviceRecordingTests.swift */,
@@ -555,6 +623,8 @@
 				BB0000000000000000000012 /* crypto-v1.json */,
 				BB0000000000000000A9E10A /* agent-ask-v1.json */,
 				BB0000000000000000A9E10B /* agent-reply-v1.json */,
+				BB0000000000000000ADA006 /* work-action-v1.json */,
+				BB0000000000000000ADA007 /* work-today-v1.json */,
 			);
 			path = Fixtures;
 			sourceTree = "<group>";
@@ -629,10 +699,12 @@
 				D20000000000000000000001 /* Sources */,
 				D20000000000000000000003 /* Frameworks */,
 				D20000000000000000000002 /* Resources */,
+				D20000000000000000000004 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				E10000000000000000000004 /* PBXTargetDependency */,
 			);
 			name = "Sona Watch";
 			productName = "Sona Watch";
@@ -686,6 +758,21 @@
 			productReference = BB000000000000000000004E /* SonaWidgets.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		E00000000000000000000006 /* SonaWatchWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F00000000000000000000007 /* Build configuration list for PBXNativeTarget "SonaWatchWidgets" */;
+			buildPhases = (
+				D60000000000000000000001 /* Sources */,
+				D60000000000000000000002 /* Frameworks */,
+				D60000000000000000000003 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = SonaWatchWidgets;
+			productName = SonaWatchWidgets;
+			productReference = BB0000000000000000ADA012 /* SonaWatchWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -730,6 +817,7 @@
 				E00000000000000000000003 /* SonaTests */,
 				E00000000000000000000004 /* SonaKeyboard */,
 				E00000000000000000000005 /* SonaWidgets */,
+				E00000000000000000000006 /* SonaWatchWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -764,6 +852,8 @@
 				CC0000000000000000000096 /* emoji.tsv in Resources */,
 				CC0000000000000000A9E10A /* agent-ask-v1.json in Resources */,
 				CC0000000000000000A9E10B /* agent-reply-v1.json in Resources */,
+				CC0000000000000000ADA006 /* work-action-v1.json in Resources */,
+				CC0000000000000000ADA007 /* work-today-v1.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -777,6 +867,12 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (CE0000000000000000000017 /* Localizable.strings in Resources */, );
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D60000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (CF0000000000000000000018 /* Localizable.strings in Resources */, );
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
@@ -840,6 +936,10 @@
 				CA0000000000000000A9E105 /* DictationStats.swift in Sources */,
 				CA0000000000000000A9E106 /* AgentAsk.swift in Sources */,
 				CA0000000000000000A9E107 /* PhoneAgentChat.swift in Sources */,
+				CA0000000000000000ADA001 /* WorkToday.swift in Sources */,
+				CA0000000000000000ADA002 /* WorkTodayGlance.swift in Sources */,
+				CA0000000000000000ADA003 /* PhoneToday.swift in Sources */,
+				CA0000000000000000ADA004 /* TodayScreen.swift in Sources */,
 				CA0000000000000000A9E108 /* AgentChatScreen.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -851,6 +951,7 @@
 				CB000000000000000000000E /* SonaWatchApp.swift in Sources */,
 				CB000000000000000000000F /* WatchRecorder.swift in Sources */,
 				CB0000000000000000000019 /* Theme.swift in Sources */,
+				CB0000000000000000ADA011 /* WatchLink.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -916,6 +1017,10 @@
 				CC0000000000000000000045 /* DictationDeliveryTests.swift in Sources */,
 				CC0000000000000000A9E106 /* AgentAsk.swift in Sources */,
 				CC0000000000000000A9E107 /* PhoneAgentChat.swift in Sources */,
+				CC0000000000000000ADA001 /* WorkToday.swift in Sources */,
+				CC0000000000000000ADA002 /* WorkTodayGlance.swift in Sources */,
+				CC0000000000000000ADA003 /* PhoneToday.swift in Sources */,
+				CC0000000000000000ADA005 /* WorkTodayTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -958,11 +1063,23 @@
 			files = (
 				CE0000000000000000000019 /* Theme.swift in Sources */,
 				CE0000000000000000000020 /* KeyboardDraft.swift in Sources */,
+				CE0000000000000000ADA001 /* WorkToday.swift in Sources */,
+				CE0000000000000000ADA002 /* WorkTodayGlance.swift in Sources */,
 				CE000000000000000000004A /* RecordingActivity.swift in Sources */,
 				CE000000000000000000004B /* RecordingIntents.swift in Sources */,
 				CE0000000000000000A9E101 /* MicrophoneSessionActivity.swift in Sources */,
 				CE000000000000000000004C /* SonaWidgets.swift in Sources */,
 				CE0000000000000000000038 /* KeyboardSession.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CF0000000000000000ADA010 /* SonaWatchWidgets.swift in Sources */,
+				CF0000000000000000ADA011 /* WatchLink.swift in Sources */,
+				CF0000000000000000000019 /* Theme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -983,6 +1100,11 @@
 			isa = PBXTargetDependency;
 			target = E00000000000000000000005 /* SonaWidgets */;
 			targetProxy = E20000000000000000000003 /* PBXContainerItemProxy */;
+		};
+		E10000000000000000000004 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E00000000000000000000006 /* SonaWatchWidgets */;
+			targetProxy = E20000000000000000000004 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1255,6 +1377,48 @@
 			};
 			name = Release;
 		};
+		F1000000000000000000000D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AAVB324H37;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SonaWatchWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Sona;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aktanazat.sona.mobile.watchkitapp.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		F1000000000000000000000E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AAVB324H37;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SonaWatchWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Sona;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aktanazat.sona.mobile.watchkitapp.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1308,6 +1472,15 @@
 			buildConfigurations = (
 				F1000000000000000000000B /* Debug */,
 				F1000000000000000000000C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F00000000000000000000007 /* Build configuration list for PBXNativeTarget "SonaWatchWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F1000000000000000000000D /* Debug */,
+				F1000000000000000000000E /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

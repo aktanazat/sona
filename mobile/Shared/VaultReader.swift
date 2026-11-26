@@ -8,6 +8,7 @@ enum BoardObject: Codable, Equatable {
     case meeting(PhoneMeeting)
     case memoryIndex(PortableMemoryIndex)
     case agentReply(AgentReplyManifest)
+    case workToday(WorkToday)
     /// A recording or a format this build does not know.
     case other
 }
@@ -70,6 +71,16 @@ struct BoardIndex: Codable, Equatable {
         heads.compactMap { id, head -> (Int64, String, PortableMemoryIndex)? in
             guard case .memoryIndex(let snapshot) = head.object, let sequence = head.sequence else { return nil }
             return (sequence, id, snapshot)
+        }.max {
+            $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0
+        }?.2
+    }
+
+    /// The newest snapshot of a Mac's work for today.
+    var workToday: WorkToday? {
+        heads.compactMap { id, head -> (Int64, String, WorkToday)? in
+            guard case .workToday(let today) = head.object, let sequence = head.sequence else { return nil }
+            return (sequence, id, today)
         }.max {
             $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0
         }?.2
@@ -428,7 +439,7 @@ actor VaultReader {
             return (envelope.chunkCount, .agentReply(reply))
         }
         for format in [DictationProfile.sourceFormat, PhoneMeeting.sourceFormat, PhoneMeeting.phoneSourceFormat,
-                       PortableMemoryIndex.sourceFormat] {
+                       PortableMemoryIndex.sourceFormat, WorkToday.sourceFormat] {
             guard let manifestBytes = open(format) else { continue }
             let manifest = try decoder.decode(PhoneObjectManifest.self, from: manifestBytes)
             guard manifest.version == 1, manifest.source_format == format,
@@ -463,6 +474,11 @@ actor VaultReader {
             }
             if format == PortableMemoryIndex.sourceFormat {
                 return (envelope.chunkCount, .memoryIndex(try decoder.decode(PortableMemoryIndex.self, from: plaintext)))
+            }
+            if format == WorkToday.sourceFormat {
+                let today = try decoder.decode(WorkToday.self, from: plaintext)
+                guard today.format_version == 1, today.kind == WorkToday.kind else { throw VaultReaderError.integrity }
+                return (envelope.chunkCount, .workToday(today))
             }
             let meeting = try decoder.decode(PhoneMeeting.self, from: plaintext)
             guard meeting.format_version == 1 else { throw VaultReaderError.integrity }

@@ -23,6 +23,9 @@ struct BoardScreen: View {
                 .sheet(isPresented: $showsPairing.yielding(to: model)) {
                     PairingScreen(model: model)
                 }
+                .navigationDestination(isPresented: $model.showsToday) {
+                    TodayScreen(model: model, today: model.today)
+                }
                 .task { await model.refreshBoard() }
         }
         .tint(Theme.accent)
@@ -35,6 +38,12 @@ struct BoardScreen: View {
         let sections = model.board?.sections() ?? []
         if sizeClass == .regular {
             ScrollView {
+                if model.board?.workToday != nil {
+                    TodayEntry(model: model)
+                        .padding(16)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+                        .padding(.bottom, 16)
+                }
                 if sections.isEmpty {
                     empty
                 } else {
@@ -60,6 +69,12 @@ struct BoardScreen: View {
             .contentMargins(Theme.pageInset, for: .scrollContent)
         } else {
             List {
+                if model.board?.workToday != nil {
+                    Section {
+                        TodayEntry(model: model)
+                            .listRowBackground(Theme.surface)
+                    }
+                }
                 if sections.isEmpty {
                     empty
                         .listRowBackground(Color.clear)

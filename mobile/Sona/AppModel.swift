@@ -9,6 +9,7 @@ import SwiftUI
 import UIKit
 import UserNotifications
 import WatchConnectivity
+import WidgetKit
 
 /// What the one status line has to be able to say about the outbox.
 enum OutboxState: Equatable {
@@ -112,6 +113,12 @@ final class AppModel: NSObject, ObservableObject {
     @Published var showsChat = false
     /// The conversation a notification or the Action Button asked the chat to show.
     @Published var chatConversation: UUID?
+    /// The Mac's Today, and the decisions on their way to it.
+    private(set) lazy var today = PhoneToday(
+        transport: self, file: AppModel.supportDirectory("today").appending(path: "decisions.json")
+    )
+    /// The Board opens Today when a widget or a link asks.
+    @Published var showsToday = false
 
     private var recordingAfterCall = false
     private let queue: UploadQueue
@@ -234,6 +241,7 @@ final class AppModel: NSObject, ObservableObject {
 
     func handle(_ url: URL) {
         if url == DictationLink.askURL { openChat(nil); return }
+        if url == WorkTodayGlance.url { page = .board; showsToday = true; return }
         if DictationLink.opens(url) { page = .dictation }
         if url == DictationLink.meetingURL { page = .recording }
         pendingURL = url
@@ -1008,6 +1016,36 @@ final class AppModel: NSObject, ObservableObject {
             board = try await reader.sync()
             adopt(board?.dictationProfile ?? .empty)
             boardState = .idle
+            await settleToday()
+        } catch {
+            boardState = .offline
+        }
+    }
+
+    /// Reads what the Mac's newest Today says about the decisions on their way, and hands
+    /// the widgets a fresh copy when it changed.
+    func settleToday() async {
+        let snapshot = board?.workToday
+        await today.reconcile(snapshot)
+        let glance = snapshot.map(WorkTodayGlance.init)
+        guard glance != WorkTodayGlance.load() else { return }
+        if let glance { try? glance.save() } else { WorkTodayGlance.remove() }
+        WidgetCenter.shared.reloadTimelines(ofKind: WorkTodayGlance.widgetKind)
+    }
+
+    /// Sends one decision about the Mac's work and starts it on its way.
+    func decide(
+        _ action: WorkActionManifest.Action, row: String, title: String, taskId: String? = nil,
+        expectedRevision: Int64? = nil, noticeIds: [String] = [], sessionId: String? = nil,
+        body: String? = nil, value: String? = nil
+    ) async {
+        guard let snapshot = board?.workToday else { return }
+        do {
+            try await today.decide(
+                action, row: row, title: title, in: snapshot, deviceId: deviceId,
+                taskId: taskId, expectedRevision: expectedRevision, noticeIds: noticeIds,
+                sessionId: sessionId, body: body, value: value
+            )
         } catch {
             boardState = .offline
         }
@@ -1086,6 +1124,20 @@ final class AppModel: NSObject, ObservableObject {
         formatter.timeStyle = .short
         let stamp = formatter.string(from: Date(timeIntervalSince1970: Double(utcMs) / 1000))
         return "\(prefix) \(stamp)"
+    }
+}
+
+extension AppModel: TodayTransport {
+    func send(_ action: WorkActionManifest) async throws -> String {
+        guard isPaired else { throw UploadQueueError.notPaired }
+        let item = try await queue.enqueue(workAction: action)
+        Task { await drain() }
+        return item.objectId
+    }
+
+    func deleteObject(_ objectId: String) async throws {
+        try await reader.deleteAgentObject(objectId)
+        board = await reader.current()
     }
 }
 

@@ -7,6 +7,9 @@ struct SonaWatchApp: App {
     var body: some Scene {
         WindowGroup {
             WatchRecordingView(recorder: recorder)
+                .onOpenURL { url in
+                    if url == WatchLink.record, !recorder.isRecording { recorder.toggle() }
+                }
         }
     }
 }
