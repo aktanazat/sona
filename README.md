@@ -11,7 +11,7 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 - Local Whisper-family GGUF and ONNX transcription models.
 - Per-mode recognition, context, prompt, delivery, and shortcut settings. Tone choices include Very casual and Excited in Settings > Modes > Advanced.
 - Dictate into a new note with Control-Option-Shift-N, configurable in Settings > Essentials. The active mode's cleanup still applies, but Sona does not capture screen context or paste into another app. A conflicting shortcut stays unassigned. If saving fails, the words stay in an unsaved note with a retry button, even when dictation history is off.
-- Spoken edits ("scratch that", "make that a list", "quote that") and a "Sona," cue that turns the end of a dictation into an instruction for the mode's AI cleanup.
+- Spoken edits ("scratch that", "make that a list", "quote that") and a "Sona," cue that turns the end of a dictation into an instruction for the mode's AI cleanup. Saying the name of a saved prompt marked as a skill ("Sona, standup.") uses that skill's instructions; the command shortcut does the same.
 - Optional cloud transcription with a user-provided provider key and explicit consent.
 - AI cleanup on Apple Intelligence or a provider you configure: OpenAI, OpenRouter, Anthropic, Groq, Cerebras, or any OpenAI-compatible server. English dictation also offers a downloadable offline model on this Mac, with download progress, cancellation, retry, and removal in Settings > Providers. It supports light punctuation and filler removal, not custom tones or spoken instructions; an incomplete rewrite or a change to words or numbers keeps the original text.
 - Searchable local history with delivery receipts and retained recordings.

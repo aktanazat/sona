@@ -374,7 +374,8 @@ fn route(command: &CommandPlan, instruction: &str) -> CommandRoute {
 /// Carries out the spoken words of one command run and returns what delivery
 /// should type. An empty `final_text` tells the caller to dispatch nothing,
 /// which is the only non-destructive answer when the words were a question or
-/// the rewrite could not be performed.
+/// the rewrite could not be performed. Words that are a saved skill's name
+/// stand for that skill's instructions.
 pub(crate) async fn process_command(
     app: &AppHandle,
     run: &RunPlan,
@@ -382,6 +383,11 @@ pub(crate) async fn process_command(
     instruction: &str,
     language: &str,
 ) -> ProcessedTranscription {
+    let skill = app
+        .state::<std::sync::Arc<crate::meeting::session::MeetingSessionManager>>()
+        .spoken_skill(instruction)
+        .await;
+    let instruction = skill.as_deref().unwrap_or(instruction);
     match route(command, instruction) {
         CommandRoute::Rewrite => rewrite_selection(app, run, command, instruction, language).await,
         CommandRoute::Answer => answer_in_chat(app, run, command, instruction, language).await,

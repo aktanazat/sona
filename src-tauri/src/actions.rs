@@ -1938,12 +1938,22 @@ pub(crate) async fn process_transcription_output(
         //
         // The instruction replaces this run's preset rewrite rather than adding
         // a second provider call: an explicit request outranks the mode's
-        // standing one, and two rewrites would fight over the same text.
-        let spoken = if run.prompt().spoken_instructions {
+        // standing one, and two rewrites would fight over the same text. A
+        // request that is a saved skill's name asks for that skill's words.
+        let mut spoken = if run.prompt().spoken_instructions {
             crate::audio_toolkit::split_spoken_instruction(&final_text)
         } else {
             None
         };
+        if let Some(spoken) = &mut spoken {
+            if let Some(skill) = app
+                .state::<Arc<crate::meeting::session::MeetingSessionManager>>()
+                .spoken_skill(&spoken.instruction)
+                .await
+            {
+                spoken.instruction = skill;
+            }
+        }
         if let Some(spoken) = &spoken {
             final_text = spoken.text.clone();
             post_processed_text = Some(final_text.clone());
